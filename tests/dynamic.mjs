@@ -1,0 +1,60 @@
+import assert from 'node:assert/strict';
+import { createDynamicStore } from '../src/dynamic.js';
+
+const saved = new Map();
+const storage = { getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value) };
+let store = createDynamicStore(storage);
+const scope = 'global';
+const rows = [{id:'a'}, {id:'b'}, {id:'c'}];
+const order = (group = 'default') => store.rows(scope, rows, group).map(row => row.id).join(',');
+
+store.ensure(scope, ['a','b']);
+assert.equal(order(), 'a,b,c');
+store.ensure(scope, ['b','c','a']);
+assert.equal(order(), 'c,a,b', 'new chats enter ALL at the top without reordering existing chats');
+
+const research = store.create(scope, 'Research');
+const review = store.create(scope, 'Review');
+store.copy(scope, 'a', research);
+store.copy(scope, 'a', review);
+assert.deepEqual(store.groupsOf(scope, 'a'), [research, review], 'a chat can be copied to multiple custom groups');
+store.copy(scope, 'b', research, 'a');
+assert.equal(order(research), 'b,a');
+assert.equal(order(review), 'a', 'custom groups keep independent manual order');
+store.move(scope, 'b', review, 'a', research);
+assert.equal(order(research), 'a');
+assert.equal(order(review), 'b,a');
+
+store.toggle(scope, review);
+assert.equal(store.collapsed(scope, review), true);
+store.moveGroup(scope, review, research);
+assert.equal(store.groups(scope)[1].id, review);
+assert.equal(store.groups(scope)[0].name, 'ALL');
+store.rename(scope, review, '评审 <b>');
+store = createDynamicStore(storage);
+assert.equal(store.groups(scope)[1].name, '评审 <b>');
+assert.equal(store.collapsed(scope, review), true);
+assert.equal(order(review), 'b,a');
+store.remove(scope, research);
+assert.deepEqual(store.groupsOf(scope, 'a'), [review]);
+assert.equal(store.rows(scope, rows, 'default').length, 3, 'ALL remains derived from every chat');
+store.remove(scope, 'default');
+assert.equal(store.groups(scope)[0].name, 'ALL');
+assert.equal(store.create(scope, 'ALL'), null);
+assert.equal(store.create(scope, '   '), null);
+const parent = store.create(scope, 'Parent');
+const child = store.create(scope, 'Child', 'Parent');
+assert.equal(store.groups(scope).find(group => group.id === child).name, 'Parent/Child');
+assert.equal(store.rename(scope, parent, 'Renamed'), true);
+assert.equal(store.groups(scope).find(group => group.id === child).name, 'Renamed/Child', 'renaming a group moves its descendants');
+store.remove(scope,parent);
+assert.ok(!store.groups(scope).some(group => group.id === parent || group.id === child),'removing a parent removes descendants');
+const snapshot = store.snapshot();
+const restored = createDynamicStore({getItem:()=>null,setItem(){}});
+assert.equal(restored.replace(snapshot), true, 'a native layout can restore dynamic state');
+assert.equal(restored.groups(scope)[1].name, '评审 <b>');
+assert.equal(restored.replace({}), false, 'invalid dynamic state is ignored');
+
+const broken = createDynamicStore({getItem:()=>'{broken',setItem(){}});
+assert.equal(broken.groups('global')[0].name,'ALL');
+console.log('Dynamic checks passed: fixed ALL, multi-group copies, independent order, restart and deletion.');

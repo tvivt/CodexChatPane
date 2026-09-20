@@ -1,0 +1,9 @@
+node_modules/
+dist/
+src-tauri/target/
+.runtime/
+.codegraph/
+src-tauri/gen/
+*.log
+config/settings.toml
+config/folders.json
