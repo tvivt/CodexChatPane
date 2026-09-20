@@ -1,4 +1,11 @@
-const key = 'codex-chat-pane.language';
+for (const suffix of ['preferences-v1', 'folders-v1', 'dynamic-v1', 'language', 'codex-mcp-consent']) {
+  try {
+    const oldValue = localStorage.getItem(`codex-chat-pane.${suffix}`);
+    const newKey = `CodexChatPane.${suffix}`;
+    if (oldValue !== null && localStorage.getItem(newKey) === null) localStorage.setItem(newKey, oldValue);
+  } catch { /* Keep the old value intact if storage is unavailable. */ }
+}
+const key = 'CodexChatPane.language';
 let current = 'zh';
 let persistLanguage = true;
 try { if (localStorage.getItem(key) === 'en') current = 'en'; } catch {}
@@ -11,7 +18,7 @@ export function setLanguage(value) {
 
 const english = {
   '执行: ': 'Run: ', '对话: ': 'Sent: ', '联动暂不可用': 'Linking disabled', '展开／收拢右栏': 'Toggle right pane',
-  '按项目排序': 'Sort by project', '按项目过滤': 'Filter by project', '全部项目': 'All projects', '最近天数': 'Recent days', '同步失败': 'Sync failed', '同步正常': 'Synced', '更新中': 'Updating', '最近同步: ': 'Last sync: ',
+  '按项目排序': 'Sort by project', '按项目过滤': 'Filter by project', '全部项目': 'All projects', '最近天数': 'Recent days', '按最近 ': 'Filter by the last ', ' 天过滤；0 天仅显示手动加入。': ' days; 0 days shows manually included chats only.', '同步失败': 'Sync failed', '同步正常': 'Synced', '更新中': 'Updating', '最近同步: ': 'Last sync: ',
   '读取输出中…': 'Loading output…', '本轮暂无输出': 'No output in this turn yet', '选择项目': 'Choose project', '取消': 'Cancel', '清除': 'Clear', '已选择': 'selected',
   '在 Codex 打开': 'Open in Codex', '重命名对话': 'Rename chat', 'Pin': 'Pin', '取消 Pin': 'Unpin', '恢复归档': 'Restore chat', '已请求 Codex 执行操作': 'Requested Codex action', '桌面运行时不可用': 'Desktop runtime unavailable', '打开项目目录': 'Open project directory', '打开项目文件夹': 'Open project folder', '组内移到顶部': 'Move to group top', '组内移到底部': 'Move to group bottom',
   'Codex MCP 操作': 'Codex MCP actions', 'CodexChatPane 将通过 Codex 桌面版内部 MCP 修改对话名称、Pin 和归档状态。该接口未公开，Codex 更新后可能暂时失效。是否启用？': 'CodexChatPane will use an internal Codex Desktop MCP to rename, pin, and archive chats. This interface is unpublished and may temporarily break after a Codex update. Enable it?',
@@ -55,7 +62,7 @@ const english = {
   ' 个错误待查看': ' errors to review', '错误已查看': 'Error reviewed', ' 个对话工作中': ' chats working',
   ' 个已完成对话待查看': ' completed chats to review', ' 个错误对话': ' chats with errors',
   '收拢': 'Collapse ', '展开': 'Expand ', '工作中 · 已执行 ': 'Working · elapsed ', '工作中': 'Working',
-  '额度耗尽': 'Usage limit reached', '提示词被拒绝': 'Prompt rejected', '网络 / 连接失败': 'Network / connection failure',
+  '额度耗尽': 'Usage limit reached', '提示词被拒绝': 'Prompt rejected', '网络 / 连接失败': 'Network / connection failure', '连接重试': 'Connection retry',
   '网络异常，重试中': 'Network issue, retrying', '疑似无响应': 'Possibly unresponsive', '其他错误': 'Other error',
   '无法请求 Codex 打开对话': 'Could not ask Codex to open the chat', '重试：': 'Retry: ', '已等待：': 'Waiting: ',
   '重置：': 'Reset: ', '记录时间：': 'Recorded: ', '来源：': 'Source: ', '完成待查看': 'Completed, unread',

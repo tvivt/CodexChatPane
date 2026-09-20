@@ -142,15 +142,33 @@ fn normalize_tool_config(mut config: ToolConfig) -> Result<ToolConfig, String> {
     Ok(config)
 }
 
-fn tracked_config_path(name: &str) -> Result<std::path::PathBuf, String> {
+fn legacy_config_path(name: &str) -> Result<std::path::PathBuf, String> {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(|root| root.join("config").join(name))
         .ok_or_else(|| "项目配置目录无效".into())
 }
 
-fn tool_config_path(_: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    tracked_config_path("settings.toml")
+fn app_config_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    let path = directory.join(name);
+    if path.exists() {
+        return Ok(path);
+    }
+
+    let legacy = legacy_config_path(name)?;
+    if legacy.exists() {
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        fs::copy(&legacy, &path).map_err(|error| error.to_string())?;
+    }
+    Ok(path)
+}
+
+fn tool_config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app_config_path(app, "settings.toml")
 }
 
 fn read_tool_config(app: &tauri::AppHandle) -> Result<Option<ToolConfig>, String> {
@@ -506,8 +524,8 @@ fn request_close(window: tauri::Window) -> Result<&'static str, String> {
     Ok(handle_close_request(&window))
 }
 
-fn folder_layout_path(_: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    tracked_config_path("folders.json")
+fn folder_layout_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app_config_path(app, "folders.json")
 }
 
 #[tauri::command]
@@ -582,7 +600,7 @@ fn unwrap_storage_field(
 ) -> Result<Option<serde_json::Value>, String> {
     match data.get(key) {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(raw)) if key == "codex-chat-pane.language" => {
+        Some(serde_json::Value::String(raw)) if key == "CodexChatPane.language" => {
             Ok(Some(serde_json::Value::String(raw.clone())))
         }
         Some(serde_json::Value::String(raw)) => serde_json::from_str(raw)
@@ -607,16 +625,16 @@ fn normalize_export_json(value: serde_json::Value) -> Result<serde_json::Value, 
             .and_then(|item| item.as_u64())
             .unwrap_or(1)),
     );
-    if let Some(language) = unwrap_storage_field(data, "codex-chat-pane.language")? {
+    if let Some(language) = unwrap_storage_field(data, "CodexChatPane.language")? {
         document.insert("language".into(), language);
     }
-    if let Some(preferences) = unwrap_storage_field(data, "codex-chat-pane.preferences-v1")? {
+    if let Some(preferences) = unwrap_storage_field(data, "CodexChatPane.preferences-v1")? {
         document.insert("preferences".into(), preferences);
     }
-    if let Some(folders) = unwrap_storage_field(data, "codex-chat-pane.folders-v1")? {
+    if let Some(folders) = unwrap_storage_field(data, "CodexChatPane.folders-v1")? {
         document.insert("folders".into(), folders);
     }
-    if let Some(dynamic) = unwrap_storage_field(data, "codex-chat-pane.dynamic-v1")? {
+    if let Some(dynamic) = unwrap_storage_field(data, "CodexChatPane.dynamic-v1")? {
         document.insert("dynamic".into(), dynamic);
     }
     Ok(serde_json::Value::Object(document))
@@ -974,7 +992,7 @@ mod tests {
         assert!(toml.contains("language = \"zh\""));
         assert!(toml.contains("[folders]"));
         assert!(toml.contains("[[folders.projects]]") || toml.contains("Alpha"));
-        assert!(!toml.contains("codex-chat-pane.folders-v1"));
+        assert!(!toml.contains("CodexChatPane.folders-v1"));
         assert!(!toml.contains("auto:"));
         let parsed = parse_exported_contents(&toml).unwrap();
         assert_eq!(parsed["language"], "zh");
@@ -989,8 +1007,8 @@ mod tests {
         let legacy = serde_json::json!({
             "version": 1,
             "data": {
-                "codex-chat-pane.language": "en",
-                "codex-chat-pane.folders-v1": "{\"localProjectFolders\":[\"Beta\"]}"
+                "CodexChatPane.language": "en",
+                "CodexChatPane.folders-v1": "{\"localProjectFolders\":[\"Beta\"]}"
             }
         });
         let parsed = parse_exported_contents(&legacy.to_string()).unwrap();

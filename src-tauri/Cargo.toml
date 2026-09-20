@@ -1,9 +1,13 @@
 [package]
-name = "codex-chat-pane"
+name = "CodexChatPane"
 version = "0.1.0"
 description = "Codex project and chat side panel"
 authors = ["CodexChatPane contributors"]
 edition = "2021"
+
+[[bin]]
+name = "CodexChatPane"
+path = "src/main.rs"
 
 [lib]
 name = "codex_chat_pane_lib"

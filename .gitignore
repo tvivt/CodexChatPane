@@ -7,3 +7,4 @@ src-tauri/gen/
 *.log
 config/settings.toml
 config/folders.json
+/.release-notes/

@@ -108,14 +108,14 @@ const state = {
   chatSelectionAnchor: ''
 };
 
-const PREFERENCES_KEY = 'codex-chat-pane.preferences-v1';
+const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
 const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'chatsLowerPanel', 'projectArchiveOpen', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
 for (const field of browserPreferenceFields) {
   const value = savedPreferences[field];
-  if (typeof value === typeof state[field] && (typeof value !== 'number' || Number.isFinite(value) && value > 0)) state[field] = value;
+  if (typeof value === typeof state[field] && (typeof value !== 'number' || Number.isFinite(value) && value >= 0)) state[field] = value;
 }
 if (typeof savedPreferences.dynamicProjectSort === 'boolean') state.dynamicProjectSort = savedPreferences.dynamicProjectSort ? 'asc' : 'off';
 if (typeof savedPreferences.chatProjectFilter === 'string') state.chatProjectFilter = savedPreferences.chatProjectFilter ? [savedPreferences.chatProjectFilter] : [];
@@ -134,7 +134,7 @@ if (!['off','asc','desc'].includes(state.dynamicProjectSort)) state.dynamicProje
 if (!['off','asc','desc'].includes(state.recentProjectSort)) state.recentProjectSort = 'off';
 if (!['off','asc','desc'].includes(state.nameSort)) state.nameSort = 'off';
 if (!['off','asc','desc'].includes(state.projectNameSort)) state.projectNameSort = 'off';
-state.chatDays = Math.max(1, Math.min(365, Math.round(state.chatDays)));
+state.chatDays = Math.max(0, Math.min(365, Math.round(state.chatDays)));
 const preferenceValue = field => state[field] instanceof Set ? [...state[field]].filter(value => field !== 'openChatFolders' || !String(value).startsWith('auto:')) : state[field];
 const savePreferences = () => localStorage.setItem(PREFERENCES_KEY, JSON.stringify(Object.fromEntries((nativeInvoke ? preferenceFields : browserPreferenceFields).map(field => [field, preferenceValue(field)]))));
 const previewLog = (event, fields = {}) => {
@@ -150,8 +150,8 @@ const previewEventTarget = target => {
   return `${element.tagName?.toLowerCase() || 'node'}${element.id ? `#${element.id}` : ''}${classes ? `.${classes}` : ''}${action ? ` action=${action}` : ''}`;
 };
 state.chatTimelineLinked = state.globalTimelineLinked = false;
-const FOLDERS_KEY = 'codex-chat-pane.folders-v1';
-const DYNAMIC_KEY = 'codex-chat-pane.dynamic-v1';
+const FOLDERS_KEY = 'CodexChatPane.folders-v1';
+const DYNAMIC_KEY = 'CodexChatPane.dynamic-v1';
 let folderPreferences = {};
 try { folderPreferences = JSON.parse(localStorage.getItem(FOLDERS_KEY) || '{}') || {}; } catch {}
 for (const field of ['localProjectFolders', 'localChatFolders', 'recentIncludedChatIds', 'recentExcludedChatIds', 'recycledChatFolders', 'starredProjectIds']) {
@@ -213,7 +213,7 @@ function bootstrapActivityOrder() {
   }
 }
 
-const CODEX_MCP_CONSENT_KEY = 'codex-chat-pane.codex-mcp-consent';
+const CODEX_MCP_CONSENT_KEY = 'CodexChatPane.codex-mcp-consent';
 const legacyMcpConsent = localStorage.getItem(CODEX_MCP_CONSENT_KEY);
 let codexMcpEnabled = nativeInvoke ? null : legacyMcpConsent === 'enabled';
 let nativeConfigLoaded = false;
@@ -274,7 +274,7 @@ async function loadToolConfig() {
       if (!isPreviewWindow) await saveToolConfig();
     } else codexMcpEnabled = null;
     if (legacyMcpConsent !== null) localStorage.removeItem?.(CODEX_MCP_CONSENT_KEY);
-    localStorage.removeItem?.('codex-chat-pane.language');
+    localStorage.removeItem?.('CodexChatPane.language');
     if (!config && !isPreviewWindow) await saveToolConfig();
     if (!isPreviewWindow) await nativeInvoke('set_window_mode',{mode:state.windowMode});
     applyFontSize();
@@ -1124,8 +1124,9 @@ document.addEventListener("mousedown", event => {
 });
 
 function projectRecentBaseChats() {
+  const manualOnly = state.chatDays === 0;
   const cutoff = Date.now() - state.chatDays * 86400000;
-  return chats.filter(chat => !effectiveReasons(chat).length && !state.recentExcludedChatIds.has(chat.id) && (chat.timelineAt >= cutoff || state.recentIncludedChatIds.has(chat.id)));
+  return chats.filter(chat => !effectiveReasons(chat).length && !state.recentExcludedChatIds.has(chat.id) && (manualOnly ? state.recentIncludedChatIds.has(chat.id) : chat.timelineAt >= cutoff || state.recentIncludedChatIds.has(chat.id)));
 }
 function recentProjectOptions() {
   const ids = new Set(projectRecentBaseChats().map(chat => chat.projectId));
@@ -1140,7 +1141,8 @@ function projectRecentListMarkup(rows = projectRecentChats()) {
   return projectSortedChatMarkup(rows, 'recentProjectSort', chat => globalChatRow(chat, '', '', true, false)) || ui`<div class="empty-state">${t('没有对话')}</div>`;
 }
 function setChatDays(value) {
-  state.chatDays = Math.max(1, Math.min(365, Number(value) || 3));
+  const days = Number(value);
+  state.chatDays = String(value).trim() === '' || !Number.isFinite(days) ? 3 : Math.max(0, Math.min(365, Math.round(days)));
 }
 function projectRecentColumnStyle() {
   const time = state.projectRecentTimeWidth > 0 ? `${state.projectRecentTimeWidth}px` : 'var(--chat-lead)';
@@ -1155,8 +1157,9 @@ function chatColumnStyle() {
 function projectRecentPanel() {
   const rows = projectRecentChats();
   const daysUnit = state.chatDays === 1 ? 'Day' : 'Days';
+  const daysTip = ui`按最近 ${state.chatDays} 天过滤；0 天仅显示手动加入。`;
   const timeLabel = t('调整时间列宽'), projectWidthLabel = t('调整项目列宽');
-  return ui`<section class="project-recent-panel" style="${projectRecentColumnStyle()}"><div class="folder-view-label">${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<label class="days-count-label"><input class="days-count-input" type="number" min="1" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span>${daysUnit}</span></label><span class="count">${rows.length}</span><span class="toolbar-spacer"></span><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
+  return ui`<section class="project-recent-panel" style="${projectRecentColumnStyle()}"><div class="folder-view-label">${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span><span class="toolbar-spacer"></span><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
 }
 
 function renderProjectPane() {
@@ -1482,6 +1485,7 @@ const DIAGNOSTICS = {
   quota: ["额度耗尽", "quota-exhausted"],
   promptRejected: ["提示词被拒绝", "prompt-rejected"],
   network: ["网络 / 连接失败", "link-off"],
+  reconnect: ["连接重试", "refresh"],
   retry: ["网络异常，重试中", "refresh"],
   noResponse: ["疑似无响应", "clock"],
   other: ["其他错误", "alert"]
@@ -2424,7 +2428,7 @@ function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceF
   return menu + copies.map(([label,text]) => menuButton(label,'copy',{text})).join('');
 }
 let menuTimeline = false;
-const CONFIG_KEYS = [PREFERENCES_KEY,FOLDERS_KEY,DYNAMIC_KEY,'codex-chat-pane.language'];
+const CONFIG_KEYS = [PREFERENCES_KEY,FOLDERS_KEY,DYNAMIC_KEY,'CodexChatPane.language'];
 function isCustomProjectFolder(key) {
   return Boolean(key) && !isAutoProjectFolderKey(key) && !String(key).startsWith('auto:');
 }
@@ -2541,7 +2545,7 @@ function documentToStorage(doc) {
     [PREFERENCES_KEY]: stringify(preferences),
     [FOLDERS_KEY]: stringify(expandImportedFolders(doc.folders)),
     [DYNAMIC_KEY]: stringify(dynamic),
-    'codex-chat-pane.language': doc.language == null ? null : String(doc.language)
+    'CodexChatPane.language': doc.language == null ? null : String(doc.language)
   };
 }
 function importedDocument(parsed) {
@@ -2555,7 +2559,7 @@ function importedDocument(parsed) {
   };
   return {
     version: parsed.version || 1,
-    language: data['codex-chat-pane.language'] ?? parsed.language ?? null,
+    language: data['CodexChatPane.language'] ?? parsed.language ?? null,
     preferences: readObject(PREFERENCES_KEY),
     folders: readObject(FOLDERS_KEY),
     dynamic: readObject(DYNAMIC_KEY)
@@ -2609,12 +2613,12 @@ function validateConfiguration(input) {
     const value = input.data[key];
     if (value == null) { result[key] = null; continue; }
     if (typeof value !== 'string') throw new Error(t('工具配置格式无效'));
-    if (key === 'codex-chat-pane.language') { if (!['zh','en'].includes(value)) throw new Error(t('工具配置格式无效')); result[key] = value; continue; }
+    if (key === 'CodexChatPane.language') { if (!['zh','en'].includes(value)) throw new Error(t('工具配置格式无效')); result[key] = value; continue; }
     const parsed = JSON.parse(value);
     let valid = true;
     if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter','openFolders','openChatFolders'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
     if (key === FOLDERS_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => ['projects','chats'].includes(field) ? object(v) && Object.values(v).every(item => object(item) && typeof item.folder === 'string' && Object.entries(item).every(([k,x]) => k === 'folder' ? x.length <= 4096 : k === 'folders' ? strings(x) : ['recycled','starred'].includes(k) ? typeof x === 'boolean' : k === 'region' ? typeof x === 'string' && x.length <= 32 : ['order','manualOrder','regionEnteredAt'].includes(k) && Number.isFinite(x))) : ['localProjectFolders','localChatFolders','recentIncludedChatIds','recentExcludedChatIds','recycledChatFolders','openFolders','openChatFolders','starredProjectIds','pinnedProjectIds'].includes(field) && strings(v));
-    if (key === 'codex-chat-pane.dynamic-v1') valid = object(parsed) && ['projects','chats'].every(kind => Array.isArray(parsed.groups?.[kind]) && parsed.groups[kind].every(g=>object(g) && typeof g.id==='string' && typeof g.name==='string' && g.name.length<=4096) && object(parsed.members?.[kind]) && Object.values(parsed.members[kind]).every(g=>typeof g==='string' || strings(g))) && object(parsed.views) && Object.values(parsed.views).every(v=>object(v) && strings(v.order) && strings(v.groups) && strings(v.collapsed) && (v.orders === undefined || object(v.orders) && Object.values(v.orders).every(strings)));
+    if (key === 'CodexChatPane.dynamic-v1') valid = object(parsed) && ['projects','chats'].every(kind => Array.isArray(parsed.groups?.[kind]) && parsed.groups[kind].every(g=>object(g) && typeof g.id==='string' && typeof g.name==='string' && g.name.length<=4096) && object(parsed.members?.[kind]) && Object.values(parsed.members[kind]).every(g=>typeof g==='string' || strings(g))) && object(parsed.views) && Object.values(parsed.views).every(v=>object(v) && strings(v.order) && strings(v.groups) && strings(v.collapsed) && (v.orders === undefined || object(v.orders) && Object.values(v.orders).every(strings)));
     if (!valid) throw new Error(t('工具配置格式无效'));
     result[key] = value;
   }
@@ -2645,7 +2649,7 @@ document.addEventListener('change',async event => {
             data[PREFERENCES_KEY] == null ? localStorage.removeItem?.(PREFERENCES_KEY) : localStorage.setItem(PREFERENCES_KEY, data[PREFERENCES_KEY]);
             localStorage.removeItem?.(FOLDERS_KEY);
             localStorage.removeItem?.(DYNAMIC_KEY);
-            localStorage.removeItem?.('codex-chat-pane.language');
+            localStorage.removeItem?.('CodexChatPane.language');
             await applyImportedAppearance(document);
           } else {
             for (const [key,value] of Object.entries(data)) value === null ? localStorage.removeItem?.(key) : localStorage.setItem(key,value);

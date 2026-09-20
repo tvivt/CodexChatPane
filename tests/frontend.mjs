@@ -34,6 +34,8 @@ assert.match(html, /\.folder-editor \{ width:min\(260px,90vw\); height:fit-conte
 assert.ok(!html.includes('id="close-prompt"') && !html.includes('.close-remember'), 'close action has no choice dialog');
 assert.match(html, /\.project-picker-menu \{[^}]*font-size:11px/, 'project filter menus use 11px on both tabs');
 assert.ok(html.includes('.days-count-label { display:inline-flex; align-items:center; gap:2px; margin-left:4px; color:var(--local); }') && html.includes('.days-count-input { width:3ch; min-width:3ch;') && html.includes('text-align:center;') && html.includes('appearance:textfield;'), '3 Days count is centered in a compact input without spinners');
+assert.ok(html.includes('.days-count-label > span { white-space:nowrap; }') && html.includes('.days-count-tip { position:relative; }') && !html.includes('.days-count-tip::before'), '3 Days keeps the 1:19 title trigger without the custom tooltip');
+assert.ok(html.includes('.global-chat-row[data-dynamic-item] .chat-actions .chat-star-button.active') && html.includes('.global-chat-row[data-dynamic-item] .chat-actions .codex-action-pin.active'), 'dynamic Star and Pin actions have scoped visibility');
 assert.ok(html.includes('.settings-workspace') && html.includes('id="i-settings"'), 'settings page and gear icon exist');
 assert.ok(html.includes('.chat-type-button.is-archived'), 'archived chats use the archive icon color');
 assert.ok(html.includes('.folder-row.drop-before::before') && html.includes('.folder-row.drop-after::after'), 'folder reorder uses an edge insertion line');
@@ -81,6 +83,14 @@ const intervals = [];
 const timeouts = [];
 const windowCalls = [];
 const savedLocal = new Map();
+const legacyStorage = new Map([
+  ['codex-chat-pane.preferences-v1', JSON.stringify({chatDays:0})],
+  ['codex-chat-pane.folders-v1', JSON.stringify({localProjectFolders:['Legacy']})],
+  ['codex-chat-pane.dynamic-v1', JSON.stringify({groups:{projects:[{id:'legacy',name:'Legacy'}],chats:[]},members:{projects:{},chats:{}},views:{}})],
+  ['codex-chat-pane.language', 'en'],
+  ['codex-chat-pane.codex-mcp-consent', 'disabled'],
+]);
+for (const [key,value] of legacyStorage) savedLocal.set(key,value);
 let maximized = false;
 let windowSize = {width:720,height:900};
 const reportedGeometry = {outer:null};
@@ -125,6 +135,15 @@ const context = vm.createContext({
   timeouts,
 });
 vm.runInContext(script, context);
+for (const [key,value] of legacyStorage) {
+  assert.ok(savedLocal.has(key.replace('codex-chat-pane.', 'CodexChatPane.')), `legacy storage key ${key} migrates before startup reads`);
+  assert.equal(savedLocal.get(key), value, 'migration retains the old value for rollback');
+}
+assert.equal(vm.runInContext('state.chatDays',context), 0, 'old day filter survives startup');
+assert.equal(vm.runInContext("state.localProjectFolders.has('Legacy')",context), true, 'old folder list survives startup');
+assert.equal(vm.runInContext('dynamic.snapshot().groups.projects[0]?.name',context), 'Legacy', 'old dynamic group survives startup');
+assert.equal(vm.runInContext('language()',context), 'en', 'old language survives module initialization');
+vm.runInContext("state.chatDays = 3; state.localProjectFolders.clear(); dynamic.replace({groups:{projects:[],chats:[]},members:{projects:{},chats:{}},views:{}}); setLanguage('zh');", context);
 assert.ok(!app.innerHTML.includes('StockTool'), 'production starts without demo data');
 vm.runInContext(fixtures + `\nprojects = makeProjects(); chats = makeChats(projects); state.projectId = 'stock'; state.sourceState = 'Ready';`, context);
 vm.runInContext(`
@@ -463,6 +482,7 @@ assert.match(html,/--row-height: max\(30px, calc\(var\(--font-row\) \+ 18\.5px\)
 assert.match(html,/\.project-structure \.project-row\.special-project \.row-name[^}]*font-weight:700/);
 assert.match(html,/\.tree-row\.special-project\.selected/);
 assert.match(html,/\.global-chat-project\s*\{[^}]*font-weight:\s*700/);
+assert.match(html,/\.global-chat-project\s*\{[^}]*font-size:\s*var\(--font-row\)/, 'dynamic project labels match chat text size');
 assert.match(html,/\.global-chat-project\.project-link\s*\{[^}]*font-weight:\s*700/);
 assert.match(html,/\.chat-project\s*\{[^}]*font-weight:\s*700/);
 assert.match(html,/\.project-icon-tip\s*\{[^}]*position:relative/);
@@ -591,7 +611,10 @@ vm.runInContext(`
   setChatDays(7);
   assert.equal(state.chatDays, 7);
   setChatDays(0);
-  assert.equal(state.chatDays, 3);
+  assert.equal(state.chatDays, 0);
+  const recentDaysPanel = projectRecentPanel();
+  assert.ok(!recentDaysPanel.includes('days-count-input" type="number" min="0" max="365" value="0" data-input="chat-days" aria-label="最近天数" title='), '3 Days input has no duplicate title tip');
+  assert.ok(recentDaysPanel.includes('class="days-count-tip" title="按最近 0 天过滤；0 天仅显示手动加入。">Days</span>'), 'Days keeps the 1:19 native title');
   setChatDays(999);
   assert.equal(state.chatDays, 365);
   setChatDays(12);
@@ -644,6 +667,9 @@ vm.runInContext(`
   assert.ok(!projectRecentBaseChats().some(chat => chat.id === manualRecent.id), 'old chats stay out of 3 Days by default');
   state.recentIncludedChatIds.add(manualRecent.id);
   assert.ok(projectRecentBaseChats().some(chat => chat.id === manualRecent.id), '加入动态 includes an old chat');
+  state.chatDays = 0;
+  assert.ok(projectRecentBaseChats().every(chat => state.recentIncludedChatIds.has(chat.id)), '0 days keeps only manually included chats');
+  state.chatDays = 3;
   state.recentExcludedChatIds.add(manualRecent.id);
   assert.ok(!projectRecentBaseChats().some(chat => chat.id === manualRecent.id), '移出动态 wins over manual inclusion');
   state.recentIncludedChatIds.delete(manualRecent.id); state.recentExcludedChatIds.delete(manualRecent.id); chats.pop();
@@ -818,7 +844,7 @@ vm.runInContext(`
   assert.ok(statusChatMarkup().includes('[<span class="status-duration">12s</span>]'));
   setLanguage('en');
   assert.equal(language(),'en');
-  assert.equal(localStorage.getItem('codex-chat-pane.language'),'en');
+  assert.equal(localStorage.getItem('CodexChatPane.language'),'en');
   assert.equal(t('新建 Group'),'New Group');
   assert.ok(renderTitlebar().includes('Settings'));
   assert.ok(renderSettingsPane().includes('Language'));

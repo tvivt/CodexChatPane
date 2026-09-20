@@ -264,11 +264,11 @@ fn call_tool(
         "tools/call",
         json!({
             "arguments": arguments,
-            "callId": format!("codex-chat-pane-{suffix}"),
+            "callId": format!("CodexChatPane-{suffix}"),
             "namespace": namespace,
             "threadId": thread_id,
             "tool": tool,
-            "turnId": format!("codex-chat-pane-turn-{suffix}")
+            "turnId": format!("CodexChatPane-turn-{suffix}")
         }),
     )?;
     if result.get("success").and_then(Value::as_bool) != Some(true) {

@@ -519,7 +519,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-chat-pane"
+name = "CodexChatPane"
 version = "0.1.0"
 dependencies = [
  "rfd",

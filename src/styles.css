@@ -814,13 +814,19 @@ svg.icon { width: 15px; height: 15px; display: block; fill: none; stroke: curren
 .global-dynamic { min-height: 0; border-top: 0; }
 .global-dynamic .dynamic-list { padding-bottom: 46px; }
 .global-chat-row { box-sizing:border-box; grid-template-columns: max-content var(--row-bar) var(--project-label-width, 10ch) var(--row-icon) minmax(0, 1fr) auto 18px; height: var(--row-height); min-height: var(--row-height); gap: 5px; padding: 0 5px; }
-.global-chat-project { width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--project); font-size: 11.5px; font-weight: 700; }
+.global-chat-project { width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--project); font-size: var(--font-row); font-weight: 700; }
 .global-chat-project.project-link { width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; padding: 0; background: transparent; color: var(--project); font: inherit; font-weight: 700; text-align: left; cursor: pointer; }
 .global-chat-project.project-link:hover, .global-chat-project.project-link:focus-visible { color: var(--focus); text-decoration: underline; }
 .global-chat-row .chat-actions .codex-action-pin.active { color: var(--focus); }
 .chat-actions .icon-button.processing { opacity: 1; color: var(--warning); }
 .global-chat-row .chat-actions .codex-action-archive { order: 1; }
 .global-chat-row .chat-actions .codex-action-pin { order: 2; }
+.global-chat-row[data-dynamic-item] .chat-actions .chat-star-button.active,
+.global-chat-row[data-dynamic-item] .chat-actions .codex-action-pin.active:not(.processing) { opacity: 0; }
+.global-chat-row[data-dynamic-item]:hover .chat-actions .chat-star-button.active,
+.global-chat-row[data-dynamic-item]:hover .chat-actions .codex-action-pin.active,
+.global-chat-row[data-dynamic-item]:focus-within .chat-actions .chat-star-button.active,
+.global-chat-row[data-dynamic-item]:focus-within .chat-actions .codex-action-pin.active { opacity: 1; }
 .chats-toolbar { position: relative; min-width: 0; gap: 4px; }
 .chats-inline-search { position: absolute; z-index: 2; left: 82px; right: 68px; min-width: 72px; background: var(--drawer); }
 .chats-inline-search .search { height: 25px; padding-left: 7px; }
@@ -836,6 +842,7 @@ svg.icon { width: 15px; height: 15px; display: block; fill: none; stroke: curren
 .days-count-input::-webkit-inner-spin-button, .days-count-input::-webkit-outer-spin-button { appearance:none; margin:0; }
 .days-count-input:hover, .days-count-input:focus { border-bottom-color:var(--focus); }
 .days-count-label > span { white-space:nowrap; }
+.days-count-tip { position:relative; }
 .sort-glyph, .top-control { font:600 10px "Cascadia Mono",Consolas,monospace; }
 .sort-control { width:auto; min-width:27px; padding-inline:4px; }
 .top-control { width:auto; grid-auto-flow:column; gap:3px; padding-inline:4px; }

@@ -1,5 +1,5 @@
 // Shared membership/pins; each view owns its ordering and collapsed groups.
-export function createDynamicStore(storage, key = 'codex-chat-pane.dynamic-v1') {
+export function createDynamicStore(storage, key = 'CodexChatPane.dynamic-v1') {
   const fresh = () => ({ groups: { projects: [], chats: [] }, members: { projects: {}, chats: {} }, views: {} });
   const record = value => value && typeof value === 'object' && !Array.isArray(value);
   const valid = value => record(value) && ['projects', 'chats'].every(kind => Array.isArray(value.groups?.[kind]) && record(value.members?.[kind])) && record(value.views);

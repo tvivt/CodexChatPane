@@ -10,6 +10,24 @@ use std::{
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+fn is_reconnect_error(code: &str, message: &str) -> bool {
+    [
+        "responsestreamconnectionfailed",
+        "responsestreamdisconnected",
+    ]
+    .iter()
+    .any(|name| code.contains(name))
+        || [
+            "stream disconnected",
+            "connection reset",
+            "connection refused",
+            "connection closed",
+            "websocket",
+        ]
+        .iter()
+        .any(|text| message.contains(text))
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
@@ -43,6 +61,8 @@ impl Diagnostic {
             || lower.starts_with("you've hit your usage limit")
         {
             "quota"
+        } else if is_reconnect_error(&code, &lower) {
+            "reconnect"
         } else if [
             "httpconnectionfailed",
             "responsestreamconnectionfailed",
@@ -142,11 +162,16 @@ fn retry_record(line: &str) -> Option<(String, Diagnostic)> {
         .or_else(|| fields.get("message"))?
         .as_str()?
         .to_string();
+    let kind = if is_reconnect_error("", &message.to_ascii_lowercase()) {
+        "reconnect"
+    } else {
+        "retry"
+    };
     let at = timestamp(inner.get("timestamp")?.as_str()?)?;
     Some((
         turn,
         Diagnostic {
-            kind: "retry".into(),
+            kind: kind.into(),
             severity: "warning".into(),
             message,
             at,
@@ -316,7 +341,7 @@ mod tests {
             ),
             (
                 json!({"codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}},"message":"lost"}),
-                "network",
+                "reconnect",
             ),
             (
                 json!({"codexErrorInfo":"other","message":"Invalid prompt: flagged by our usage policy"}),
@@ -336,6 +361,7 @@ mod tests {
         );
         let (turn, issue) = retry_record(&line).unwrap();
         assert_eq!(turn, "turn-a");
+        assert_eq!(issue.kind, "reconnect");
         assert_eq!(issue.retry, Some(1));
         assert_eq!(issue.max_retries, Some(5));
         assert!(retry_record(&line.replace("hostId=local", "hostId=remote")).is_none());

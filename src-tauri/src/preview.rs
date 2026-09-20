@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn older_page_must_advance_past_oversized_record_boundary() {
         let path = std::env::temp_dir().join(format!(
-            "codex-chat-pane-preview-{}-{}.jsonl",
+            "CodexChatPane-preview-{}-{}.jsonl",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -709,7 +709,7 @@ mod tests {
     #[test]
     fn older_page_reads_past_record_without_fixed_cap() {
         let path = std::env::temp_dir().join(format!(
-            "codex-chat-pane-preview-large-{}-{}.jsonl",
+            "CodexChatPane-preview-large-{}-{}.jsonl",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
