@@ -53,3 +53,26 @@ jobs:
           path: src-tauri/target/release/CodexChatPane.exe
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows executable
+        uses: actions/download-artifact@v4
+        with:
+          name: CodexChatPane-windows-portable
+          path: release
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = Join-Path $env:GITHUB_WORKSPACE "release\CodexChatPane.exe"
+          if (-not (Test-Path -LiteralPath $asset)) { throw "Missing release asset: $asset" }
+          gh release create "$env:GITHUB_REF_NAME" $asset --repo "$env:GITHUB_REPOSITORY" --verify-tag --title "$env:GITHUB_REF_NAME" --generate-notes
