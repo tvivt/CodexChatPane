@@ -25,7 +25,7 @@ CodexChatPane 启动后会读取本机 Codex 数据。它不会创建新的 Code
 
 Projects 区域用于从 Project 角度查看最近对话：
 
-- 顶部的最近活动区域显示最近 N 天的对话摘要。
+- 顶部动态区域列出最近 N 天的对话；“动态规则”按钮汇总手动加入或移出的对话。
 - Project 结构区域显示 Codex Project 和本地 Folder。
 - 选择 Project 后，右侧或下方区域显示该 Project 的 Chat。
 - 没有 Project 的对话会进入固定的“项目/对话”归类，不会被伪造为真实 Project。
@@ -47,7 +47,9 @@ Chats 区域用于全局浏览和整理对话：
 
 ### 预览对话
 
-使用 Chat 行上的预览入口可以查看对话摘要。内容按需从对应 rollout 分页读取；关闭预览后不会把正文保存到工具配置。
+对话预览默认关闭。在设置中开启后，Chat 行才显示预览入口。内容按需从对应 rollout 分页读取；关闭预览后不会把正文保存到工具配置。
+
+若要覆盖最近天数过滤，右键对话选择“动态显示 → 自动、加入、移出”。“动态规则”对话框列出两组覆盖，也能把对话恢复为“自动”。
 
 ### 整理 Folder
 
@@ -64,7 +66,7 @@ Group 是本地的交叉组织方式。一个 Project 或 Chat 可以属于多�
 1. 在设置中启用“Codex MCP 操作”。
 2. 首次执行时确认授权。
 3. 从 Chat 或 Project 菜单执行操作。
-4. 等待操作完成并查看提示。
+4. 等待操作完成；发生错误或报警时会显示常驻通知。
 
 归档会要求再次确认；已归档 Chat 通常需要先恢复后才能继续重命名或 Pin。
 
@@ -77,11 +79,12 @@ Group 是本地的交叉组织方式。一个 Project 或 Chat 可以属于多�
 - Tab、栏和行字号。
 - 普通窗口、随 Codex 显示、全局置顶。
 - 日期颜色竖条。
+- 对话预览开关（默认关闭）。
 - 日志级别。
 - Codex MCP 操作开关。
 - 工具配置导入和导出。
 
-本地设置位于 Windows 用户配置目录下的 `settings.toml`，Folder 和 Group 状态位于同目录的 `folders.json`。默认目录为 `%APPDATA%\com.codexchatpane.app\`，这两个文件由应用生成，不进入仓库。
+本地设置位于 `%CODEX_HOME%\.codex-chat-pane\settings.toml`，Folder、Group、Star 和动态规则位于同目录的 `folders.json`。未设置 `CODEX_HOME` 时，根目录为 `%USERPROFILE%\.codex`。这些文件由应用生成，不进入仓库。
 
 ## 5. 常见问题
 
@@ -95,7 +98,7 @@ Group 是本地的交叉组织方式。一个 Project 或 Chat 可以属于多�
 
 ### 想重置本地界面状态
 
-先关闭应用，再备份并移走用户配置目录下的 `settings.toml` 和 `folders.json`。下次启动时会使用默认设置并重新创建本地配置。
+先关闭应用，再备份并移走 `%CODEX_HOME%\.codex-chat-pane\` 下的 `settings.toml` 和 `folders.json`。下次启动时会使用默认设置并重新创建本地配置。
 
 ### 想查看调试信息
 

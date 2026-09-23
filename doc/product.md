@@ -22,7 +22,7 @@ CodexChatPane makes local Codex Desktop projects and chats easier to browse, fil
 ## 3. Data ownership
 
 - Codex owns projects, chats, archives, Codex pins, and unread state.
-- CodexChatPane owns local folders, groups, stars, manual order, themes, and window settings.
+- CodexChatPane owns local folders, groups, stars, recent activity rules, manual order, themes, and window settings.
 - Working state, execution time, usage limits, and diagnostics are derived from Codex data and events; the app does not rewrite original events.
 - Conversation text is read on demand for previews and is not saved in local snapshots.
 
@@ -44,13 +44,16 @@ The synthetic project is only a UI placeholder and is not written back to Codex.
 - Name sorting, project filtering, date ranges, and archive views are available.
 - Chat status can include unread, working, completed, failed, interrupted, and no-response diagnostics.
 - Project and chat pin priority comes from Codex; local groups do not change Codex pins.
+- Recent activity normally follows the selected day range. A chat may be set to always include or exclude through the context menu; the Activity rules dialog lists both overrides and can restore automatic behavior. Include uses a solid purple bar; exclude uses a striped purple bar.
 
 ## 6. Local persistence
 
 The app creates two kinds of local files:
 
-- `settings.toml` in the user config directory: language, theme, font sizes, window mode and dimensions, log level, and MCP consent.
-- `folders.json` in the same directory: folders, groups, local project and chat assignments, stars, order, and collapse state.
+- `%CODEX_HOME%\.codex-chat-pane\settings.toml`: language, theme, font sizes, window mode and dimensions, preview switch, log level, and MCP consent.
+- `folders.json` in the same directory: folders, groups, local project and chat assignments, stars, recent activity rules, order, and collapse state.
+
+Without `CODEX_HOME`, the app uses `%USERPROFILE%\.codex`. Preview is off by default.
 
 Filters, pane heights, and some frequently changing UI state are stored in browser `localStorage`. They are not synced to Codex.
 

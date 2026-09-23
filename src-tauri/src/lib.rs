@@ -2,15 +2,16 @@ mod codex_app_mcp;
 mod diagnostics;
 mod preview;
 mod source;
+mod source_watch;
 mod window_attach;
 
 use serde::{Deserialize, Serialize};
 use source::SourceSnapshot;
-use std::{fs, process::Command, sync::Mutex};
+use std::{fs, path::PathBuf, process::Command, sync::Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
 #[derive(Default)]
@@ -77,6 +78,7 @@ struct ToolConfig {
     window_height: Option<f64>,
     #[serde(default = "default_show_date_bars")]
     show_date_bars: bool,
+    preview_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codex_mcp_enabled: Option<bool>,
     #[serde(default)]
@@ -103,6 +105,7 @@ impl Default for ToolConfig {
             window_y: None,
             window_height: None,
             show_date_bars: true,
+            preview_enabled: false,
             codex_mcp_enabled: None,
             log_level: diagnostics::Level::default(),
         }
@@ -142,12 +145,12 @@ fn normalize_tool_config(mut config: ToolConfig) -> Result<ToolConfig, String> {
     Ok(config)
 }
 
-fn app_config_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
-    let directory = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| error.to_string())?;
-    Ok(directory.join(name))
+fn app_data_dir() -> Result<PathBuf, String> {
+    Ok(source::codex_home()?.join(".codex-chat-pane"))
+}
+
+fn app_config_path(_: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
+    Ok(app_data_dir()?.join(name))
 }
 
 fn tool_config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -198,45 +201,74 @@ fn save_tool_config(
 
 #[tauri::command]
 async fn get_snapshot(app: tauri::AppHandle) -> SourceSnapshot {
-    let result = tauri::async_runtime::spawn_blocking(source::scan)
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|result| result);
-    let state = app.state::<SnapshotState>();
-    match result {
-        Ok(snapshot) => {
-            *state.0.lock().expect("snapshot lock poisoned") = Some(snapshot.clone());
-            snapshot
-        }
-        Err(error) => {
-            let mut guard = state.0.lock().expect("snapshot lock poisoned");
-            if let Some(snapshot) = guard.as_mut() {
-                snapshot.state = if error.contains("Unsupported") {
-                    "Unsupported"
-                } else {
-                    "Stale"
-                }
-                .to_string();
-                snapshot.error = Some(error);
-                snapshot.clone()
-            } else {
-                SourceSnapshot {
-                    state: if error.contains("Unsupported") {
+    load_snapshot(app, false).await
+}
+
+#[tauri::command]
+async fn get_catalog_snapshot(app: tauri::AppHandle) -> SourceSnapshot {
+    load_snapshot(app, true).await
+}
+
+async fn load_snapshot(app: tauri::AppHandle, catalog_only: bool) -> SourceSnapshot {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<SnapshotState>();
+        let mut guard = state.0.lock().expect("snapshot lock poisoned");
+        let result = match (catalog_only, guard.as_ref()) {
+            (true, Some(previous)) => source::scan_catalog(previous),
+            _ => source::scan(),
+        };
+        match result {
+            Ok(snapshot) => {
+                *guard = Some(snapshot.clone());
+                snapshot
+            }
+            Err(error) => {
+                if let Some(snapshot) = guard.as_mut() {
+                    snapshot.state = if error.contains("Unsupported") {
                         "Unsupported"
                     } else {
-                        "Unavailable"
+                        "Stale"
                     }
-                    .to_string(),
-                    error: Some(error),
-                    scope_key: String::new(),
-                    host_id: "local".to_string(),
-                    projects: Vec::new(),
-                    chats: Vec::new(),
-                    rate_limits: None,
+                    .to_string();
+                    snapshot.error = Some(error);
+                    snapshot.clone()
+                } else {
+                    SourceSnapshot {
+                        state: if error.contains("Unsupported") {
+                            "Unsupported"
+                        } else {
+                            "Unavailable"
+                        }
+                        .to_string(),
+                        error: Some(error),
+                        projects: Vec::new(),
+                        chats: Vec::new(),
+                        rate_limits: None,
+                    }
                 }
             }
         }
+    })
+    .await
+    .expect("snapshot task failed")
+}
+
+#[tauri::command]
+async fn get_chat_activity(
+    app: tauri::AppHandle,
+    thread_ids: Vec<String>,
+) -> Result<source::ActivityUpdate, String> {
+    if thread_ids.iter().any(|id| !is_thread_id(id)) {
+        return Err("Chat ID 格式无效".into());
     }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<SnapshotState>();
+        let mut guard = state.0.lock().map_err(|error| error.to_string())?;
+        let snapshot = guard.as_mut().ok_or("快照尚未加载")?;
+        Ok(source::refresh_activities(snapshot, &thread_ids))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -299,6 +331,43 @@ fn new_chat(project_id: Option<String>, project_path: Option<String>) -> Result<
         project_id.as_deref(),
         project_path.as_deref(),
     )?)
+}
+
+#[tauri::command]
+fn open_conversation_preview_window(
+    app: tauri::AppHandle,
+    thread_id: String,
+) -> Result<(), String> {
+    if !is_thread_id(&thread_id) {
+        return Err("Chat ID 格式无效".into());
+    }
+    if let Some(window) = app.get_webview_window("conversation-preview") {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        app.emit_to(
+            "conversation-preview",
+            "conversation-preview-open",
+            thread_id,
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let url = WebviewUrl::App(
+        format!("index.html?preview={}", encode_query_component(&thread_id)).into(),
+    );
+    WebviewWindowBuilder::new(&app, "conversation-preview", url)
+        .title("CodexChatPane")
+        .inner_size(680.0, 720.0)
+        .min_inner_size(320.0, 220.0)
+        .resizable(true)
+        .decorations(false)
+        .drag_and_drop(false)
+        .center()
+        .focused(true)
+        .data_directory(app_data_dir()?)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -765,10 +834,18 @@ pub fn run() {
         .manage(window_attach::State::default())
         .manage(window_attach::TrayState::default())
         .setup(|app| {
-            let logger = diagnostics::Logger::new(
-                diagnostics::default_log_path(),
-                diagnostics::Level::default(),
-            );
+            let data_dir = app_data_dir().map_err(std::io::Error::other)?;
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("CodexChatPane")
+                .inner_size(760.0, 900.0)
+                .min_inner_size(320.0, 240.0)
+                .resizable(true)
+                .decorations(false)
+                .drag_and_drop(false)
+                .data_directory(data_dir.clone())
+                .build()?;
+            let log_path = data_dir.join("logs").join("window-attach.log");
+            let logger = diagnostics::Logger::new(log_path.clone(), diagnostics::Level::default());
             match read_tool_config(app.handle()) {
                 Ok(Some(config)) => logger.set_level(config.log_level),
                 Ok(None) => {}
@@ -777,7 +854,7 @@ pub fn run() {
             logger.info(format!(
                 "app startup logLevel={} logPath={}",
                 logger.level().as_str(),
-                diagnostics::default_log_path().display()
+                log_path.display()
             ));
             app.manage(logger.clone());
             setup_tray(app)?;
@@ -787,6 +864,12 @@ pub fn run() {
                 app.state::<window_attach::TrayState>().inner().clone(),
                 logger,
             );
+            if let Ok(home) = source::codex_home() {
+                if let Err(error) = source_watch::start(app.handle().clone(), &home) {
+                    app.state::<diagnostics::Logger>()
+                        .warn(format!("source watcher unavailable error={error}"));
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -800,11 +883,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_catalog_snapshot,
+            get_chat_activity,
             get_tool_config,
             save_tool_config,
             open_chat,
             run_codex_action,
             new_chat,
+            open_conversation_preview_window,
             get_chat_preview,
             log_preview_event,
             open_project_directory,
@@ -868,6 +954,7 @@ mod tests {
             font_row: 11.5,
             window_width: Some(840.0),
             show_date_bars: true,
+            preview_enabled: true,
             codex_mcp_enabled: Some(true),
             ..ToolConfig::default()
         };
@@ -879,10 +966,12 @@ mod tests {
         assert_eq!(parsed.window_width, Some(840.0));
         assert_eq!(parsed.window_mode, "codex");
         assert!(parsed.show_date_bars);
+        assert!(parsed.preview_enabled);
         assert_eq!(parsed.codex_mcp_enabled, Some(true));
         assert_eq!(parsed.log_level, diagnostics::Level::Info);
         let serialized = toml::to_string(&parsed).unwrap();
         assert!(serialized.contains("codexMcpEnabled = true"));
+        assert!(serialized.contains("previewEnabled = true"));
         assert!(!serialized.contains("closeToTray"));
         assert!(serialized.contains("logLevel = \"info\""));
         let legacy = toml::from_str::<ToolConfig>(
@@ -895,6 +984,7 @@ mod tests {
         assert_eq!(legacy.window_width, None);
         assert_eq!(legacy.window_mode, "");
         assert!(legacy.show_date_bars);
+        assert!(!legacy.preview_enabled);
         assert_eq!(legacy.codex_mcp_enabled, None);
         assert_eq!(legacy.log_level, diagnostics::Level::Info);
         assert!(!toml::to_string(&legacy)

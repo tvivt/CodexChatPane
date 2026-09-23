@@ -11,7 +11,8 @@ This is an experimental personal project, not an official Codex Desktop componen
 - Browse local Codex data by project, chat, recent activity, and archive status.
 - Organize projects and chats with local folders and groups, including nested folders, search, sorting, selection, and drag and drop.
 - See unread, running, and error states, execution time, last activity, and usage limits.
-- Preview rollout content in pages on demand by hovering over a chat's preview control.
+- Optionally enable conversation previews in settings (off by default); preview pages are read only when requested.
+- Mark chats as always included in or excluded from recent activity; review both lists in the Activity rules dialog. Local stars are kept separately from Codex pins.
 - Open or create conversations through Codex deep links.
 - With your explicit consent, use Codex Desktop's internal App MCP to rename, pin, and archive chats or pin projects.
 - Configure themes, language, font sizes, window mode, log level, and tool settings import/export.
@@ -42,7 +43,7 @@ To preview only the frontend:
 npm run dev
 ```
 
-The development server listens on `127.0.0.1:1420`. On first launch, the app reads local Codex data. Tool settings and folder state are stored in the Windows user configuration directory, normally `%APPDATA%\com.codexchatpane.app\`, outside this repository.
+The development server listens on `127.0.0.1:1420`. On first launch, the app reads local Codex data. Tool settings and folder state are stored in `%CODEX_HOME%\.codex-chat-pane\` (by default `%USERPROFILE%\.codex\.codex-chat-pane\`), outside this repository.
 
 ## Get the Windows executable
 

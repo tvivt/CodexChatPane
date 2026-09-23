@@ -25,7 +25,7 @@ Running only `npm run dev` starts a browser preview of the frontend. You can ins
 
 The Projects area shows recent conversations from a project perspective:
 
-- The recent activity area at the top shows chat summaries from the last N days.
+- The recent activity area at the top lists chats from the last N days. Its Activity rules button lists chats manually included or excluded from that view.
 - The project structure area shows Codex projects and local folders.
 - Selecting a project shows its chats in the adjacent or lower area.
 - Chats without a project appear in a fixed "Project/Chats" category rather than being represented as a real project.
@@ -47,7 +47,9 @@ Click a chat row or its action menu to open the conversation in Codex Desktop. C
 
 ### Preview a chat
 
-Use the preview control on a chat row to view its content. Pages are read from the corresponding rollout on demand; closing the preview does not save the text to tool settings.
+Conversation preview is off by default. Enable it in settings to show the preview control on chat rows. Pages are read from the corresponding rollout on demand; closing the preview does not save the text to tool settings.
+
+To override the recent activity filter, right-click a chat and choose **Activity display → Auto, Include, or Exclude**. The Activity rules dialog shows both override lists and lets you return a chat to Auto.
 
 ### Organize folders
 
@@ -64,7 +66,7 @@ Renaming, pinning, archiving, and project pinning are Codex write operations:
 1. Enable "Codex MCP operations" in settings.
 2. Confirm consent before the first operation.
 3. Choose the action from a chat or project menu.
-4. Wait for completion and check the result message.
+4. Wait for completion. The app shows a persistent notification if an error or warning occurs.
 
 Archiving asks for another confirmation. An archived chat usually must be restored before it can be renamed or pinned.
 
@@ -77,11 +79,12 @@ The settings page provides:
 - Tab, pane, and row font sizes.
 - Normal window, show with Codex, and always on top modes.
 - Colored date bars.
+- Conversation preview switch (off by default).
 - Log level.
 - Codex MCP operations toggle.
 - Tool settings import and export.
 
-Local settings are in `settings.toml` under the Windows user config directory. Folder and group state is in `folders.json` in the same directory. The default directory is `%APPDATA%\com.codexchatpane.app\`. The app creates these files; they are not committed to the repository.
+Local settings are in `%CODEX_HOME%\.codex-chat-pane\settings.toml`. Folders, groups, stars, and Activity rules are in `folders.json` in the same directory. Without `CODEX_HOME`, the root is `%USERPROFILE%\.codex`. The app creates these files; they are not committed to the repository.
 
 ## 5. Troubleshooting
 
@@ -95,7 +98,7 @@ Read-only browsing does not depend on MCP. Write operations require Codex MCP to
 
 ### Reset local UI state
 
-Close the app, then back up and move `settings.toml` and `folders.json` out of the user config directory. The next launch uses defaults and recreates the local settings.
+Close the app, then back up and move `settings.toml` and `folders.json` out of `%CODEX_HOME%\.codex-chat-pane\`. The next launch uses defaults and recreates the local settings.
 
 ### View debug information
 

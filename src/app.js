@@ -89,6 +89,7 @@ const state = {
   chatProjectWidth: 0,
   chatsLowerHeight: 220,
   previewPinned: false,
+  previewEnabled: false,
   showDateBars: true,
   logLevel: 'info',
   settingsOpen: false,
@@ -111,7 +112,7 @@ const state = {
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
 const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
-const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars'];
+const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars', 'previewEnabled'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
 for (const field of browserPreferenceFields) {
@@ -244,7 +245,7 @@ function applyFontSize() {
   root.setProperty('--font-row', `${state.fontRow}px`);
 }
 state.singlePaneWidth = clampWindowWidth(state.singlePaneWidth);
-const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowX:finiteNumber(state.windowX),windowY:finiteNumber(state.windowY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
+const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowX:finiteNumber(state.windowX),windowY:finiteNumber(state.windowY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),previewEnabled:Boolean(state.previewEnabled),logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
 const configWindowMode = config => ['normal','codex','global'].includes(config.windowMode) ? config.windowMode : typeof config.windowPinned === 'boolean' ? (config.windowPinned ? 'global' : 'normal') : state.windowMode;
 const saveToolConfig = () => nativeInvoke?.('save_tool_config',{config:toolConfig()}).catch(error => showToast(t('无法保存工具配置'),String(error),'error'));
 function readFontConfig(config, key, field) {
@@ -267,6 +268,7 @@ async function loadToolConfig() {
       if (Number.isFinite(config.windowY)) state.windowY = config.windowY;
       if (Number.isFinite(config.windowHeight)) state.windowHeight = clampWindowHeight(config.windowHeight);
       if (typeof config.showDateBars === 'boolean') state.showDateBars = config.showDateBars;
+      if (typeof config.previewEnabled === 'boolean') state.previewEnabled = config.previewEnabled;
       if (['error','warn','info','debug'].includes(config.logLevel)) state.logLevel = config.logLevel;
     }
     if (typeof config?.codexMcpEnabled === 'boolean') codexMcpEnabled = config.codexMcpEnabled;
@@ -355,7 +357,7 @@ function nativeChat(chat, index, previous) {
     codexUnread,
     working,
     lastUserMessageAt: chat.lastUserMessageAt || chat.updatedAt || chat.createdAt,
-    attentionAt: !chat.working && !failed && codexUnread === true ? activityAt : 0,
+    attentionAt: completed && codexUnread === true ? activityAt : 0,
     completedAt: completed ? activityAt : previous?.completedAt || 0,
     sentAt: chat.lastUserMessageAt || chat.createdAt,
     executionStartedAt: chat.executionStartedAt,
@@ -373,8 +375,6 @@ function nativeChat(chat, index, previous) {
     openedAt,
     region,
     regionEnteredAt: previous?.region == null ? previous?.regionEnteredAt ?? activityAt ?? 0 : previous.region === region ? previous.regionEnteredAt || 0 : Date.now(),
-    turnCount: chat.turnCount || 0,
-    tokenUsage: chat.tokenUsage || null,
     openable: true,
     timelineAt,
     dayOffset: Math.max(0, Math.floor((today - chatDay) / 86400000)),
@@ -386,20 +386,36 @@ function nativeChat(chat, index, previous) {
 let nativeLoaded = false;
 let nativeScanInFlight = false;
 let nativeSourceSignature = "";
-async function loadNativeSnapshot() {
-  if (!nativeInvoke || nativeScanInFlight || resizeSession || draggedDynamic || draggedFolder || draggedChatIds.length || draggedProjectIds.length) return;
+const recentlyActiveIds = new Set();
+const sourceRefreshBlocked = () => resizeSession || draggedDynamic || draggedFolder || draggedChatIds.length || draggedProjectIds.length;
+async function loadNativeSnapshot(catalogOnly = false) {
+  if (!nativeInvoke || nativeScanInFlight) return;
+  if (sourceRefreshBlocked()) {
+    pendingFullRefresh = true;
+    queueSourceRefresh();
+    return;
+  }
   nativeScanInFlight = true;
   updateSyncStatus();
   document.documentElement.dataset.runtime = "native";
   try {
-    const snapshot = await nativeInvoke("get_snapshot");
-    if (resizeSession || draggedDynamic || draggedFolder || draggedChatIds.length || draggedProjectIds.length) return;
+    const snapshot = await nativeInvoke(catalogOnly ? "get_catalog_snapshot" : "get_snapshot");
+    if (sourceRefreshBlocked()) {
+      pendingFullRefresh = true;
+      queueSourceRefresh();
+      return;
+    }
     const {rateLimits, ...listSnapshot} = snapshot;
+    const rateLimitsChanged = JSON.stringify(state.rateLimits) !== JSON.stringify(rateLimits || null);
     state.rateLimits = rateLimits || null;
     state.syncError = snapshot.error || '';
     if (!snapshot.error) state.syncAt = Date.now();
     const signature = JSON.stringify(listSnapshot);
-    if (signature === nativeSourceSignature) return;
+    if (signature === nativeSourceSignature) {
+      if (rateLimitsChanged) updateWorkingClocks();
+      syncLiveTimers();
+      return;
+    }
     nativeSourceSignature = signature;
     state.sourceState = snapshot.state;
     if (snapshot.state === 'Ready' || snapshot.projects.length) {
@@ -425,13 +441,111 @@ async function loadNativeSnapshot() {
       nativeLoaded = true;
     }
     render();
+    if (!catalogOnly && !snapshot.error) recentlyActiveIds.clear();
+    chats.filter(chat => chat.working).forEach(chat => recentlyActiveIds.add(chat.id));
+    syncLiveTimers();
     if (snapshot.error) showToast(snapshot.state, snapshot.error, "error");
   } catch (error) {
     state.syncError = String(error);
     state.sourceState = 'Unavailable';
+    render();
   } finally {
     nativeScanInFlight = false;
     updateSyncStatus();
+  }
+}
+
+const pendingActivityIds = new Set();
+let pendingFullRefresh = false;
+let pendingCatalogRefresh = false;
+let sourceRefreshTimer = 0;
+let activityRefreshInFlight = false;
+function queueSourceRefresh(change = {}) {
+  let immediate = Boolean(change.activityTick);
+  if (change.full) pendingFullRefresh = true;
+  if (change.catalog) pendingCatalogRefresh = true;
+  if (change.full || change.catalog) immediate = true;
+  for (const id of change.threads || []) {
+    const chat = chats.find(chat => chat.id === id);
+    if (chat && !chat.working) {
+      pendingActivityIds.add(id);
+      immediate = true;
+    }
+  }
+  if (change.history) {
+    const active = chats.filter(chat => chat.working);
+    if (isPreviewWindow) {
+      if (previewChatId && (active.some(chat => chat.id === previewChatId) || recentlyActiveIds.has(previewChatId))) pendingActivityIds.add(previewChatId);
+    } else if (active.length) {
+      for (const chat of active) pendingActivityIds.add(chat.id);
+      for (const id of recentlyActiveIds) pendingActivityIds.add(id);
+    } else {
+      pendingFullRefresh = true;
+      immediate = true;
+    }
+  }
+  if (!pendingFullRefresh && !pendingCatalogRefresh && !pendingActivityIds.size) return;
+  if (document.hidden) return;
+  if (!immediate && !pendingFullRefresh && !pendingCatalogRefresh) return;
+  clearTimeout(sourceRefreshTimer);
+  sourceRefreshTimer = setTimeout(flushSourceRefresh, 180);
+}
+async function flushSourceRefresh() {
+  if (document.hidden || nativeScanInFlight || activityRefreshInFlight || sourceRefreshBlocked()) {
+    if (!document.hidden) sourceRefreshTimer = setTimeout(flushSourceRefresh, 250);
+    return;
+  }
+  if (pendingFullRefresh || pendingCatalogRefresh || !nativeLoaded) {
+    const catalogOnly = pendingCatalogRefresh && !pendingFullRefresh && nativeLoaded;
+    const activityAfterCatalog = catalogOnly ? [...pendingActivityIds] : [];
+    pendingFullRefresh = false;
+    pendingCatalogRefresh = false;
+    pendingActivityIds.clear();
+    await loadNativeSnapshot(catalogOnly);
+    activityAfterCatalog.forEach(id => pendingActivityIds.add(id));
+    if (pendingActivityIds.size || pendingFullRefresh || pendingCatalogRefresh) queueSourceRefresh();
+    return;
+  }
+  const ids = [...pendingActivityIds];
+  pendingActivityIds.clear();
+  if (!ids.length) return;
+  activityRefreshInFlight = true;
+  try {
+    const update = await nativeInvoke('get_chat_activity', {threadIds:ids});
+    state.syncError = '';
+    state.syncAt = Date.now();
+    updateSyncStatus();
+    let changed = false;
+    for (const raw of update.chats || []) {
+      const index = chats.findIndex(chat => chat.id === raw.id);
+      if (index < 0) continue;
+      const next = nativeChat(raw,index,chats[index]);
+      if (JSON.stringify(next) !== JSON.stringify(chats[index])) {
+        if (next.working || chats[index].working) recentlyActiveIds.add(raw.id);
+        chats[index] = next;
+        changed = true;
+      }
+    }
+    if (JSON.stringify(state.rateLimits) !== JSON.stringify(update.rateLimits)) {
+      state.rateLimits = update.rateLimits || null;
+      changed = true;
+    }
+    if (changed) {
+      for (const raw of update.chats || []) {
+        const project = projects.find(project => project.id === raw.projectId);
+        if (project) project.latest = Math.max(project.latest, raw.lastUserMessageAt || 0);
+      }
+      render();
+      syncLiveTimers();
+    }
+    if (previewChatId && ids.includes(previewChatId)) refreshConversationPreview();
+  } catch (error) {
+    pendingFullRefresh = true;
+    state.syncError = String(error);
+    updateSyncStatus();
+  } finally {
+    activityRefreshInFlight = false;
+    if (pendingFullRefresh || pendingCatalogRefresh || pendingActivityIds.size) queueSourceRefresh();
   }
 }
 
@@ -688,9 +802,11 @@ document.addEventListener('focusin', event => {
 });
 const conversationPages = new Map();
 let previewChatId = '';
+let previewRefreshPending = false;
 function hideConversationPreview(reason = 'unknown') {
   previewLog('preview-hide', {id: previewChatId, previewWindow: isPreviewWindow, reason});
   previewChatId = '';
+  previewRefreshPending = false;
   const preview = document.getElementById('chat-preview');
   if (preview) preview.hidden = true;
   if (isPreviewWindow) {
@@ -700,38 +816,19 @@ function hideConversationPreview(reason = 'unknown') {
   }
 }
 async function openConversationPreviewWindow(id) {
-  if (!PreviewWebviewWindow) {
+  if (!nativeInvoke) {
     previewChatId = id;
     await queueConversationPage(id);
     return;
   }
   try {
-    let previewWindow = await PreviewWebviewWindow.getByLabel(PREVIEW_WINDOW_LABEL);
-    if (previewWindow) {
-      await previewWindow.show();
-      await previewWindow.setFocus();
-      await previewWindow.emit(PREVIEW_OPEN_EVENT, id);
-      return;
-    }
-    previewWindow = new PreviewWebviewWindow(PREVIEW_WINDOW_LABEL, {
-      url: `/index.html?preview=${encodeURIComponent(id)}`,
-      title: 'CodexChatPane',
-      width: 680,
-      height: 720,
-      minWidth: 320,
-      minHeight: 220,
-      resizable: true,
-      decorations: false,
-      dragDropEnabled: false,
-      center: true,
-      focus: true,
-    });
-    previewWindow.once('tauri://error', event => showToast(t('无法打开预览'), String(event.payload || event), 'error'));
+    await nativeInvoke('open_conversation_preview_window', {threadId:id});
   } catch (error) {
     showToast(t('无法打开预览'), String(error), 'error');
   }
 }
 async function showConversationPreview(id) {
+  if (!state.previewEnabled && !isPreviewWindow) return;
   previewLog('preview-open-request', {id, previewWindow: isPreviewWindow, pinned: state.previewPinned});
   if (!isPreviewWindow) {
     if (state.previewPinned && previewChatId && previewChatId !== id) return;
@@ -742,6 +839,7 @@ async function showConversationPreview(id) {
   if (state.previewPinned && previewChatId && previewChatId !== id) return;
   if (previewChatId === id) return;
   previewChatId = id;
+  syncLiveTimers();
   await queueConversationPage(id);
 }
 const previewRoleLabel = kind => kind === 'assistant' ? 'AI' : kind === 'interruption' ? 'STEER' : 'USER';
@@ -935,13 +1033,18 @@ function refreshConversationPreview() {
   const selection = window.getSelection?.();
   const selectionBlocked = Boolean(selection && !selection.isCollapsed && preview?.contains(selection.anchorNode));
   if (!previewChatId || !preview || preview.hidden || selectionBlocked) {
+    if (previewChatId && selectionBlocked) previewRefreshPending = true;
     if (previewChatId) previewLog('refresh-skip', {id: previewChatId, missingPreview: !preview, hidden: preview?.hidden, selectionBlocked});
     return;
   }
+  previewRefreshPending = false;
   const page = conversationPages.get(previewChatId);
   previewLog('refresh-request', {id: previewChatId, items: page?.items?.length || 0, pageBefore: page?.before, loading: page?.loading});
   void queueConversationPage(previewChatId,null,true);
 }
+document.addEventListener('selectionchange', () => {
+  if (previewRefreshPending && window.getSelection?.()?.isCollapsed) refreshConversationPreview();
+});
 document.addEventListener('wheel', event => {
   if (!isPreviewWindow) return;
   previewLog('event-wheel', {target: previewEventTarget(event.target), deltaY: event.deltaY, deltaX: event.deltaX, x: event.clientX, y: event.clientY, defaultPrevented: event.defaultPrevented});
@@ -988,6 +1091,7 @@ function renderSettingsPane() {
         <p class="settings-note">${t('日志文件位于本机 CodexChatPane 数据目录；Debug 会记录窗口事件与状态细节。')}</p>
       </section>
       <section class="settings-section"><h2>Codex</h2>
+        <div class="settings-row settings-row-wrap"><span>${t('对话预览')}</span><button type="button" class="settings-choice ${state.previewEnabled ? 'active' : ''}" data-action="toggle-conversation-preview" aria-pressed="${state.previewEnabled}">${t(state.previewEnabled ? '已开启' : '已关闭')}</button></div>
         <div class="settings-row settings-row-wrap"><span>${t('Codex MCP 操作')}</span><button type="button" class="settings-choice ${codexMcpEnabled ? 'active' : ''}" data-action="toggle-codex-mcp" aria-pressed="${codexMcpEnabled}">${t(codexMcpEnabled ? '已开启' : '已关闭')}</button></div>
         <p class="settings-note">${t('通过 Codex 桌面版内部 MCP 修改对话名称、Pin 和归档状态。该接口未公开，Codex 更新后可能暂时失效。')}</p>
       </section>
@@ -1155,12 +1259,29 @@ function chatColumnStyle() {
   const project = state.chatProjectWidth > 0 ? `${state.chatProjectWidth}px` : 'var(--project-label-width,10ch)';
   return `--chat-time-width:${time};--chat-project-width:${project};`;
 }
+let recentRulesTab = 'include';
+function recentRulesDialogMarkup() {
+  const included = [...state.recentIncludedChatIds], excluded = [...state.recentExcludedChatIds];
+  const ids = recentRulesTab === 'include' ? included : excluded;
+  const tone = recentRulesTab === 'include' ? 'manual-include' : 'manual-exclude';
+  const rows = ids.map(id => {
+    const chat = chats.find(item => item.id === id);
+    const project = chat ? byProject(chat.projectId) : null;
+    return ui`<div class="recent-rule-row"><span class="row-bar chat-status-bar ${tone}" aria-hidden="true"></span><div class="recent-rule-copy"><strong title="${esc(chat?.title || id)}">${esc(chat?.title || t('对话不可用'))}</strong><span title="${esc(project ? projectLabel(project) : id)}">${esc(project ? projectLabel(project) : id)}</span></div><button type="button" class="text-button" data-action="clear-recent-rule" data-id="${esc(id)}">${t('自动')}</button></div>`;
+  }).join('') || ui`<div class="empty-state">${t(recentRulesTab === 'include' ? '没有始终加入的对话' : '没有始终移出的对话')}</div>`;
+  return ui`<form method="dialog"><header><strong>${t('动态规则')}</strong><button class="icon-button" value="close" aria-label="${t('关闭')}" title="${t('关闭')}">${icon('x')}</button></header><div class="recent-rules-tabs" role="tablist"><button type="button" role="tab" data-action="set-recent-rules-tab" data-rule-tab="include" aria-selected="${recentRulesTab === 'include'}">${t('加入')} <span>${included.length}</span></button><button type="button" role="tab" data-action="set-recent-rules-tab" data-rule-tab="exclude" aria-selected="${recentRulesTab === 'exclude'}">${t('移出')} <span>${excluded.length}</span></button></div><div class="recent-rules-list" role="tabpanel">${rows}</div></form>`;
+}
+function showRecentRulesDialog() {
+  const dialog = document.getElementById('recent-rules-dialog');
+  dialog.innerHTML = recentRulesDialogMarkup();
+  dialog.showModal();
+}
 function projectRecentPanel() {
   const rows = projectRecentChats();
   const daysUnit = state.chatDays === 1 ? 'Day' : 'Days';
   const daysTip = ui`按最近 ${state.chatDays} 天过滤；0 天仅显示手动加入。`;
   const timeLabel = t('调整时间列宽'), projectWidthLabel = t('调整项目列宽');
-  return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
+  return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<span class="toolbar-spacer"></span><button class="icon-button" data-action="open-recent-rules" title="${t('动态规则')}" aria-label="${t('动态规则')}">${icon('activity')}</button><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
 }
 
 function renderProjectPane() {
@@ -1297,8 +1418,8 @@ const receivedOrderAt = chat => chat.regionEnteredAt || 0;
 const statusTimeCompare = (a,b) => chatRegionRank(a) - chatRegionRank(b) || regionTimeCompare(a, b) || a.id.localeCompare(b.id);
 const regionOrder = rows => [...rows].sort(statusTimeCompare);
 const timelineDayTone = day => day === 0 ? "time-today" : day === 1 ? "time-yesterday" : day === 2 ? "time-before" : day <= 7 ? "time-week" : day <= 30 ? "time-month" : "time-old";
-const chatStatusBar = chat => ui`<span class="row-bar chat-status-bar ${timelineDayTone(chat.dayOffset)}" aria-hidden="true"></span>`;
-const projectTimeBar = rows => chatStatusBar(rows.reduce((latest, chat) => !latest || chat.timelineAt > latest.timelineAt ? chat : latest, null) || {dayOffset:3});
+const chatStatusBar = (chat, manual = true) => ui`<span class="row-bar chat-status-bar ${manual && state.recentIncludedChatIds.has(chat.id) ? 'manual-include' : manual && state.recentExcludedChatIds.has(chat.id) ? 'manual-exclude' : timelineDayTone(chat.dayOffset)}" aria-hidden="true"></span>`;
+const projectTimeBar = rows => chatStatusBar(rows.reduce((latest, chat) => !latest || chat.timelineAt > latest.timelineAt ? chat : latest, null) || {dayOffset:3}, false);
 const statusLead = inner => ui`<span class="row-status">${inner || ''}</span>`;
 
 function activitySummary(rows) {
@@ -1438,11 +1559,14 @@ function workCellDateLabel(at) {
   return { day: zh || date.getFullYear() === now.getFullYear() ? monthDay : `${date.getFullYear()}-${monthDay}`, time };
 }
 function chatLeadShowsDuration(chat) {
-  return chat.working || chat.codexUnread === true || Boolean(chat.attentionAt);
+  return Boolean(chatDiagnostic(chat)) || chat.working || Boolean(chat.attentionAt);
+}
+function chatWorkStatus(chat) {
+  const issue = chatDiagnostic(chat);
+  return issue ? diagnosticIcon('chat-work-status',chat) : chat.working ? workingIndicator('chat-work-status',chat) : chat.attentionAt ? ui`<span class="chat-work-status attention" aria-label="${t('完成待查看')}"></span>` : '';
 }
 function chatWorkCell(chat, asLead = false) {
-  const issue = chatDiagnostic(chat);
-  const status = issue ? diagnosticIcon('chat-work-status',chat) : chat.working ? workingIndicator('chat-work-status',chat) : chat.attentionAt ? ui`<span class="chat-work-status attention" aria-label="${t('完成待查看')}"></span>` : '';
+  const status = chatWorkStatus(chat);
   if (asLead && !chatLeadShowsDuration(chat)) {
     const {day, time} = workCellDateLabel(leadTimestamp(chat));
     return ui`<span class="chat-work-cell date-cell">${ui`<span class="chat-work-day">${day}</span>`}${time ? ui`<span class="chat-work-time">${time}</span>` : ''}</span>`;
@@ -1451,7 +1575,6 @@ function chatWorkCell(chat, asLead = false) {
   const time = hasTime ? formatExecutionSlot(currentExecutionMs(chat)) : '';
   return ui`<span class="chat-work-cell ${status ? '' : 'time-only'}">${status}${time ? ui`<span class="chat-work-time"${chat.working && chat.executionStartedAt ? ui` data-execution-start="${chat.executionStartedAt}" data-execution-slot` : ''}>${time}</span>` : ''}</span>`;
 }
-
 function updateWorkingClocks(now = Date.now()) {
   executionClockNow = Math.floor(now / 1000) * 1000;
   document.querySelectorAll("[data-execution-start]").forEach(element => {
@@ -1470,9 +1593,45 @@ function updateWorkingFrame(now = Date.now()) {
   document.documentElement.dataset.workingFrame = String(Math.floor(now / 600) % 3);
 }
 
+let workingFrameTimer = 0;
+let executionClockTimer = 0;
+let activityCheckTimer = 0;
+let quotaTimer = 0;
+let previewRefreshTimer = 0;
 function tickExecutionClock() {
   updateWorkingClocks();
-  setTimeout(tickExecutionClock, 1000 - Date.now() % 1000);
+  executionClockTimer = setTimeout(tickExecutionClock, 1000 - Date.now() % 1000);
+}
+function syncLiveTimers() {
+  if (isPreviewWindow) {
+    clearInterval(previewRefreshTimer);
+    previewRefreshTimer = 0;
+    if (!document.hidden && chats.some(chat => chat.id === previewChatId && chat.working)) {
+      previewRefreshTimer = setInterval(() => {
+        refreshConversationPreview();
+        pendingActivityIds.add(previewChatId);
+        queueSourceRefresh({activityTick:true});
+      }, 1000);
+    }
+    return;
+  }
+  const active = !document.hidden && chats.some(chat => chat.working);
+  if (active) {
+    if (!workingFrameTimer) workingFrameTimer = setInterval(updateWorkingFrame, 600);
+    if (!executionClockTimer) tickExecutionClock();
+    if (!activityCheckTimer) activityCheckTimer = setInterval(() => {
+      chats.filter(chat => chat.working).forEach(chat => pendingActivityIds.add(chat.id));
+      queueSourceRefresh({activityTick:true});
+    }, 1000);
+  } else {
+    clearInterval(workingFrameTimer); workingFrameTimer = 0;
+    clearTimeout(executionClockTimer); executionClockTimer = 0;
+    clearInterval(activityCheckTimer); activityCheckTimer = 0;
+  }
+  clearTimeout(quotaTimer);
+  if (!document.hidden && !active && state.rateLimits) {
+    quotaTimer = setTimeout(() => { updateWorkingClocks(); syncLiveTimers(); }, 60000 - Date.now() % 60000);
+  }
 }
 
 function timelineDateTime(timestamp, executionBracket = "") {
@@ -1535,7 +1694,7 @@ function chatStarButton(chat) {
   return ui`<button class="icon-button chat-star-button ${active ? 'active' : ''}" data-action="toggle-chat-star" data-id="${chat.id}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${active}">${icon('star')}</button>`;
 }
 const codexActionButtons = chat => chatStarButton(chat) + codexActionButton(chat, 'pin');
-const chatPreviewIcon = chat => ui`<button class="chat-preview-icon" data-action="open-conversation-preview" data-id="${chat.id}" aria-label="${t('预览对话')}" title="${t('预览对话')}">${icon('preview')}</button>`;
+const chatPreviewIcon = chat => state.previewEnabled ? ui`<button class="chat-preview-icon" data-action="open-conversation-preview" data-id="${chat.id}" aria-label="${t('预览对话')}" title="${t('预览对话')}">${icon('preview')}</button>` : '';
 function chatTypeButton(chat) {
   const archived = chat.sourceArchived || effectiveReasons(chat).includes('已归档');
   if (archived) {
@@ -1563,7 +1722,7 @@ function chatRow(chat, timeline = false, showProject = timeline, compact = false
   const typeBtn = timeline ? '' : chatTypeButton(chat);
   const preview = timeline ? '' : chatPreviewIcon(chat);
   const lead = timeline ? '' : (check ? statusLead(check) : chatWorkCell(chat, true));
-  return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
+  return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
     ${lead}${chatStatusBar(chat)}${timeline ? compact || dynamicScope ? chatWorkCell(chat) : oldDate ? ui`${timelineDateTime(chat.timelineAt)}${chatWorkCell(chat)}` : ui`<span class="timeline-row-time">${chat.time}</span>${chatWorkCell(chat)}` : typeBtn}
     ${globalTimeline ? globalContent : ui`<div class="chat-main"><div class="chat-title-line"><div class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</div></div>${timeline && compact || !meta ? "" : ui`<div class="chat-meta">${meta}</div>`}</div>`}
     ${dynamicScope ? ui`<div class="chat-actions">${codexActionButtons(chat)}</div>` : actions}${preview}
@@ -1781,8 +1940,9 @@ function globalChatRow(chat, scope = '', group = '', linkProject = false, showTy
   const check = state.selectedChatIds.size && scope ? rowCheck('chat', chat.id) : '';
   const projectName = projectLabel(project);
   const projectCell = (linkProject || scope) ? ui`<button type="button" class="global-chat-project project-link" data-action="select-project" data-id="${esc(project.id)}" title="${esc(projectName)}" aria-label="${esc(projectName)}">${esc(projectName)}</button>` : ui`<span class="global-chat-project" title="${esc(projectName)}">${esc(projectName)}</span>`;
-  return ui`<div class="chat-row global-chat-row ${showType ? '' : 'without-type'} ${chat.attentionAt ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
-    ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}${showType ? chatTypeButton(chat) : ''}<span class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</span><div class="chat-actions">${codexActionButtons(chat)}</div>${chatPreviewIcon(chat)}
+  const preview = chatPreviewIcon(chat);
+  return ui`<div class="chat-row global-chat-row ${showType ? '' : 'without-type'} ${chat.attentionAt ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
+    ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}${showType ? chatTypeButton(chat) : ''}<span class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</span><div class="chat-actions">${codexActionButtons(chat)}</div>${preview}
   </div>`;
 }
 
@@ -1871,18 +2031,17 @@ function focusInput(name, caret) {
   });
 }
 
-let toastTimer;
 let toastCopyText = '';
 function showToast(title, copy, type = "info", actions = "") {
+  const warning = type === 'warning' || type === 'warn';
+  if (type !== 'error' && !warning) return;
   const toast = document.getElementById("toast");
   toastCopyText = ui`${title}\n${copy}`;
-  if (type === 'error' && !actions) actions = ui`<button class="icon-button" data-toast-action="copy" title="${t('复制')}" aria-label="${t('复制')}">${icon('copy')}</button><button class="icon-button" data-toast-action="close" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button>`;
-  toast.className = ui`toast ${type}`;
+  if (!actions) actions = ui`<button class="icon-button" data-toast-action="copy" title="${t('复制')}" aria-label="${t('复制')}">${icon('copy')}</button><button class="icon-button" data-toast-action="close" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button>`;
+  toast.className = ui`toast ${warning ? 'warning' : 'error'}`;
   toast.title = ui`${title} · ${copy}`;
   toast.innerHTML = ui`<div class="toast-title">${esc(title)}</div><div class="toast-copy">${esc(copy)}</div>${actions ? ui`<div class="toast-actions">${actions}</div>` : ""}`;
   requestAnimationFrame(() => toast.classList.add("show"));
-  clearTimeout(toastTimer);
-  if (type !== 'error') toastTimer = setTimeout(() => toast.classList.remove("show"), 2600);
 }
 document.addEventListener('click', event => {
   const action = event.target.closest('[data-toast-action]')?.dataset.toastAction;
@@ -1895,7 +2054,7 @@ let codexActionChatId = '';
 async function runCodexChatAction(chat, action, title = null, confirmed = false) {
   const unavailable = codexActionUnavailable(chat, action);
   if (unavailable) { showToast(t('操作不可用'), unavailable, 'error'); return; }
-  if (codexActionInFlight) { showToast(t('Codex 操作进行中'), t('请等待当前操作完成。')); return; }
+  if (codexActionInFlight) { showToast(t('Codex 操作进行中'), t('请等待当前操作完成。'), 'warning'); return; }
   if (action === 'rename' && title == null) {
     showAppPrompt({
       title: t('重命名对话'),
@@ -1932,7 +2091,6 @@ async function runCodexChatAction(chat, action, title = null, confirmed = false)
     nativeSourceSignature = '';
     if (action === 'pin' && enabled) state.openChatFolders.add(autoChatPinKey(chat.projectId));
     await loadNativeSnapshot();
-    showToast(t('Codex 操作已完成'), chat.title);
   } catch (error) { showToast(t('Codex 操作失败'), String(error), 'error'); }
   finally { codexActionInFlight = false; codexActionChatId = ''; render(); }
 }
@@ -1946,7 +2104,6 @@ async function runCodexProjectPin(project) {
     await nativeInvoke('run_project_pin',{projectId:project.id,enabled:!project.codexPinned});
     nativeSourceSignature = '';
     await loadNativeSnapshot();
-    showToast(t('Codex 操作已完成'), project.name);
   } catch (error) { showToast(t('Codex 操作失败'),String(error),'error'); }
   finally { codexActionInFlight = false; codexActionChatId = ''; render(); }
 }
@@ -1968,7 +2125,6 @@ function createChatFolder(parent = '', value = '') {
   state.recycledChatFolders.delete(key);
   state.openChatFolders.add(key);
   saveFolders();
-  showToast(t("已创建本地文件夹"), path);
 }
 
 function renameChatFolder(key) {
@@ -2007,21 +2163,18 @@ function applyChatFolderRename(key, raw) {
     for (const value of values) set.add(value.startsWith(projectId + CHAT_FOLDER_SEPARATOR) ? chatFolderKey(projectId,rewrite(chatFolderName(value))) : value);
   }
   for (const chat of chats) if (chat.projectId === projectId) chat.folder = rewrite(chat.folder);
-  showToast(t("文件夹已重命名"), ui`${oldName} → ${next}`);
 }
 
 function recycleChatFolder(key) {
   const projectId = key.split(CHAT_FOLDER_SEPARATOR)[0], folder = chatFolderName(key);
   for (const candidate of state.localChatFolders) if (candidate.startsWith(projectId + CHAT_FOLDER_SEPARATOR) && (chatFolderName(candidate) === folder || chatFolderName(candidate).startsWith(folder + '/'))) state.recycledChatFolders.add(candidate);
   state.openChatFolders.add(key);
-  showToast(t("文件夹已移入回收站"), t("内部 Chat 通过文件夹状态进入非活动区，没有逐项修改。 "));
 }
 
 function restoreChatFolder(key) {
   const projectId = key.split(CHAT_FOLDER_SEPARATOR)[0], folder = chatFolderName(key);
   for (const candidate of [...state.recycledChatFolders]) if (candidate.startsWith(projectId + CHAT_FOLDER_SEPARATOR) && (chatFolderName(candidate) === folder || chatFolderName(candidate).startsWith(folder + '/'))) state.recycledChatFolders.delete(candidate);
   state.openChatFolders.add(key);
-  showToast(t("文件夹已恢复"), t("原有 Chat 归属和标志保持不变。 "));
 }
 
 function hideContextMenu() {
@@ -2054,7 +2207,6 @@ function deleteProjectFolder(path) {
   if (state.selectedProjectFolder === path || state.selectedProjectFolder.startsWith(prefix)) state.selectedProjectFolder = '';
   state.openFolders.add(AUTO_PROJECT_FOLDER_KEY);
   saveFolders();
-  showToast(t('文件夹已删除'), ui`${t('已移到')}${t(AUTO_PROJECT_FOLDER_LABEL)}`);
 }
 function deleteChatFolder(key) {
   if (!key || key.startsWith('auto:')) return;
@@ -2072,7 +2224,6 @@ function deleteChatFolder(key) {
   if (state.selectedChatFolder === key || (state.selectedChatFolder.startsWith(projectId + CHAT_FOLDER_SEPARATOR) && (chatFolderName(state.selectedChatFolder) === folder || chatFolderName(state.selectedChatFolder).startsWith(prefix)))) state.selectedChatFolder = '';
   state.openChatFolders.add(autoChatFolderKey(projectId));
   saveFolders();
-  showToast(t('文件夹已删除'), ui`${t('已移到')}${t(AUTO_CHAT_FOLDER_LABEL)}`);
 }
 
 const rewritePathPrefix = (value, from, to) => value === from || value.startsWith(from + '/') ? to + value.slice(from.length) : value;
@@ -2206,7 +2357,6 @@ function moveProjectFolder(from, toParent = '') {
     state.selectedProjectFolder = rewritePathPrefix(state.selectedProjectFolder, from, next);
   }
   saveFolders();
-  showToast(t('文件夹已移动'), ui`${from} → ${next}`);
   return true;
 }
 function moveChatFolder(key, toParent = '') {
@@ -2236,7 +2386,6 @@ function moveChatFolder(key, toParent = '') {
     state.selectedChatFolder = rewriteKey(state.selectedChatFolder);
   }
   saveFolders();
-  showToast(t('文件夹已移动'), ui`${from} → ${next}`);
   return true;
 }
 let appDialogRequest = null;
@@ -2334,7 +2483,6 @@ async function requestNewChat(project) {
       projectId: project?.synthetic ? null : project?.id || null,
       projectPath: project && !project.synthetic && project.pathValid ? project.path || null : null
     });
-    showToast(t('已请求 Codex 新建对话'),project?.name || t('无项目对话'));
   } catch(error) { showToast(t('无法请求 Codex 新建对话'),String(error),'error'); }
 }
 let newChatProjectId = '';
@@ -2383,11 +2531,14 @@ document.addEventListener('submit',event => {
 });
 
 const menuButton = (label, action, data = {}, disabled = false, tip = '') => `<button role="menuitem" data-menu-action="${action}" ${Object.entries(data).map(([key,value]) => `data-${key}="${esc(value)}"`).join(' ')} aria-disabled="${disabled}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(data.raw ? label : t(label))}</button>`;
+const menuChoice = (label, action, data, checked) => `<button role="menuitemradio" data-menu-action="${action}" ${Object.entries(data).map(([key,value]) => `data-${key}="${esc(value)}"`).join(' ')} aria-checked="${checked}"><span class="context-menu-check">${checked ? '✓' : ''}</span><span>${esc(t(label))}</span></button>`;
 function displayMenu(markup,x,y) {
   hideConversationPreview('context-menu');
   const menu = document.getElementById('context-menu');
   menu.innerHTML = markup;
   menu.hidden = false;
+  const submenu = menu.querySelector('.context-submenu-popup');
+  menu.classList.toggle('submenu-left', x + menu.offsetWidth + (submenu?.scrollWidth || 0) + 12 > window.innerWidth);
   menu.style.left = `${Math.max(6,Math.min(x,window.innerWidth-menu.offsetWidth-6))}px`;
   menu.style.top = `${Math.max(6,Math.min(y,window.innerHeight-menu.offsetHeight-6))}px`;
   menu.querySelector('button:not([aria-disabled="true"])')?.focus();
@@ -2424,7 +2575,10 @@ function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceF
   const multiple = ids.length > 1;
   let menu = multiple ? '' : chat ? '' : menuButton(project.synthetic ? '在 Codex 新建无项目对话' : '在 Codex 新建对话','new',data);
   if (chat) {
-    menu += menuButton('始终加入动态','recent-include',data) + menuButton('始终移出动态','recent-exclude',data);
+    const allIncluded = ids.every(targetId => state.recentIncludedChatIds.has(targetId));
+    const allExcluded = ids.every(targetId => state.recentExcludedChatIds.has(targetId));
+    const allAutomatic = ids.every(targetId => !state.recentIncludedChatIds.has(targetId) && !state.recentExcludedChatIds.has(targetId));
+    menu += `<div class="context-submenu"><button type="button" class="context-submenu-trigger" aria-haspopup="menu" aria-expanded="false"><span>${esc(t('动态显示'))}</span><span aria-hidden="true">›</span></button><div class="context-submenu-popup" role="menu">${menuChoice('自动','recent-auto',data,allAutomatic)}${menuChoice('加入','recent-include',data,allIncluded)}${menuChoice('移出','recent-exclude',data,allExcluded)}</div></div>`;
     if (!multiple) for (const [action, label] of [['rename','重命名对话'], ...chat.sourceArchived ? [] : [['archive','归档对话']]]) {
       const unavailable = codexActionUnavailable(chat, action);
       menu += menuButton(label,'codex-action',{...data,codexaction:action},Boolean(unavailable),unavailable);
@@ -2487,6 +2641,7 @@ function configurationDocument() {
     theme: state.theme,
     themeFamily: state.themeFamily,
     windowMode: state.windowMode,
+    previewEnabled: state.previewEnabled,
     logLevel: state.logLevel,
     windowWidth: clampWindowWidth(state.singlePaneWidth),
     fontTab: clampFont(state.fontTab),
@@ -2591,6 +2746,7 @@ async function applyImportedAppearance(doc) {
   if (THEME_FAMILIES.some(([id]) => id === appearance.themeFamily)) state.themeFamily = appearance.themeFamily;
   if (['normal','codex','global'].includes(appearance.windowMode)) state.windowMode = appearance.windowMode;
   else if (typeof appearance.windowPinned === 'boolean') state.windowMode = appearance.windowPinned ? 'global' : 'normal';
+  if (typeof appearance.previewEnabled === 'boolean') state.previewEnabled = appearance.previewEnabled;
   if (['error','warn','info','debug'].includes(appearance.logLevel)) state.logLevel = appearance.logLevel;
   if (Number.isFinite(appearance.fontTab)) state.fontTab = clampFont(appearance.fontTab);
   if (Number.isFinite(appearance.fontPane)) state.fontPane = clampFont(appearance.fontPane);
@@ -2606,8 +2762,7 @@ async function exportConfiguration() {
   const exported = configurationDocument();
   if (nativeInvoke) {
     try {
-      const path = await nativeInvoke('export_config_file', {payload: exported});
-      if (path) showToast(t('已导出工具配置'), String(path));
+      await nativeInvoke('export_config_file', {payload: exported});
     } catch (error) {
       showToast(t('导出失败'), String(error), 'error');
     }
@@ -2699,15 +2854,10 @@ async function handleMenuAction(button) {
     if (chat) await runCodexChatAction(chat, codexaction);
     return;
   }
-  if (action === 'recent-include' || action === 'recent-exclude') {
+  if (action === 'recent-auto' || action === 'recent-include' || action === 'recent-exclude') {
     for (const targetId of targetIds) {
-      if (action === 'recent-include') {
-        state.recentIncludedChatIds.add(targetId);
-        state.recentExcludedChatIds.delete(targetId);
-      } else {
-        state.recentIncludedChatIds.delete(targetId);
-        state.recentExcludedChatIds.add(targetId);
-      }
+      state.recentIncludedChatIds[action === 'recent-include' ? 'add' : 'delete'](targetId);
+      state.recentExcludedChatIds[action === 'recent-exclude' ? 'add' : 'delete'](targetId);
     }
     saveFolders();
   }
@@ -2841,6 +2991,14 @@ function updateRowSelection(kind, row, event) {
 
 document.addEventListener("click", async event => {
   if (isPreviewWindow) previewLog('event-click', {target: previewEventTarget(event.target), button: event.button, detail: event.detail, x: event.clientX, y: event.clientY});
+  const submenuTrigger = event.target.closest('.context-submenu-trigger');
+  if (submenuTrigger) {
+    event.preventDefault();
+    const submenu = submenuTrigger.closest('.context-submenu');
+    submenu.classList.toggle('open');
+    submenuTrigger.setAttribute('aria-expanded', String(submenu.classList.contains('open')));
+    return;
+  }
   hideContextMenu();
   const folderCancel = event.target.closest('#folder-editor button[value="cancel"], #folder-editor .folder-editor-close');
   if (folderCancel && folderCancel.getAttribute('type') === 'button') {
@@ -2945,6 +3103,11 @@ document.addEventListener("click", async event => {
     if (name === 'close-settings') { state.settingsOpen = false; render(); return; }
     if (name === 'set-language') { setLanguage(action.dataset.language === 'en' ? 'en' : 'zh'); void saveToolConfig(); render(); return; }
     if (name === 'set-date-bars') { state.showDateBars = action.dataset.dateBars === 'on'; void saveToolConfig(); render(); return; }
+    if (name === 'toggle-conversation-preview') {
+      state.previewEnabled = !state.previewEnabled;
+      if (!state.previewEnabled) hideConversationPreview('setting-disabled');
+      void saveToolConfig(); render(); return;
+    }
     if (name === 'set-window-mode') {
       const previous = state.windowMode, mode = action.dataset.windowMode;
       if (!['normal','codex','global'].includes(mode)) return;
@@ -3100,7 +3263,6 @@ document.addEventListener("click", async event => {
       try {
         if (nativeInvoke) await nativeInvoke("set_window_mode", { mode: state.windowMode });
         void saveToolConfig();
-        showToast(t('窗口层级已修改'), {normal:t('普通窗口'),codex:t('随 Codex 显示'),global:t('全局置顶')}[state.windowMode]);
       } catch (error) {
         state.windowMode = previous;
         showToast(t("无法修改窗口层级"), String(error), "error");
@@ -3119,6 +3281,19 @@ document.addEventListener("click", async event => {
       state.openChatFolders.has(key) ? state.openChatFolders.delete(key) : state.openChatFolders.add(key);
     }
     if (name === 'toggle-chat-timeline-link' || name === 'toggle-global-timeline-link') return;
+    if (name === 'open-recent-rules') { showRecentRulesDialog(); return; }
+    if (name === 'set-recent-rules-tab') {
+      recentRulesTab = action.dataset.ruleTab === 'exclude' ? 'exclude' : 'include';
+      document.getElementById('recent-rules-dialog').innerHTML = recentRulesDialogMarkup();
+      return;
+    }
+    if (name === 'clear-recent-rule') {
+      state.recentIncludedChatIds.delete(action.dataset.id);
+      state.recentExcludedChatIds.delete(action.dataset.id);
+      render();
+      document.getElementById('recent-rules-dialog').innerHTML = recentRulesDialogMarkup();
+      return;
+    }
     if (name === 'toggle-recent-project-column') { state.recentProjectColumnVisible = !state.recentProjectColumnVisible; render(); return; }
     if (name === 'toggle-project-recent-link') { state.projectRecentLinked = !state.projectRecentLinked; savePreferences(); render(); return; }
     if (name === 'clear-selection') {
@@ -3153,7 +3328,6 @@ document.addEventListener("click", async event => {
     if (chat && name === "move-chat-out") {
       chat.folder = "";
       state.openChatFolders.add(autoChatFolderKey(chat.projectId));
-      showToast(ui`已移到${t(AUTO_CHAT_FOLDER_LABEL)}`, chat.title);
     }
     render();
     return;
@@ -3205,7 +3379,6 @@ document.addEventListener("click", async event => {
           void loadNativeSnapshot();
         }
         if (!nativeInvoke) chat.attentionAt = 0;
-        showToast(t("已请求 Codex 打开"), chat.title);
       } catch (error) {
         chat.error = true;
         chat.errorSeen = false;
@@ -3684,7 +3857,6 @@ async function performDrop(event) {
     if (!folder) state.openChatFolders.add(autoChatFolderKey(chat.projectId));
   }
   saveFolders();
-  showToast(t("Chat 已移动"), folder || t('根目录'));
   draggedChatIds = [];
   markDropTarget(null);
   render();
@@ -3797,25 +3969,39 @@ document.addEventListener("pointerup", endResize);
 document.addEventListener("pointercancel", endResize);
 
 
+async function listenForSourceChanges() {
+  if (!nativeInvoke) return;
+  await window.__TAURI__?.event?.listen?.('codex-source-changed', event => {
+    const change = event.payload || {};
+    queueSourceRefresh(change);
+    if (previewChatId && (change.full || change.catalog || change.threads?.includes(previewChatId) && !chats.some(chat => chat.id === previewChatId && chat.working))) refreshConversationPreview();
+  });
+}
+document.addEventListener('visibilitychange', () => {
+  syncLiveTimers();
+  if (!document.hidden && nativeInvoke) {
+    queueSourceRefresh({full:true});
+    if (previewChatId) refreshConversationPreview();
+  }
+});
+
 if (isPreviewWindow) {
   document.body.classList.add('preview-window');
   render();
   void (async () => {
+    await listenForSourceChanges().catch(() => {});
     await loadToolConfig();
     await loadNativeSnapshot();
     await showConversationPreview(previewThreadId);
   })();
   if (nativeInvoke) {
-    setInterval(refreshConversationPreview, 1000);
     void window.__TAURI__?.event?.listen?.(PREVIEW_OPEN_EVENT, event => {
       const id = typeof event.payload === 'string' ? event.payload : event.payload?.id;
-      if (id) void showConversationPreview(id);
+      if (id) void showConversationPreview(id).then(refreshConversationPreview);
     });
   }
 } else {
   updateWorkingFrame();
-  setInterval(updateWorkingFrame, 600);
-  tickExecutionClock();
   applyFontSize();
   render();
   void loadToolConfig().finally(() => {
@@ -3823,15 +4009,11 @@ if (isPreviewWindow) {
     else windowRestoreDone = true;
     if (nativeConfigLoaded && codexMcpEnabled === null) confirmCodexMcpUse();
   });
-  void loadNativeSnapshot();
+  void listenForSourceChanges().finally(() => loadNativeSnapshot());
   if (nativeWindow) {
     void nativeWindow.onResized(() => {
       void syncWindowState(); rememberWindowGeometry();
     });
     void nativeWindow.onMoved?.(() => rememberWindowGeometry());
-  }
-  if (nativeInvoke) {
-    setInterval(refreshConversationPreview, 1000);
-    setInterval(() => { void loadNativeSnapshot(); }, 1000);
   }
 }

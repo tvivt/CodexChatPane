@@ -14,6 +14,8 @@ The default Codex home is:
 
 Set `CODEX_HOME` to use another directory. The app reads these sources without modifying them:
 
+CodexChatPane's own settings are kept separately in `.codex-chat-pane` under that same Codex home.
+
 - `state_5.sqlite`: basic thread information and project associations.
 - `.codex-global-state.json`: global projects, thread assignments, pins, and unread state.
 - `thread_history_1.sqlite`: message times and activity state.

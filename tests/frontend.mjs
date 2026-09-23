@@ -3,7 +3,11 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const tauriConf = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
-assert.equal(tauriConf.app.windows[0].dragDropEnabled, false, 'Windows HTML5 folder drag requires native file-drop intercept off');
+const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+assert.equal(tauriConf.app.windows.length, 0, 'Rust creates windows so they can share the CODEX_HOME data directory');
+assert.ok(rust.includes('source::codex_home()?.join(".codex-chat-pane")'), 'app data lives under CODEX_HOME/.codex-chat-pane');
+assert.equal((rust.match(/\.data_directory\(/g) || []).length, 2, 'main and preview windows share the app data directory');
+assert.ok(rust.includes('.drag_and_drop(false)'), 'Windows HTML5 folder drag requires native file-drop intercept off');
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8') + readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
 assert.ok(html.includes('.chat-row.drag-ready'), 'grab cursor waits for a hold');
 assert.ok(html.includes('.chat-row:hover .chat-actions .icon-button'), 'hover still reveals pin actions');
@@ -23,6 +27,8 @@ assert.match(html, /body\.preview-window #chat-preview \{[^}]*top:0; right:0; wi
 assert.ok(html.includes('.conversation-preview-head[data-window-drag]'), 'preview titlebar is draggable');
 assert.match(html, /\.row-bar\.time-today,\s*\.chat-status-bar\.time-today\s*\{\s*background:var\(--danger\)/, 'today bars use the today color');
 assert.match(html, /\.row-bar\.time-old,\s*\.chat-status-bar\.time-old\s*\{\s*background:var\(--activity-old\)/, 'old bars use gray');
+assert.ok(html.includes('.chat-status-bar.manual-include { background:var(--local); }'), 'manual include uses a solid purple bar');
+assert.ok(html.includes('.chat-status-bar.manual-exclude { background:repeating-linear-gradient(135deg,var(--local)'), 'manual exclude uses a purple striped bar');
 assert.match(html, /\.activity-bar \{[^}]*background: var\(--time-color\)/, 'activity bars use date colors');
 assert.ok(html.includes(':root[data-date-bars="off"] .row-bar'), 'date bars have a hide setting');
 assert.ok(html.includes('.chat-folder-head { color:var(--project); font-size:var(--font-row); font-weight:700; }'), 'Chats folders match chat row text size and stay bold');
@@ -51,7 +57,8 @@ assert.ok(html.includes('.chat-column-resizer.time-column') && html.includes('.c
 const script = ['dynamic.js','i18n.js','app.js'].map(file => readFileSync(new URL('../src/' + file, import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'')).join('\n');
 assert.ok(!script.includes("if (nativeInvoke) void nativeInvoke('set_window_mode',{mode:state.windowMode}).catch(() => {});"), 'startup does not race the loaded window mode');
 assert.ok(script.includes("PREVIEW_WINDOW_LABEL = 'conversation-preview'"), 'preview uses a separate webview window');
-assert.ok(script.includes("url: `/index.html?preview=${encodeURIComponent(id)}`"), 'preview webview opens the preview route');
+assert.ok(script.includes("nativeInvoke('open_conversation_preview_window'"), 'native preview creation shares the CODEX_HOME webview data');
+assert.ok(rust.includes('format!("index.html?preview={}"'), 'preview webview opens the preview route');
 assert.ok(script.includes('data-action="toggle-preview-details"'), 'preview header has total fold controls');
 assert.ok(script.includes('previewRoleLabel') && script.includes("'U'") && script.includes("'A'") && script.includes("'STEER'") && script.includes("icon('chevrons-down')"), 'preview controls use compact U/A fold labels and STEER content labels');
 assert.match(html, /\.conversation-preview-head \.preview-fold-control \{[^}]*gap:0;/, 'preview fold labels touch their expand icons');
@@ -74,11 +81,12 @@ assert.ok(script.includes("renderConversationPreview(false,'prepend',true);") &&
 assert.ok(!script.includes('previewHistoryLoading'), 'preview history paging has one scroll-and-cursor decision');
 assert.ok(script.includes("nativeInvoke('log_preview_event'") && script.includes("previewLog('scroll'") && script.includes("previewLog('event-wheel'") && script.includes("previewLog('event-click'") && script.includes("previewLog('event-contextmenu'"), 'preview loading and input events are debug logged');
 assert.ok(script.includes("hideConversationPreview('close-action')") && script.includes("hideConversationPreview('context-menu')"), 'preview hide sources are tagged in debug logs');
-assert.equal((script.match(/setInterval\(refreshConversationPreview, 1000\)/g) || []).length, 2, 'preview keeps continuous refresh triggers in both window modes');
-assert.ok(script.includes('setInterval(() => { void loadNativeSnapshot(); }, 1000);'), 'native snapshots refresh session state every second');
+assert.equal((script.match(/queueSourceRefresh\(\{activityTick:true\}\)/g) || []).length, 2, 'active main and preview windows refresh status once per tick');
+assert.ok(!script.includes('setInterval(() => { void loadNativeSnapshot(); }, 1000);'), 'active polling does not reload the full catalog');
 assert.ok(script.includes("action === 'archive' && !confirmed") && script.includes("runCodexChatAction(chat, action, title, true)"), 'archive actions require confirmation');
 const fixtures = readFileSync(new URL('./fixtures.js', import.meta.url), 'utf8');
 const app = { innerHTML: '' };
+const toast = { className:'', title:'', innerHTML:'', classList:{add(){},remove(){}} };
 const handlers = new Map();
 const intervals = [];
 const timeouts = [];
@@ -120,7 +128,7 @@ const context = vm.createContext({
   localStorage: { getItem: key => savedLocal.get(key) || null, setItem: (key,value) => savedLocal.set(key,value) },
   document: {
     documentElement: { dataset: {}, style: { setProperty(name, value) { this[name] = value; } } },
-    getElementById: () => app,
+    getElementById: id => id === 'toast' ? toast : app,
     addEventListener: (type, callback) => handlers.set(type, [...(handlers.get(type) || []), callback]),
     querySelectorAll: () => [],
     querySelector: () => null,
@@ -134,6 +142,7 @@ const context = vm.createContext({
   handlers,
   intervals,
   timeouts,
+  toast,
 });
 vm.runInContext(script, context);
 for (const [key,value] of legacyStorage) {
@@ -160,6 +169,21 @@ vm.runInContext(`
   assert.ok(!renderProjectPane().includes('navigation-tabs') && !renderChatPane().includes('navigation-tabs'), 'workspace panes do not duplicate the titlebar tabs');
   const fixture = { id: 'fixture', projectId: 'stock', title: 'Fixture', activityAt: 100, lastUserMessageAt: 100, createdAt: 1, updatedAt: 100, executionStatus: 'inProgress', working: true, codexPinned: true, codexUnread: false };
   let chat = nativeChat(fixture, 0, null);
+  toast.innerHTML = ''; timeouts.length = 0;
+  showToast('opened','normal');
+  assert.equal(toast.innerHTML, '', 'normal operation notifications stay hidden');
+  showToast('warning title','warning body','warning');
+  assert.ok(toast.className.includes('warning') && toast.innerHTML.includes('data-toast-action="copy"') && toast.innerHTML.includes('data-toast-action="close"'), 'warning notifications stay actionable');
+  showToast('error title','error body','error');
+  assert.ok(toast.className.includes('error') && toast.innerHTML.includes('data-toast-action="copy"') && toast.innerHTML.includes('data-toast-action="close"'), 'error notifications stay actionable');
+  assert.equal(timeouts.length, 0, 'warning and error notifications do not auto-dismiss');
+  const savedChatsForRefresh = chats;
+  chats = [chat]; pendingActivityIds.clear(); pendingFullRefresh = false; pendingCatalogRefresh = false; timeouts.length = 0;
+  queueSourceRefresh({history:true});
+  assert.equal(timeouts.length, 0, 'active history writes wait for the next status tick');
+  queueSourceRefresh({activityTick:true});
+  assert.equal(timeouts.length, 1, 'the status tick coalesces active history writes into one query');
+  chats = savedChatsForRefresh; pendingActivityIds.clear(); sourceRefreshTimer = 0; timeouts.length = 0;
   assert.ok(effectiveReasons(nativeChat({...fixture, archived:true},0,{...chat,archiveOverride:false})).includes('已归档'), 'Codex archive must override stale local restore');
   assert.ok(!effectiveReasons(nativeChat({...fixture, archived:false},0,{...chat,sourceArchived:true,reasons:['已归档']})).includes('已归档'), 'Codex unarchive returns the chat to the normal list');
   assert.ok(!/\stitle=/.test(chatRow(chat).split('>')[0]), 'row preview must survive refresh, not use a native title');
@@ -176,7 +200,9 @@ vm.runInContext(`
   assert.ok(chatRow(chat).indexOf('chat-work-cell') < chatRow(chat).indexOf('chat-status-bar'));
   assert.ok(chatRow(chat).indexOf('chat-status-bar') < chatRow(chat).indexOf('chat-type-button'));
   assert.ok(chatRow(chat).indexOf('chat-work-time') < chatRow(chat).indexOf('chat-title'));
-  assert.ok(chatRow(chat).lastIndexOf('chat-preview-icon') > chatRow(chat).lastIndexOf('chat-actions'));
+  assert.ok(!chatRow(chat).includes('chat-preview-icon') && !chatRow(chat).includes('with-preview'), 'disabled preview removes both the icon and its grid column');
+  state.previewEnabled = true;
+  assert.ok(chatRow(chat).includes('with-preview') && chatRow(chat).lastIndexOf('chat-preview-icon') > chatRow(chat).lastIndexOf('chat-actions'));
   assert.ok(chatRow(chat).includes('data-action="toggle-chat-star"'));
   assert.ok(chatRow(chat).indexOf('toggle-chat-star') < chatRow(chat).indexOf('codex-action-pin'), 'Star sits before Codex Pin');
   const activeActions = chatRow({...chat, starred:true, codexPinned:true});
@@ -187,6 +213,9 @@ vm.runInContext(`
   chat.openedAt = 400;
   chat = nativeChat({ ...fixture, executionStatus: 'completed', working: false, activityAt: 300, codexUnread: true }, 0, chat);
   assert.equal(chatRegion(chat), 'unread', 'tool clicks must not override Codex unread');
+  const interruptedUnread = nativeChat({ ...fixture, executionStatus: 'interrupted', working: false, activityAt: 301, codexUnread: true }, 0, chat);
+  assert.equal(interruptedUnread.attentionAt, 0, 'unread interrupted chats are not labelled as completed');
+  assert.ok(chatWorkCell(interruptedUnread, true).includes('date-cell'), 'non-completed unread chats keep their date lead');
   chat = nativeChat({ ...fixture, executionStatus: 'completed', working: false, activityAt: 300 }, 0, chat);
   assert.equal(chatRegion(chat), 'read');
   chat = nativeChat({ ...fixture, executionStatus: 'completed', working: false, activityAt: 300 }, 0, chat);
@@ -273,8 +302,12 @@ vm.runInContext(`
   const chatMenu = itemMenu(example, project, '');
   assert.ok(chatMenu.includes('data-codexaction="rename"'));
   assert.ok(chatMenu.includes('data-codexaction="archive"'));
-  assert.ok(chatMenu.includes('始终加入动态') && chatMenu.includes('始终移出动态') && chatMenu.includes('移动到会话文件夹') && chatMenu.includes('归档对话'));
-  assert.ok(chatMenu.includes('data-menu-action="recent-include"') && chatMenu.includes('data-menu-action="recent-exclude"'));
+  assert.ok(chatMenu.includes('动态显示') && chatMenu.includes('>自动<') && chatMenu.includes('>加入<') && chatMenu.includes('>移出<') && chatMenu.includes('移动到会话文件夹') && chatMenu.includes('归档对话'));
+  assert.ok(chatMenu.includes('context-submenu-popup') && chatMenu.includes('data-menu-action="recent-auto"') && chatMenu.includes('data-menu-action="recent-include"') && chatMenu.includes('data-menu-action="recent-exclude"'));
+  const recentPanelMarkup = projectRecentPanel();
+  assert.ok(recentPanelMarkup.includes('data-action="open-recent-rules"'), 'activity rules have a toolbar button');
+  assert.ok(recentPanelMarkup.indexOf('open-recent-rules') < recentPanelMarkup.indexOf('toggle-recent-project-column'), 'activity rules button sits left of the project-column button');
+  assert.ok(recentRulesDialogMarkup().includes('role="tablist"') && recentRulesDialogMarkup().includes('data-rule-tab="include"') && recentRulesDialogMarkup().includes('data-rule-tab="exclude"'), 'activity rules dialog has include and exclude tabs');
   assert.ok(!chatMenu.includes('在 Codex 打开') && !chatMenu.includes('data-menu-action="toggle-chat-star"') && !chatMenu.includes('data-codexaction="pin"') && !chatMenu.includes('复制 ID'), 'conversation menus only keep shared actions');
   const projectMenu = itemMenu(null, project, '');
   assert.ok(projectMenu.includes('data-menu-action="new"') && projectMenu.includes('移动到项目文件夹') && projectMenu.includes('打开项目文件夹') && projectMenu.includes('data-menu-action="directory"'), 'project menu keeps folder actions separate');
@@ -332,6 +365,7 @@ vm.runInContext(`
   assert.ok(renderChatPane().includes('timeline-view-block'));
   assert.ok(renderChatPane().includes('global-dynamic'));
   assert.ok(renderTitlebar().includes('data-tab="timeline"'));
+  syncLiveTimers();
   assert.ok(intervals.some(timer => timer.milliseconds === 600 && timer.callback === updateWorkingFrame));
   for (let frame = 0; frame < 8; frame++) {
     updateWorkingFrame(frame * 600);
@@ -342,7 +376,7 @@ vm.runInContext(`
   assert.ok(renderTitlebar().includes('data-action="toggle-window-pin"'));
   assert.ok(/window-mode-button[^>]*data-tip="/.test(renderTitlebar()) && !/window-mode-button[^>]*title=/.test(renderTitlebar()), 'window mode uses a stable custom tip');
   assert.ok(!preferenceFields.includes('windowMode') && !preferenceFields.includes('theme') && !preferenceFields.includes('singlePaneWidth') && !preferenceFields.includes('showDateBars'), 'native preferences exclude stable settings owned by settings.toml');
-  assert.ok(browserPreferenceFields.includes('windowMode') && browserPreferenceFields.includes('singlePaneWidth') && browserPreferenceFields.includes('showDateBars'), 'browser-only mode keeps a local fallback');
+  assert.ok(browserPreferenceFields.includes('windowMode') && browserPreferenceFields.includes('singlePaneWidth') && browserPreferenceFields.includes('showDateBars') && browserPreferenceFields.includes('previewEnabled'), 'browser-only mode keeps a local fallback');
   for (const [mode,iconName] of [['normal','pin-off'],['codex','pane'],['global','pin']]) {
     state.windowMode = mode;
     const modeButton = renderTitlebar().match(/data-action="toggle-window-pin"[\\s\\S]*?<\\/button>/)[0];
@@ -356,6 +390,7 @@ vm.runInContext(`
   assert.ok(settings.includes('data-action="nudge-font"') && settings.includes('data-action="toggle-codex-mcp"'));
   assert.ok(!renderTitlebar().includes('data-window-action="minimize"'), 'titlebar hides minimize control');
   assert.ok(settings.includes('data-action="set-date-bars"') && settings.includes('data-date-bars="on"') && settings.includes('data-date-bars="off"'));
+  assert.ok(settings.includes('data-action="toggle-conversation-preview"') && toolConfig().previewEnabled === true, 'settings persist the preview switch');
   assert.ok(settings.includes('data-action="set-log-level"') && settings.includes('data-log-level="debug"'), 'settings expose diagnostic log levels');
   assert.ok(!settings.includes('data-action="set-close-pref"') && settings.includes('关闭窗口会最小化到托盘') && settings.includes('data-action="export-config"') && settings.includes('data-action="import-config"'));
   assert.ok(!renderProjectPane().includes('settings-workspace'));
@@ -412,14 +447,27 @@ vm.runInContext(`
 await vm.runInContext(`(async () => { await windowAction('minimize'); await windowAction('toggleMaximize'); assert.equal(state.windowMaximized,true); assert.ok(renderTitlebar().includes('#i-window-restore')); assert.ok(renderTitlebar().includes('class="window-titlebar" data-window-drag')); await windowAction('startDragging'); await windowAction('close'); await windowAction('invalid'); })()`, context);
 await vm.runInContext(`(async () => {
   const first = projects[0], second = projects[1];
+  const firstChat = chats[0];
   await handleMenuAction({dataset:{menuAction:'project-folder',id:first.id,ids:first.id + ',' + second.id,folder:'Moved'}});
   assert.equal(projectFolders(first).join(','),'Moved');
   assert.equal(projectFolders(second).join(','),'Moved');
   const recentState = {included:[...state.recentIncludedChatIds], excluded:[...state.recentExcludedChatIds]};
-  await handleMenuAction({dataset:{menuAction:'recent-include',id:first.id,ids:first.id}});
-  assert.ok(state.recentIncludedChatIds.has(first.id) && !state.recentExcludedChatIds.has(first.id));
-  await handleMenuAction({dataset:{menuAction:'recent-exclude',id:first.id,ids:first.id}});
-  assert.ok(state.recentExcludedChatIds.has(first.id) && !state.recentIncludedChatIds.has(first.id));
+  await handleMenuAction({dataset:{menuAction:'recent-include',id:firstChat.id,ids:firstChat.id}});
+  assert.ok(state.recentIncludedChatIds.has(firstChat.id) && !state.recentExcludedChatIds.has(firstChat.id));
+  recentRulesTab = 'include';
+  assert.ok(recentRulesDialogMarkup().includes(firstChat.title) && recentRulesDialogMarkup().includes('manual-include') && recentRulesDialogMarkup().includes('clear-recent-rule'), 'included chats appear in the rules dialog and can return to automatic');
+  assert.match(itemMenu(firstChat, projects.find(item=>item.id===firstChat.projectId), ''), /data-menu-action="recent-include"[^>]*aria-checked="true"/);
+  assert.ok(chatStatusBar(firstChat).includes('manual-include') && !projectTimeBar([firstChat]).includes('manual-include'), 'manual include overrides only the chat date bar');
+  await handleMenuAction({dataset:{menuAction:'recent-auto',id:firstChat.id,ids:firstChat.id}});
+  assert.ok(!state.recentIncludedChatIds.has(firstChat.id), 'automatic returns to time-based activity rules');
+  await handleMenuAction({dataset:{menuAction:'recent-exclude',id:firstChat.id,ids:firstChat.id}});
+  assert.ok(state.recentExcludedChatIds.has(firstChat.id) && !state.recentIncludedChatIds.has(firstChat.id));
+  recentRulesTab = 'exclude';
+  assert.ok(recentRulesDialogMarkup().includes(firstChat.title) && recentRulesDialogMarkup().includes('manual-exclude'), 'excluded chats appear in the rules dialog');
+  assert.match(itemMenu(firstChat, projects.find(item=>item.id===firstChat.projectId), ''), /data-menu-action="recent-exclude"[^>]*aria-checked="true"/);
+  assert.ok(chatStatusBar(firstChat).includes('manual-exclude'), 'manual exclude uses the striped bar state');
+  await handleMenuAction({dataset:{menuAction:'recent-auto',id:firstChat.id,ids:firstChat.id}});
+  assert.ok(!state.recentExcludedChatIds.has(firstChat.id), 'automatic clears the exclude override');
   state.recentIncludedChatIds = new Set(recentState.included); state.recentExcludedChatIds = new Set(recentState.excluded);
 })()`, context);
 assert.deepEqual(windowCalls, ['minimize', 'toggleMaximize', 'startDragging', 'close']);

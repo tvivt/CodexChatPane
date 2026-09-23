@@ -180,26 +180,6 @@ fn timestamp() -> String {
     format!("{}.{:03}", elapsed.as_secs(), elapsed.subsec_millis())
 }
 
-pub fn default_log_path() -> PathBuf {
-    #[cfg(windows)]
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Library/Logs"))
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir);
-
-    base.join("CodexChatPane").join("window-attach.log")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{rotate_logs, Level, Logger, MAX_LOG_FILES};

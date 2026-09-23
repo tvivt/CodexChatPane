@@ -22,7 +22,7 @@ CodexChatPane 解决的是本机 Codex Desktop 中 Project 和 Chat 较难同时
 ## 3. 数据所有权
 
 - Codex 拥有 Project、Chat、归档、Codex Pin 和未读状态。
-- CodexChatPane 拥有本地 Folder、Group、星标、手动顺序、主题和窗口设置。
+- CodexChatPane 拥有本地 Folder、Group、星标、动态规则、手动顺序、主题和窗口设置。
 - 工作状态、执行时间、额度和诊断信息由 Codex 数据与事件推导，工具不改写原始事件。
 - 对话正文只在预览时按需读取，不作为本地快照保存。
 
@@ -44,13 +44,16 @@ Chat 的 Project 归类遵循以下优先级：
 - 可切换名称排序、Project 过滤、日期范围和归档视图。
 - Chat 状态可以包含未读、工作中、已完成、失败、被中断和无响应诊断。
 - Project 和 Chat 的 Pin 优先级来自 Codex；本地 Group 不改变 Codex Pin。
+- 最近动态通常由所选天数决定。右键可将对话设为“自动、加入、移出”；“动态规则”对话框汇总两组覆盖并可恢复自动。加入使用紫色实条，移出使用紫色斜纹条。
 
 ## 6. 本地持久化
 
 应用会生成两类本地文件：
 
-- 用户配置目录下的 `settings.toml`：语言、主题、字号、窗口模式、窗口尺寸、日志级别和 MCP 同意状态。
-- 用户配置目录下的 `folders.json`：Folder、Group、Project/Chat 的本地归属、星标、顺序和折叠状态。
+- `%CODEX_HOME%\.codex-chat-pane\settings.toml`：语言、主题、字号、窗口模式、窗口尺寸、预览开关、日志级别和 MCP 同意状态。
+- 同目录下的 `folders.json`：Folder、Group、Project/Chat 的本地归属、星标、动态规则、顺序和折叠状态。
+
+未设置 `CODEX_HOME` 时使用 `%USERPROFILE%\.codex`；预览默认关闭。
 
 筛选、分栏高度和部分高频界面状态保存在浏览器 `localStorage`。这些状态不会同步到 Codex。
 

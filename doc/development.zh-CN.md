@@ -57,13 +57,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 
 发布仓库的 `Windows portable build` 工作流在 `windows-latest` 上运行同一脚本，并上传 `CodexChatPane-windows-portable` artifact。推送到 `main`、推送 `v*` 标签或手动运行工作流都会触发构建；标签构建成功后还会创建 GitHub Release。
 
+开发仓库是文档的唯一维护处。公开的 `README.md`、`README.zh-CN.md`、`doc/` 和截图同步到发布仓库；内部设计文档只保留在开发仓库。发布前在开发仓库更新一次，再同步公开子集。
+
 ## 5. 修改检查表
 
 - 行为修改：更新 `doc/product.zh-CN.md` 和对应前端/Rust 检查。
 - 数据源或快照修改：同时检查 `src-tauri/src/source*`、`src/app.js` 和测试 fixtures。
 - Deep Link 或 MCP 修改：更新 `doc/integration.zh-CN.md`，并验证成功、失败和不可用分支。
 - 布局或交互修改：更新 `doc/usage.zh-CN.md`，运行前端检查；需要视觉验收时使用当前版本的脱敏数据。
-- 配置修改：确认本机 `config/` 文件仍被忽略，不把个人状态加入提交。
+- 配置修改：不要把 `%CODEX_HOME%\.codex-chat-pane\` 下的个人状态加入提交。
 
 ## 6. 提交边界
 
@@ -76,6 +78,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 - `.runtime/`
 - `.codegraph/`
 - `src-tauri/gen/`
-- `config/settings.toml`
-- `config/folders.json`
+- `%CODEX_HOME%\.codex-chat-pane\` 下的个人 `settings.toml` 和 `folders.json`
 - 本机日志、对话导出和真实截图

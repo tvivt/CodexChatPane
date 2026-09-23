@@ -1,5 +1,5 @@
 use super::diagnostics::{Diagnostic, RateLimits};
-use super::{seconds_or_millis, ThreadActivity, TokenUsage};
+use super::{seconds_or_millis, ThreadActivity};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -33,7 +33,6 @@ struct Payload {
     status: Option<String>,
     error: Option<Value>,
     rate_limits: Option<RateLimits>,
-    info: Option<TokenInfo>,
     #[serde(default, deserialize_with = "content_present")]
     content: bool,
     #[serde(default, deserialize_with = "content_present")]
@@ -44,11 +43,6 @@ struct Payload {
     message: bool,
     #[serde(default, deserialize_with = "content_present")]
     text: bool,
-}
-
-#[derive(Deserialize)]
-struct TokenInfo {
-    total_token_usage: TokenUsage,
 }
 
 fn content_present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
@@ -74,7 +68,6 @@ struct Cursor {
     activity: Option<ThreadActivity>,
     has_start: bool,
     rate_limits: Option<RateLimits>,
-    token_usage: Option<TokenUsage>,
     pending_tools: HashSet<String>,
     pending_message: bool,
 }
@@ -101,9 +94,6 @@ impl Cursor {
             return;
         }
         if record.kind == "event_msg" && payload.kind == "token_count" {
-            if let Some(info) = payload.info {
-                self.token_usage = Some(info.total_token_usage);
-            }
             if let (Some(mut limits), Some(at)) = (payload.rate_limits, at) {
                 if limits.limit_id.as_deref().is_none_or(|id| id == "codex") {
                     limits.observed_at = at;
@@ -315,7 +305,6 @@ impl Cursor {
             last_response_at,
             observed: true,
             waiting_for_tool: false,
-            token_usage: self.token_usage.clone(),
             ..Default::default()
         });
     }
@@ -395,7 +384,6 @@ pub(super) fn read_rollout_snapshot(
     cursor.modified = modified;
     let mut activity = cursor.activity.clone();
     if let Some(activity) = activity.as_mut() {
-        activity.token_usage = cursor.token_usage.clone();
         activity.observed = true;
         if activity.working
             && !cutoff.is_some_and(|cutoff| {
@@ -700,26 +688,5 @@ mod tests {
         assert!(activity.diagnostic.is_none());
         activity.update_diagnostic(None, 273000);
         assert_eq!(activity.diagnostic.as_ref().unwrap().kind, "noResponse");
-    }
-
-    #[test]
-    fn keeps_latest_cumulative_token_usage() {
-        let mut cursor = Cursor::default();
-        cursor.apply(
-            serde_json::from_value(serde_json::json!({
-                "type":"event_msg",
-                "timestamp":"2026-09-02T10:00:00Z",
-                "payload":{"type":"token_count","info":{"total_token_usage":{
-                    "input_tokens":142300,"cached_input_tokens":98100,
-                    "output_tokens":21600,"reasoning_output_tokens":8400
-                }}}
-            }))
-            .unwrap(),
-        );
-        let usage = cursor.token_usage.unwrap();
-        assert_eq!(usage.input_tokens, 142300);
-        assert_eq!(usage.cached_input_tokens, 98100);
-        assert_eq!(usage.output_tokens, 21600);
-        assert_eq!(usage.reasoning_output_tokens, 8400);
     }
 }

@@ -18,7 +18,7 @@ Frontend state ──> Project / Chat / Folder UI
     │                         ├─ Deep Link -> Codex Desktop
     │                         └─ App MCP  -> Codex write operations
     │
-User config directory + localStorage
+CODEX_HOME/.codex-chat-pane + localStorage
 ```
 
 ## 2. Code layers
@@ -29,6 +29,7 @@ User config directory + localStorage
 - `src-tauri/src/source.rs`: reads Codex state and aggregates project and chat snapshots.
 - `src-tauri/src/source/rollout.rs`: incrementally parses rollout activity, execution time, tokens, and usage limits.
 - `src-tauri/src/source/diagnostics.rs`: reads a limited set of desktop diagnostic logs and classifies errors.
+- `src-tauri/src/source_watch.rs`: watches Codex data files for catalog and history changes.
 - `src-tauri/src/preview.rs`: reads conversation previews in pages with page and cache size limits.
 - `src-tauri/src/codex_app_mcp.rs`: discovers, calls, and verifies Codex Desktop's internal App MCP.
 - `src-tauri/src/window_attach.rs`: detects the foreground Windows window and coordinates pane visibility.
@@ -47,7 +48,7 @@ User config directory + localStorage
 2. The frontend loads local settings and compatible `localStorage` state.
 3. Rust scans Codex state, global state, and activity sources.
 4. The frontend merges snapshots by stable ID and restores local folder and group relationships.
-5. The main window refreshes snapshots on a fixed interval and updates only necessary state when the signature has not changed.
+5. File changes trigger catalog refreshes; active chats receive a status query once per second. An open preview reads content separately.
 6. If the Rust scan fails, the app keeps the last valid snapshot and reports the error in the UI.
 
 Before native data finishes loading, the app does not write empty frontend state back to local settings. This prevents a startup race from clearing the user's organization.
@@ -64,8 +65,8 @@ Chat activity and diagnostics come from structured events and limited log reads.
 
 ## 5. Persistence boundary
 
-- Stable tool settings are written to `settings.toml` in the Tauri user config directory.
-- Folders, groups, and local assignments are written to `folders.json` in the same directory.
+- Stable tool settings are written to `%CODEX_HOME%\.codex-chat-pane\settings.toml`.
+- Folders, groups, stars, recent activity overrides, and local assignments are written to `folders.json` in the same directory. Without `CODEX_HOME`, the root is `%USERPROFILE%\.codex`.
 - Frequently changing UI state is stored in browser `localStorage`.
 - Original Codex databases, rollouts, and logs are opened read only.
 - These config files are local runtime state and are not committed to the public repository.

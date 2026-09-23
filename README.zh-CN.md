@@ -11,14 +11,15 @@ CodexChatPane 是一个运行在 Windows 上的 Codex Desktop 辅助侧栏：把
 - 按 Project、Chat、最近活动和归档状态浏览本机 Codex 数据。
 - 使用本地 Folder 和 Group 整理 Project、Chat；支持多级文件夹、搜索、排序、多选和拖动。
 - 显示未读、执行中、错误、执行时间、最后活动时间和额度状态。
-- 悬停 Chat 的预览入口，按需分页读取 rollout 内容。
+- 可在设置中开启对话预览（默认关闭）；使用预览入口时才分页读取 rollout 内容。
+- 可将对话始终加入或移出最近动态，并在“动态规则”对话框集中查看；工具 Star 与 Codex Pin 分开保存。
 - 通过 Deep Link 打开已有对话或新建对话。
 - 在用户明确同意后，通过 Codex Desktop 内部 App MCP 修改对话名称、Pin、归档和 Project Pin。
 - 提供主题、语言、字号、窗口模式、日志级别和工具配置导入/导出。
 
 ## 界面预览
 
-![CodexChatPane 界面预览](CodexChatPane.png)
+![CodexChatPane 界面预览](CodexChatPane.zh-CN.png)
 
 ## 兼容性与当前状态
 
@@ -42,7 +43,7 @@ npm run tauri dev
 npm run dev
 ```
 
-桌面运行时默认监听 `127.0.0.1:1420`。首次启动时，应用会读取本机 Codex 数据；本地工具设置和 Folder 状态写入 Windows 用户配置目录，默认是 `%APPDATA%\com.codexchatpane.app\`，不会写入仓库。
+开发服务器监听 `127.0.0.1:1420`。首次启动时，应用会读取本机 Codex 数据；本地工具设置和 Folder 状态写入 `%CODEX_HOME%\.codex-chat-pane\`（默认 `%USERPROFILE%\.codex\.codex-chat-pane\`），不会写入仓库。
 
 ## 获取 Windows 可执行文件
 

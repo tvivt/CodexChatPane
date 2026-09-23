@@ -14,6 +14,8 @@ CodexChatPane 依赖 Codex Desktop 的本机文件和部分桌面能力。它不
 
 也可以通过 `CODEX_HOME` 指向其他目录。应用只读使用以下来源：
 
+CodexChatPane 自身的设置单独保存在该 Codex home 下的 `.codex-chat-pane` 目录。
+
 - `state_5.sqlite`：Thread 基础信息和 Project 关联。
 - `.codex-global-state.json`：全局 Project、Thread assignment、Pin 和未读状态。
 - `thread_history_1.sqlite`：消息时间和活动状态。

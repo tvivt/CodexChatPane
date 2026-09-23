@@ -30,9 +30,14 @@ const REQUIRED_THREAD_COLUMNS: &[&str] = &[
 pub struct SourceSnapshot {
     pub state: String,
     pub error: Option<String>,
-    pub scope_key: String,
-    pub host_id: String,
     pub projects: Vec<ProjectSnapshot>,
+    pub chats: Vec<ChatSnapshot>,
+    pub rate_limits: Option<RateLimits>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityUpdate {
     pub chats: Vec<ChatSnapshot>,
     pub rate_limits: Option<RateLimits>,
 }
@@ -55,11 +60,12 @@ pub struct ProjectSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ChatSnapshot {
     pub id: String,
+    pub rollout_path: PathBuf,
+    pub turn_id: Option<String>,
     pub project_id: String,
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
-    pub recency_at: i64,
     pub archived: bool,
     pub codex_pinned: bool,
     pub codex_unread: Option<bool>,
@@ -70,20 +76,6 @@ pub struct ChatSnapshot {
     pub execution_status: Option<String>,
     pub activity_at: i64,
     pub diagnostic: Option<Diagnostic>,
-    pub turn_count: usize,
-    pub token_usage: Option<TokenUsage>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(super) struct TokenUsage {
-    #[serde(default, rename(serialize = "inputTokens"))]
-    pub input_tokens: i64,
-    #[serde(default, rename(serialize = "cachedInputTokens"))]
-    pub cached_input_tokens: i64,
-    #[serde(default, rename(serialize = "outputTokens"))]
-    pub output_tokens: i64,
-    #[serde(default, rename(serialize = "reasoningOutputTokens"))]
-    pub reasoning_output_tokens: i64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -99,8 +91,6 @@ struct ThreadActivity {
     last_response_at: i64,
     observed: bool,
     waiting_for_tool: bool,
-    turn_count: usize,
-    token_usage: Option<TokenUsage>,
 }
 
 fn execution_duration(
@@ -244,7 +234,20 @@ pub fn scan() -> Result<SourceSnapshot, String> {
     scan_path(&home.join("state_5.sqlite"), &home)
 }
 
+pub fn scan_catalog(previous: &SourceSnapshot) -> Result<SourceSnapshot, String> {
+    let home = codex_home()?;
+    scan_path_with_previous(&home.join("state_5.sqlite"), &home, Some(previous))
+}
+
 fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
+    scan_path_with_previous(database, home, None)
+}
+
+fn scan_path_with_previous(
+    database: &Path,
+    home: &Path,
+    previous: Option<&SourceSnapshot>,
+) -> Result<SourceSnapshot, String> {
     if !database.is_file() {
         return Err(format!("Codex 状态库不存在：{}", database.display()));
     }
@@ -266,12 +269,69 @@ fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
     ) = read_global_state(&home.join(".codex-global-state.json"))?;
     let threads = read_threads(&connection)?;
     let app_server_started_at = desktop_app_server_started_at();
-    let mut thread_activity =
+    let mut thread_activity = if let Some(previous) = previous {
+        previous
+            .chats
+            .iter()
+            .map(|chat| {
+                (
+                    chat.id.clone(),
+                    ThreadActivity {
+                        turn_id: chat.turn_id.clone(),
+                        working: chat.working,
+                        last_user_message_at: chat.last_user_message_at,
+                        execution_started_at: chat.execution_started_at,
+                        execution_ms: chat.execution_ms,
+                        execution_status: chat.execution_status.clone(),
+                        activity_at: chat.activity_at,
+                        diagnostic: chat.diagnostic.clone(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    } else {
         read_thread_activity(&home.join("thread_history_1.sqlite"), app_server_started_at)
-            .unwrap_or_default();
-    let mut rate_limits: Option<RateLimits> = None;
+            .unwrap_or_default()
+    };
+    let mut rate_limits = previous.and_then(|snapshot| snapshot.rate_limits.clone());
+    let previous_paths: HashMap<&str, &Path> = previous
+        .map(|snapshot| {
+            snapshot
+                .chats
+                .iter()
+                .map(|chat| (chat.id.as_str(), chat.rollout_path.as_path()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let history = previous.and_then(|_| {
+        Connection::open_with_flags(
+            home.join("thread_history_1.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()
+    });
+    let has_error = history.as_ref().is_some_and(|connection| {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('thread_turns') WHERE name='error_json')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+    });
     {
         for thread in &threads {
+            if previous_paths.get(thread.id.as_str()) == Some(&thread.rollout_path.as_path()) {
+                continue;
+            }
+            if let Some(activity) = history.as_ref().and_then(|connection| {
+                read_thread_activity_for(connection, &thread.id, app_server_started_at, has_error)
+                    .ok()
+                    .flatten()
+            }) {
+                thread_activity.insert(thread.id.clone(), activity);
+            }
             let Ok((rollout, quota)) =
                 read_rollout_snapshot(&thread.rollout_path, app_server_started_at)
             else {
@@ -285,61 +345,36 @@ fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
                     rate_limits = Some(quota);
                 }
             }
-            if let Some(mut activity) = rollout {
-                if let Some(current) = thread_activity.get(&thread.id) {
-                    if current.turn_id.is_some() && current.turn_id == activity.turn_id {
-                        // task_complete means the task ended; it does not carry success/failure on older logs.
-                        if current.execution_status.as_deref() == Some("failed")
-                            && activity.execution_status.as_deref() == Some("completed")
-                        {
-                            activity.execution_status = current.execution_status.clone();
-                        }
-                        activity.execution_ms = activity.execution_ms.or(current.execution_ms);
-                        activity.turn_count = activity.turn_count.max(current.turn_count);
-                        activity.last_user_message_at = activity
-                            .last_user_message_at
-                            .max(current.last_user_message_at);
-                        activity.last_response_at =
-                            activity.last_response_at.max(current.last_response_at);
-                        if activity.diagnostic.is_none()
-                            && activity.execution_status.as_deref() == Some("failed")
-                        {
-                            activity.diagnostic = current.diagnostic.clone();
-                        }
-                    }
-                }
-                let is_newer = thread_activity
-                    .get(&thread.id)
-                    .is_none_or(|current| activity.activity_at >= current.activity_at);
-                if is_newer {
-                    thread_activity.insert(thread.id.clone(), activity);
-                }
+            if let Some(activity) = rollout {
+                merge_rollout_activity(&mut thread_activity, &thread.id, activity);
             }
         }
     }
-    let active_turns = thread_activity
-        .values()
-        .filter(|activity| activity.working)
-        .filter_map(|activity| activity.turn_id.clone())
-        .collect();
-    let retries = env::var_os("LOCALAPPDATA")
-        .map(|local| {
-            diagnostics::read_retries(
-                &PathBuf::from(local).join("Codex/Logs"),
-                &active_turns,
-                app_server_started_at,
-            )
-        })
-        .unwrap_or_default();
-    let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-    for activity in thread_activity
-        .values_mut()
-        .filter(|activity| activity.working)
-    {
-        activity.update_diagnostic(
-            activity.turn_id.as_ref().and_then(|turn| retries.get(turn)),
-            now,
-        );
+    if previous.is_none() {
+        let active_turns = thread_activity
+            .values()
+            .filter(|activity| activity.working)
+            .filter_map(|activity| activity.turn_id.clone())
+            .collect();
+        let retries = env::var_os("LOCALAPPDATA")
+            .map(|local| {
+                diagnostics::read_retries(
+                    &PathBuf::from(local).join("Codex/Logs"),
+                    &active_turns,
+                    app_server_started_at,
+                )
+            })
+            .unwrap_or_default();
+        let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+        for activity in thread_activity
+            .values_mut()
+            .filter(|activity| activity.working)
+        {
+            activity.update_diagnostic(
+                activity.turn_id.as_ref().and_then(|turn| retries.get(turn)),
+                now,
+            );
+        }
     }
     let known_project_ids: HashSet<String> = projects.iter().map(|row| row.id.clone()).collect();
     let project_ids_by_path: HashMap<String, String> = projects
@@ -384,6 +419,8 @@ fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
 
         chats.push(ChatSnapshot {
             id: thread.id,
+            rollout_path: thread.rollout_path,
+            turn_id: activity.and_then(|activity| activity.turn_id.clone()),
             project_id,
             title: thread
                 .name
@@ -391,7 +428,6 @@ fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
                 .unwrap_or(thread.title),
             created_at: seconds_or_millis(thread.created_at),
             updated_at,
-            recency_at: updated_at,
             archived: thread.archived,
             codex_pinned,
             codex_unread,
@@ -405,8 +441,6 @@ fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
             execution_status: activity.and_then(|activity| activity.execution_status.clone()),
             activity_at: activity.map_or(updated_at, |activity| activity.activity_at),
             diagnostic: activity.and_then(|activity| activity.diagnostic.clone()),
-            turn_count: activity.map_or(0, |activity| activity.turn_count),
-            token_usage: activity.and_then(|activity| activity.token_usage.clone()),
         });
     }
 
@@ -454,12 +488,187 @@ fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
     Ok(SourceSnapshot {
         state: "Ready".to_string(),
         error: None,
-        scope_key: home.to_string_lossy().into_owned(),
-        host_id: "local".to_string(),
         projects,
         chats,
         rate_limits,
     })
+}
+
+fn merge_rollout_activity(
+    activities: &mut HashMap<String, ThreadActivity>,
+    id: &str,
+    mut activity: ThreadActivity,
+) {
+    if let Some(current) = activities.get(id) {
+        if current.turn_id.is_some() && current.turn_id == activity.turn_id {
+            // Older task_complete records do not carry failure details.
+            if current.execution_status.as_deref() == Some("failed")
+                && activity.execution_status.as_deref() == Some("completed")
+            {
+                activity.execution_status = current.execution_status.clone();
+            }
+            activity.execution_ms = activity.execution_ms.or(current.execution_ms);
+            activity.last_user_message_at = activity
+                .last_user_message_at
+                .max(current.last_user_message_at);
+            activity.last_response_at = activity.last_response_at.max(current.last_response_at);
+            if activity.diagnostic.is_none()
+                && activity.execution_status.as_deref() == Some("failed")
+            {
+                activity.diagnostic = current.diagnostic.clone();
+            }
+        }
+    }
+    if activities
+        .get(id)
+        .is_none_or(|current| activity.activity_at >= current.activity_at)
+    {
+        activities.insert(id.to_string(), activity);
+    }
+}
+
+pub fn refresh_activities(snapshot: &mut SourceSnapshot, ids: &[String]) -> ActivityUpdate {
+    let home = codex_home().ok();
+    let cutoff = desktop_app_server_started_at();
+    let history = home.as_ref().and_then(|home| {
+        Connection::open_with_flags(
+            home.join("thread_history_1.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()
+    });
+    let has_error = history.as_ref().is_some_and(|connection| {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('thread_turns') WHERE name='error_json')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+    });
+    let mut activities = HashMap::new();
+    for id in ids {
+        let Some(chat) = snapshot.chats.iter_mut().find(|chat| &chat.id == id) else {
+            continue;
+        };
+        if let Some(activity) = history.as_ref().and_then(|connection| {
+            read_thread_activity_for(connection, id, cutoff, has_error)
+                .ok()
+                .flatten()
+        }) {
+            activities.insert(id.clone(), activity);
+        }
+        if let Ok((activity, quota)) = read_rollout_snapshot(&chat.rollout_path, cutoff) {
+            if let Some(activity) = activity {
+                merge_rollout_activity(&mut activities, id, activity);
+            }
+            if let Some(quota) = quota {
+                if snapshot
+                    .rate_limits
+                    .as_ref()
+                    .is_none_or(|old| quota.observed_at > old.observed_at)
+                {
+                    snapshot.rate_limits = Some(quota);
+                }
+            }
+        }
+    }
+    let active_turns = snapshot
+        .chats
+        .iter()
+        .filter(|chat| chat.working)
+        .filter_map(|chat| chat.turn_id.clone())
+        .chain(
+            activities
+                .values()
+                .filter(|activity| activity.working)
+                .filter_map(|activity| activity.turn_id.clone()),
+        )
+        .collect();
+    let retries = env::var_os("LOCALAPPDATA")
+        .map(|local| {
+            diagnostics::read_retries(
+                &PathBuf::from(local).join("Codex/Logs"),
+                &active_turns,
+                cutoff,
+            )
+        })
+        .unwrap_or_default();
+    let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    let mut changed = Vec::new();
+    for chat in &mut snapshot.chats {
+        if !ids.contains(&chat.id) {
+            continue;
+        }
+        if let Some(mut activity) = activities.remove(&chat.id) {
+            if activity.working {
+                activity.update_diagnostic(
+                    activity.turn_id.as_ref().and_then(|turn| retries.get(turn)),
+                    now,
+                );
+            }
+            chat.turn_id = activity.turn_id;
+            chat.working = activity.working;
+            chat.last_user_message_at = if activity.last_user_message_at > 0 {
+                activity.last_user_message_at
+            } else {
+                chat.updated_at
+            };
+            chat.execution_started_at = activity.execution_started_at;
+            chat.execution_ms = activity.execution_ms;
+            chat.execution_status = activity.execution_status;
+            chat.activity_at = activity.activity_at;
+            chat.diagnostic = activity.diagnostic;
+        } else if cutoff.is_none() {
+            chat.working = false;
+            chat.execution_started_at = None;
+        }
+        changed.push(chat.clone());
+    }
+    for chat in &changed {
+        if let Some(project) = snapshot
+            .projects
+            .iter_mut()
+            .find(|project| project.id == chat.project_id)
+        {
+            project.latest = project.latest.max(chat.last_user_message_at);
+        }
+    }
+    ActivityUpdate {
+        chats: changed,
+        rate_limits: snapshot.rate_limits.clone(),
+    }
+}
+
+fn read_thread_activity_for(
+    connection: &Connection,
+    id: &str,
+    cutoff: Option<i64>,
+    has_error: bool,
+) -> Result<Option<ThreadActivity>, String> {
+    let error_column = if has_error {
+        "turns.error_json"
+    } else {
+        "NULL"
+    };
+    let sql = format!(
+        "SELECT turns.thread_id, turns.status, turns.started_at, turns.completed_at, \
+         turns.duration_ms, COALESCE((SELECT MAX(created_at_ms) FROM thread_items WHERE thread_id=?1 AND item_type='userMessage'), turns.started_at * 1000), \
+         turns.turn_id, {error_column}, \
+         (SELECT MAX(created_at_ms) FROM thread_items WHERE thread_id=?1 AND turn_id=turns.turn_id AND item_type='contextCompaction') \
+         FROM thread_turns AS turns WHERE turns.thread_id=?1 \
+         AND turns.first_user_item_id IS NOT NULL AND turns.started_at IS NOT NULL \
+         ORDER BY turns.rollout_ordinal DESC LIMIT 1"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement.query([id]).map_err(|error| error.to_string())?;
+    rows.next()
+        .map_err(|error| error.to_string())?
+        .map(|row| activity_from_row(row, cutoff).map(|(_, activity)| activity))
+        .transpose()
+        .map_err(|error| error.to_string())
 }
 
 fn read_thread_activity(
@@ -493,71 +702,68 @@ fn read_thread_activity(
                FROM thread_items
                WHERE item_type = 'userMessage'
                GROUP BY thread_id
-             ), turn_counts AS (
-               SELECT thread_id, COUNT(*) AS turn_count
-               FROM thread_turns
-               WHERE first_user_item_id IS NOT NULL
-               GROUP BY thread_id
              )
              SELECT turns.thread_id, turns.status, turns.started_at, turns.completed_at,
                     turns.duration_ms, COALESCE(messages.created_at_ms, turns.started_at * 1000), turns.turn_id, {error_column},
-                    (SELECT MAX(created_at_ms) FROM thread_items WHERE thread_id=turns.thread_id AND turn_id=turns.turn_id AND item_type='contextCompaction'),
-                    COALESCE(counts.turn_count, 0)
+                    (SELECT MAX(created_at_ms) FROM thread_items WHERE thread_id=turns.thread_id AND turn_id=turns.turn_id AND item_type='contextCompaction')
              FROM latest_turn
              JOIN thread_turns AS turns
                ON turns.thread_id = latest_turn.thread_id
               AND turns.rollout_ordinal = latest_turn.rollout_ordinal
-             LEFT JOIN latest_message AS messages ON messages.thread_id = turns.thread_id
-             LEFT JOIN turn_counts AS counts ON counts.thread_id = turns.thread_id"),
+             LEFT JOIN latest_message AS messages ON messages.thread_id = turns.thread_id"),
         )
         .map_err(|error| format!("无法读取 Codex 活动状态：{error}"))?;
     let rows = statement
-        .query_map([], |row| {
-            let thread_id: String = row.get(0)?;
-            let status: String = row.get(1)?;
-            let started_at: i64 = row.get(2)?;
-            let completed_at: Option<i64> = row.get(3)?;
-            let duration_ms: Option<i64> = row.get(4)?;
-            let duration_ms = execution_duration(
-                duration_ms,
-                Some(seconds_or_millis(started_at)),
-                completed_at.map(seconds_or_millis),
-            );
-            let error_json: Option<String> = row.get(7)?;
-            let diagnostic = error_json
-                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
-                .filter(|value| !value.is_null())
-                .map(|value| {
-                    Diagnostic::from_error(
-                        &value,
-                        seconds_or_millis(completed_at.unwrap_or(started_at)),
-                        "thread-history",
-                    )
-                });
-            let working = status == "inProgress"
-                && app_server_started_at.is_some_and(|cutoff| started_at >= cutoff);
-            Ok((
-                thread_id,
-                ThreadActivity {
-                    turn_id: row.get(6)?,
-                    working,
-                    last_user_message_at: row.get(5)?,
-                    execution_started_at: working.then(|| seconds_or_millis(started_at)),
-                    execution_ms: (!working && status != "interrupted")
-                        .then_some(duration_ms)
-                        .flatten(),
-                    execution_status: (!(status == "inProgress" && !working)).then_some(status),
-                    activity_at: seconds_or_millis(completed_at.unwrap_or(started_at)),
-                    diagnostic,
-                    last_response_at: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
-                    turn_count: row.get(9)?,
-                    ..Default::default()
-                },
-            ))
-        })
+        .query_map([], |row| activity_from_row(row, app_server_started_at))
         .map_err(|error| format!("无法查询 Codex 活动状态：{error}"))?;
     rows.collect::<Result<HashMap<_, _>, _>>()
         .map_err(|error| format!("无法解码 Codex 活动状态：{error}"))
+}
+
+fn activity_from_row(
+    row: &rusqlite::Row<'_>,
+    app_server_started_at: Option<i64>,
+) -> rusqlite::Result<(String, ThreadActivity)> {
+    let thread_id: String = row.get(0)?;
+    let status: String = row.get(1)?;
+    let started_at: i64 = row.get(2)?;
+    let completed_at: Option<i64> = row.get(3)?;
+    let duration_ms: Option<i64> = row.get(4)?;
+    let duration_ms = execution_duration(
+        duration_ms,
+        Some(seconds_or_millis(started_at)),
+        completed_at.map(seconds_or_millis),
+    );
+    let error_json: Option<String> = row.get(7)?;
+    let diagnostic = error_json
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            Diagnostic::from_error(
+                &value,
+                seconds_or_millis(completed_at.unwrap_or(started_at)),
+                "thread-history",
+            )
+        });
+    let working =
+        status == "inProgress" && app_server_started_at.is_some_and(|cutoff| started_at >= cutoff);
+    Ok((
+        thread_id,
+        ThreadActivity {
+            turn_id: row.get(6)?,
+            working,
+            last_user_message_at: row.get(5)?,
+            execution_started_at: working.then(|| seconds_or_millis(started_at)),
+            execution_ms: (!working && status != "interrupted")
+                .then_some(duration_ms)
+                .flatten(),
+            execution_status: (!(status == "inProgress" && !working)).then_some(status),
+            activity_at: seconds_or_millis(completed_at.unwrap_or(started_at)),
+            diagnostic,
+            last_response_at: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+            ..Default::default()
+        },
+    ))
 }
 
 #[cfg(windows)]
@@ -893,7 +1099,7 @@ mod tests {
         );
         let assigned = snapshot.chats.iter().find(|chat| chat.id == "t1").unwrap();
         assert_eq!(assigned.title, "Visible");
-        assert_eq!(assigned.recency_at, 2000);
+        assert_eq!(assigned.updated_at, 2000);
         assert!(assigned.codex_pinned);
         assert_eq!(assigned.codex_unread, Some(true));
         assert_eq!(
@@ -934,6 +1140,31 @@ mod tests {
             .chats
             .iter()
             .all(|chat| chat.codex_unread.is_none()));
+
+        let mut previous = snapshot;
+        previous
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == "t1")
+            .unwrap()
+            .working = true;
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE threads SET name='Renamed', archived=1 WHERE id='t1'",
+                [],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO threads VALUES('t4', 'New', NULL, 1, 6, 6, 0, '', 'vscode', 'user', 'C:\\Pane', NULL)", []).unwrap();
+        state["pinned-thread-ids"] = serde_json::json!([]);
+        fs::write(&state_path, state.to_string()).unwrap();
+        let updated =
+            scan_path_with_previous(&database, directory.path(), Some(&previous)).unwrap();
+        let renamed = updated.chats.iter().find(|chat| chat.id == "t1").unwrap();
+        assert_eq!(renamed.title, "Renamed");
+        assert!(renamed.archived && renamed.working);
+        assert!(!renamed.codex_pinned);
+        assert!(updated.chats.iter().any(|chat| chat.id == "t4"));
     }
 
     #[test]
@@ -997,11 +1228,23 @@ mod tests {
         let activity = read_thread_activity(&database, Some(100)).unwrap();
         assert!(activity["active"].working);
         assert_eq!(activity["active"].last_user_message_at, 121000);
-        assert_eq!(activity["active"].turn_count, 2);
         assert_eq!(activity["idle"].execution_ms, Some(3456));
         assert!(!activity["stale"].working);
         assert_eq!(activity["stale"].execution_status, None);
         assert_eq!(activity["stopped"].execution_ms, None);
+        let connection = Connection::open(&database).unwrap();
+        for id in ["active", "idle", "stale", "stopped"] {
+            let targeted = read_thread_activity_for(&connection, id, Some(100), false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(targeted.working, activity[id].working);
+            assert_eq!(targeted.execution_status, activity[id].execution_status);
+            assert_eq!(targeted.execution_ms, activity[id].execution_ms);
+            assert_eq!(
+                targeted.last_user_message_at,
+                activity[id].last_user_message_at
+            );
+        }
     }
 
     #[test]

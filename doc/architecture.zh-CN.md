@@ -18,7 +18,7 @@ Rust SourceSnapshot
     │                 ├─ Deep Link -> Codex Desktop
     │                 └─ App MCP  -> Codex 写操作
     │
-用户配置目录 + localStorage
+CODEX_HOME/.codex-chat-pane + localStorage
 ```
 
 ## 2. 代码分层
@@ -29,6 +29,7 @@ Rust SourceSnapshot
 - `src-tauri/src/source.rs`：读取 Codex 状态库并聚合 Project、Chat 快照。
 - `src-tauri/src/source/rollout.rs`：增量解析 rollout 活动、执行时间、Token 和额度。
 - `src-tauri/src/source/diagnostics.rs`：读取有限的桌面诊断日志并分类错误。
+- `src-tauri/src/source_watch.rs`：监听 Codex 数据文件的目录和历史变化。
 - `src-tauri/src/preview.rs`：按页读取对话预览，限制单页和缓存大小。
 - `src-tauri/src/codex_app_mcp.rs`：发现、调用和验证 Codex Desktop 内部 App MCP。
 - `src-tauri/src/window_attach.rs`：Windows 前台窗口识别和 Pane 显示联动。
@@ -47,7 +48,7 @@ Rust SourceSnapshot
 2. 前端加载本地配置和兼容的 `localStorage` 状态。
 3. Rust 扫描 Codex 状态库、全局状态和活动来源。
 4. 前端用稳定 ID 合并快照，恢复本地 Folder 和 Group 关系。
-5. 主窗口按固定周期刷新快照；签名未变化时只更新必要状态。
+5. 文件变化触发目录刷新；活动对话每秒查询一次状态，打开的预览另行按需读取。
 6. Rust 扫描失败时保留最后有效快照，并向界面报告错误。
 
 原生数据加载完成前不会把空的前端状态写回本地配置，避免启动竞态清空用户整理结果。
@@ -64,8 +65,8 @@ Chat 的工作状态和诊断来自结构化事件与受限日志读取；rollou
 
 ## 5. 持久化边界
 
-- 稳定工具配置写入 Tauri 用户配置目录下的 `settings.toml`。
-- Folder、Group 和本地归属写入同一目录下的 `folders.json`。
+- 稳定工具配置写入 `%CODEX_HOME%\.codex-chat-pane\settings.toml`。
+- Folder、Group、Star、动态规则和本地归属写入同目录下的 `folders.json`。未设置 `CODEX_HOME` 时根目录为 `%USERPROFILE%\.codex`。
 - 高频界面状态写入浏览器 `localStorage`。
 - Codex 原始数据库、rollout 和日志只读打开。
 - 配置文件是本机运行状态，公开仓库不会提交它们。
