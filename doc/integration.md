@@ -1,28 +1,30 @@
-# Codex 接入说明
+# Codex integration
 
-CodexChatPane 依赖 Codex Desktop 的本机文件和部分桌面能力。它不是公开 Codex API 的替代品；内部接口变化时，读取和写入能力可能分别受到影响。
+[English](integration.md) | [简体中文](integration.zh-CN.md)
 
-## 1. 本地数据
+CodexChatPane uses local Codex Desktop files and some desktop capabilities. It is not a replacement for the public Codex API. Changes to internal interfaces may affect read and write features independently.
 
-默认 Codex home 为：
+## 1. Local data
+
+The default Codex home is:
 
 ```text
 %USERPROFILE%\.codex
 ```
 
-也可以通过 `CODEX_HOME` 指向其他目录。应用只读使用以下来源：
+Set `CODEX_HOME` to use another directory. The app reads these sources without modifying them:
 
-- `state_5.sqlite`：Thread 基础信息和 Project 关联。
-- `.codex-global-state.json`：全局 Project、Thread assignment、Pin 和未读状态。
-- `thread_history_1.sqlite`：消息时间和活动状态。
-- rollout JSONL：工作状态、执行时间、Token、额度、错误和预览内容。
-- Codex Desktop 日志：有限的 retry 和活动诊断。
+- `state_5.sqlite`: basic thread information and project associations.
+- `.codex-global-state.json`: global projects, thread assignments, pins, and unread state.
+- `thread_history_1.sqlite`: message times and activity state.
+- Rollout JSONL: working state, execution time, tokens, usage limits, errors, and preview content.
+- Codex Desktop logs: a limited set of retry and activity diagnostics.
 
-启动时会检查关键 SQLite 表和字段。schema 不满足要求时，应用报告不兼容，而不是猜测字段含义。
+At startup, the app checks key SQLite tables and columns. If the schema does not match, it reports an incompatibility instead of guessing what fields mean.
 
-## 2. Deep Link
+## 2. Deep links
 
-支持的主要路由：
+Main supported routes:
 
 ```text
 codex://threads/<thread-id>
@@ -30,41 +32,41 @@ codex://threads/new
 codex://threads/new?path=<project-path>
 ```
 
-新建 Project 对话使用项目路径，不使用已经废弃的 `projectId` 查询参数。所有 Thread ID 和路径都会先验证和编码。
+Creating a conversation in a project uses the project path, not the deprecated `projectId` query parameter. Thread IDs and paths are validated and encoded first.
 
 ## 3. Codex App MCP
 
-写操作默认关闭，需要用户在设置中明确启用。每次执行都会：
+Write operations are off by default and must be explicitly enabled in settings. Each operation:
 
-1. 重新发现可用的 Codex App MCP 工具。
-2. 检查当前能力和参数映射。
-3. 调用目标操作。
-4. 等待 Codex 状态稳定。
-5. 重新读取快照确认结果。
+1. Rediscovers available Codex App MCP tools.
+2. Checks current capabilities and parameter mappings.
+3. Calls the requested operation.
+4. Waits for Codex state to settle.
+5. Reloads the snapshot to verify the result.
 
-当前接入的写操作包括：
+Supported write operations include:
 
-- Chat 重命名。
-- Chat Pin / Unpin。
-- Chat 归档。
-- Project Pin / Unpin。
+- Rename a chat.
+- Pin or unpin a chat.
+- Archive a chat.
+- Pin or unpin a project.
 
-如果发现工具不可用、Renderer 未激活或 Codex 返回错误，界面显示失败提示，不把本地状态伪装成成功。
+If a tool is unavailable, the renderer is not active, or Codex returns an error, the UI reports failure instead of showing a false local success.
 
-## 4. 安全边界
+## 4. Safety boundary
 
-- 普通浏览不需要 MCP 同意。
-- 数据库、历史库、rollout 和日志以只读方式打开。
-- 应用不把对话正文上传到网络服务。
-- Deep Link 和外部命令使用参数化路径，不拼接 shell 命令。
-- App MCP 是 Codex Desktop 内部能力，不能视为稳定公共协议。
+- Normal browsing does not require MCP consent.
+- Databases, history, rollouts, and logs are opened read only.
+- The app does not upload conversation text to a network service.
+- Deep links and external commands use parameterized paths rather than concatenated shell commands.
+- App MCP is an internal Codex Desktop capability, not a stable public protocol.
 
-## 5. 兼容性排查
+## 5. Compatibility troubleshooting
 
-Codex 更新后如果出现空列表、schema 不兼容或写操作失败，按以下顺序检查：
+If lists become empty, the schema becomes incompatible, or write operations fail after a Codex update, check in this order:
 
-1. 确认 `CODEX_HOME` 和 Codex Desktop 进程。
-2. 检查 `state_5.sqlite` 是否可读以及关键字段是否存在。
-3. 查看界面错误和本地日志级别。
-4. 区分只读数据问题、rollout 解析问题和 App MCP 写操作问题。
-5. 修改接入代码前先记录实际 schema 或工具返回，不凭名称推断。
+1. Confirm `CODEX_HOME` and the Codex Desktop process.
+2. Check whether `state_5.sqlite` is readable and has the required columns.
+3. Review UI errors and the local log level.
+4. Separate read-only data issues, rollout parsing issues, and App MCP write issues.
+5. Record the actual schema or tool response before changing integration code; do not infer behavior from names alone.

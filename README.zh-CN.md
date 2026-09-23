@@ -60,11 +60,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 
 | 目的 | 文档 |
 | --- | --- |
-| 怎么使用 | [doc/usage.md](doc/usage.md) |
-| 理解产品行为和数据所有权 | [doc/product.md](doc/product.md) |
-| 理解代码结构和数据流 | [doc/architecture.md](doc/architecture.md) |
-| 理解 Codex 数据、Deep Link 和 App MCP | [doc/integration.md](doc/integration.md) |
-| 修改、测试和构建项目 | [doc/development.md](doc/development.md) |
+| 怎么使用 | [doc/usage.zh-CN.md](doc/usage.zh-CN.md) |
+| 理解产品行为和数据所有权 | [doc/product.zh-CN.md](doc/product.zh-CN.md) |
+| 理解代码结构和数据流 | [doc/architecture.zh-CN.md](doc/architecture.zh-CN.md) |
+| 理解 Codex 数据、Deep Link 和 App MCP | [doc/integration.zh-CN.md](doc/integration.zh-CN.md) |
+| 修改、测试和构建项目 | [doc/development.zh-CN.md](doc/development.zh-CN.md) |
 
 ## 验证
 

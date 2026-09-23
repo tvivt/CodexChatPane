@@ -1,61 +1,63 @@
-# 产品模型
+# Product model
 
-本文定义 CodexChatPane 当前版本的用户可见行为和数据边界。代码实现细节见 [architecture.md](architecture.md)，Codex 接入细节见 [integration.md](integration.md)。
+[English](product.md) | [简体中文](product.zh-CN.md)
 
-## 1. 产品目标
+This document describes the current user-visible behavior and data boundaries of CodexChatPane. See [architecture.md](architecture.md) for implementation details and [integration.md](integration.md) for Codex integration.
 
-CodexChatPane 解决的是本机 Codex Desktop 中 Project 和 Chat 较难同时浏览、筛选和整理的问题。它提供一个本地辅助视图，不替代 Codex Desktop，也不建立新的远端数据源。
+## 1. Product goal
 
-## 2. 核心实体
+CodexChatPane makes local Codex Desktop projects and chats easier to browse, filter, and organize together. It provides a companion local view; it does not replace Codex Desktop or create another remote data source.
 
-| 实体 | 来源 | 含义 |
+## 2. Core entities
+
+| Entity | Owner | Meaning |
 | --- | --- | --- |
-| Project | Codex | Codex 中的项目身份、名称和路径 |
-| Chat | Codex | 对话身份、标题、归档状态、所属 Project 和时间 |
-| Folder | CodexChatPane | 本地的层级整理方式 |
-| Group | CodexChatPane | 可交叉复用的本地集合 |
-| Timeline | Codex 事件与 rollout | 最近活动、执行时间、当前状态和额度 |
-| Archive | Codex | Codex 原生归档状态，不等同于本地 Folder 回收站 |
+| Project | Codex | Project identity, name, and path in Codex |
+| Chat | Codex | Conversation identity, title, archive status, project, and timestamps |
+| Folder | CodexChatPane | Local hierarchical organization |
+| Group | CodexChatPane | Local collection that can overlap with other groups |
+| Timeline | Codex events and rollouts | Recent activity, execution time, current state, and usage limits |
+| Archive | Codex | Native Codex archive state, separate from the local folder recycle bin |
 
-## 3. 数据所有权
+## 3. Data ownership
 
-- Codex 拥有 Project、Chat、归档、Codex Pin 和未读状态。
-- CodexChatPane 拥有本地 Folder、Group、星标、手动顺序、主题和窗口设置。
-- 工作状态、执行时间、额度和诊断信息由 Codex 数据与事件推导，工具不改写原始事件。
-- 对话正文只在预览时按需读取，不作为本地快照保存。
+- Codex owns projects, chats, archives, Codex pins, and unread state.
+- CodexChatPane owns local folders, groups, stars, manual order, themes, and window settings.
+- Working state, execution time, usage limits, and diagnostics are derived from Codex data and events; the app does not rewrite original events.
+- Conversation text is read on demand for previews and is not saved in local snapshots.
 
-## 4. Project 与 Chat 归类
+## 4. Project assignment for chats
 
-Chat 的 Project 归类遵循以下优先级：
+Chat-to-project assignment follows this priority:
 
-1. 明确的无 Project 标记。
-2. Codex 全局的 Thread-Project assignment。
-3. Thread 自身的 `project_id`。
-4. Thread 当前工作目录与 Project 路径匹配。
-5. 仍无法归类时进入合成的“未分类对话” Project。
+1. An explicit no-project marker.
+2. Codex's global thread-to-project assignment.
+3. The thread's own `project_id`.
+4. A match between the thread's current working directory and a project path.
+5. If none match, the chat goes into a synthetic "Unclassified chats" project.
 
-合成 Project 只是界面占位，不写回 Codex。
+The synthetic project is only a UI placeholder and is not written back to Codex.
 
-## 5. 排序与状态
+## 5. Sorting and status
 
-- 默认按活动区域和接收时间排序，不把本地点击时间当作 Codex 活动时间。
-- 可切换名称排序、Project 过滤、日期范围和归档视图。
-- Chat 状态可以包含未读、工作中、已完成、失败、被中断和无响应诊断。
-- Project 和 Chat 的 Pin 优先级来自 Codex；本地 Group 不改变 Codex Pin。
+- By default, chats are ordered by activity area and received time; local click time is not treated as Codex activity.
+- Name sorting, project filtering, date ranges, and archive views are available.
+- Chat status can include unread, working, completed, failed, interrupted, and no-response diagnostics.
+- Project and chat pin priority comes from Codex; local groups do not change Codex pins.
 
-## 6. 本地持久化
+## 6. Local persistence
 
-应用会生成两类本地文件：
+The app creates two kinds of local files:
 
-- 用户配置目录下的 `settings.toml`：语言、主题、字号、窗口模式、窗口尺寸、日志级别和 MCP 同意状态。
-- 用户配置目录下的 `folders.json`：Folder、Group、Project/Chat 的本地归属、星标、顺序和折叠状态。
+- `settings.toml` in the user config directory: language, theme, font sizes, window mode and dimensions, log level, and MCP consent.
+- `folders.json` in the same directory: folders, groups, local project and chat assignments, stars, order, and collapse state.
 
-筛选、分栏高度和部分高频界面状态保存在浏览器 `localStorage`。这些状态不会同步到 Codex。
+Filters, pane heights, and some frequently changing UI state are stored in browser `localStorage`. They are not synced to Codex.
 
-## 7. 明确不做的事
+## 7. Out of scope
 
-- 不上传对话、rollout、日志或本机数据库。
-- 不把本地 Folder 自动转换成 Codex Project。
-- 不把合成 Project 写回 Codex。
-- 不承诺兼容 Codex Desktop 的公开稳定 API 之外的所有未来版本。
-- 当前不承诺 macOS 或 Linux 的窗口联动行为。
+- Uploading conversations, rollouts, logs, or local databases.
+- Automatically converting local folders into Codex projects.
+- Writing synthetic projects back to Codex.
+- Promising compatibility with every future Codex Desktop version beyond its stable public APIs.
+- Providing macOS or Linux window integration at present.

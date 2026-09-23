@@ -1,100 +1,102 @@
-# 使用说明
+# Usage guide
 
-本文面向第一次使用 CodexChatPane 的用户。
+[English](usage.md) | [简体中文](usage.zh-CN.md)
 
-## 1. 启动
+This guide is for first-time CodexChatPane users.
 
-开发环境在项目根目录执行：
+## 1. Start the app
+
+For development, run these commands from the repository root:
 
 ```powershell
 npm ci
 npm run tauri dev
 ```
 
-发布版直接运行 `CodexChatPane.exe`，无需安装；目标 Windows 需要已安装 WebView2 Runtime。
+For a release build, run `CodexChatPane.exe` directly without installation. The target Windows machine needs WebView2 Runtime installed.
 
-CodexChatPane 启动后会读取本机 Codex 数据。它不会创建新的 Codex 账户，也不会把数据上传到远端。
+CodexChatPane reads local Codex data at startup. It does not create another Codex account or upload that data to a remote service.
 
-如果只执行 `npm run dev`，得到的是浏览器前端预览：可以查看布局和部分交互，但不能读取本机 Codex 数据、联动窗口或执行 Codex 操作。
+Running only `npm run dev` starts a browser preview of the frontend. You can inspect the layout and some interactions, but it cannot read local Codex data, coordinate windows, or perform Codex actions.
 
-## 2. 主界面
+## 2. Main window
 
 ### Projects
 
-Projects 区域用于从 Project 角度查看最近对话：
+The Projects area shows recent conversations from a project perspective:
 
-- 顶部的最近活动区域显示最近 N 天的对话摘要。
-- Project 结构区域显示 Codex Project 和本地 Folder。
-- 选择 Project 后，右侧或下方区域显示该 Project 的 Chat。
-- 没有 Project 的对话会进入固定的“项目/对话”归类，不会被伪造为真实 Project。
+- The recent activity area at the top shows chat summaries from the last N days.
+- The project structure area shows Codex projects and local folders.
+- Selecting a project shows its chats in the adjacent or lower area.
+- Chats without a project appear in a fixed "Project/Chats" category rather than being represented as a real project.
 
 ### Chats
 
-Chats 区域用于全局浏览和整理对话：
+The Chats area provides a global view for browsing and organizing conversations:
 
-- `PIN` 显示 Codex 中已 Pin 的对话。
-- `ALL` 显示可用对话。
-- 自建 Folder 可以多级嵌套；一个 Chat 可以被整理到本地 Folder。
-- 支持搜索、Project 过滤、排序、归档视图和多选。
+- `PIN` shows chats pinned in Codex.
+- `ALL` shows available chats.
+- Custom folders can be nested; a chat can be placed in a local folder.
+- Search, project filtering, sorting, archive views, and multi-selection are available.
 
-## 3. 常用操作
+## 3. Common actions
 
-### 打开对话
+### Open a chat
 
-点击 Chat 行或操作菜单即可让 Codex Desktop 打开对应对话。CodexChatPane 不复制对话正文，只通过 Deep Link 定位目标。
+Click a chat row or its action menu to open the conversation in Codex Desktop. CodexChatPane does not copy the conversation text; it uses a deep link to locate the target.
 
-### 预览对话
+### Preview a chat
 
-使用 Chat 行上的预览入口可以查看对话摘要。内容按需从对应 rollout 分页读取；关闭预览后不会把正文保存到工具配置。
+Use the preview control on a chat row to view its content. Pages are read from the corresponding rollout on demand; closing the preview does not save the text to tool settings.
 
-### 整理 Folder
+### Organize folders
 
-在 Projects 或 Chats 区域创建本地 Folder，然后把 Project 或 Chat 拖入目标位置。Folder、Group、顺序和折叠状态属于 CodexChatPane，不会写回 Codex 的 Project 结构。
+Create a local folder in Projects or Chats, then drag a project or chat into it. Folders, groups, order, and collapse state belong to CodexChatPane and are not written into Codex's project structure.
 
-### 使用 Group
+### Use groups
 
-Group 是本地的交叉组织方式。一个 Project 或 Chat 可以属于多个 Group；删除 Group 只删除本地关系，不删除 Codex 数据。
+A group is a local, overlapping collection. A project or chat can belong to multiple groups. Deleting a group removes only the local relationship, not Codex data.
 
-### 修改 Codex 状态
+### Change Codex state
 
-重命名、Pin、归档和 Project Pin 属于 Codex 写操作：
+Renaming, pinning, archiving, and project pinning are Codex write operations:
 
-1. 在设置中启用“Codex MCP 操作”。
-2. 首次执行时确认授权。
-3. 从 Chat 或 Project 菜单执行操作。
-4. 等待操作完成并查看提示。
+1. Enable "Codex MCP operations" in settings.
+2. Confirm consent before the first operation.
+3. Choose the action from a chat or project menu.
+4. Wait for completion and check the result message.
 
-归档会要求再次确认；已归档 Chat 通常需要先恢复后才能继续重命名或 Pin。
+Archiving asks for another confirmation. An archived chat usually must be restored before it can be renamed or pinned.
 
-## 4. 设置
+## 4. Settings
 
-设置页提供：
+The settings page provides:
 
-- 中文/英文。
-- 亮色/暗色和主题族。
-- Tab、栏和行字号。
-- 普通窗口、随 Codex 显示、全局置顶。
-- 日期颜色竖条。
-- 日志级别。
-- Codex MCP 操作开关。
-- 工具配置导入和导出。
+- Chinese and English.
+- Light and dark modes and theme families.
+- Tab, pane, and row font sizes.
+- Normal window, show with Codex, and always on top modes.
+- Colored date bars.
+- Log level.
+- Codex MCP operations toggle.
+- Tool settings import and export.
 
-本地设置位于 Windows 用户配置目录下的 `settings.toml`，Folder 和 Group 状态位于同目录的 `folders.json`。默认目录为 `%APPDATA%\com.codexchatpane.app\`，这两个文件由应用生成，不进入仓库。
+Local settings are in `settings.toml` under the Windows user config directory. Folder and group state is in `folders.json` in the same directory. The default directory is `%APPDATA%\com.codexchatpane.app\`. The app creates these files; they are not committed to the repository.
 
-## 5. 常见问题
+## 5. Troubleshooting
 
-### 页面显示“正在读取 Codex 数据”或同步失败
+### The page says "Reading Codex data" or sync fails
 
-确认 Codex Desktop 正在运行，并检查 Codex 数据目录是否可访问。可通过 `CODEX_HOME` 指向自定义数据目录。应用会保留最后一次有效快照，不会用空列表覆盖已有内容。
+Confirm Codex Desktop is running and its data directory is accessible. Use `CODEX_HOME` to point to a custom data directory. The app keeps the last valid snapshot instead of replacing it with an empty list.
 
-### 只能浏览，不能重命名或归档
+### Browsing works, but rename or archive does not
 
-只读浏览不依赖 MCP。写操作需要在设置中启用 Codex MCP；Codex 更新后内部 MCP 可能发生变化，此时写操作会失败，但不会影响本地 Folder 整理。
+Read-only browsing does not depend on MCP. Write operations require Codex MCP to be enabled in settings. If a Codex update changes its internal MCP, write operations may fail without affecting local folder organization.
 
-### 想重置本地界面状态
+### Reset local UI state
 
-先关闭应用，再备份并移走用户配置目录下的 `settings.toml` 和 `folders.json`。下次启动时会使用默认设置并重新创建本地配置。
+Close the app, then back up and move `settings.toml` and `folders.json` out of the user config directory. The next launch uses defaults and recreates the local settings.
 
-### 想查看调试信息
+### View debug information
 
-在设置中将日志级别调为 `debug`。日志写入本机 CodexChatPane 数据目录，不提交到仓库。
+Set the log level to `debug` in settings. Logs are written to the local CodexChatPane data directory and are not committed to the repository.

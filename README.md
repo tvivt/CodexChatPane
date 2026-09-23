@@ -54,7 +54,7 @@ To build from source on Windows, run this from the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 ```
 
-The script runs the same install, checks, and build steps as CI. The final executable is `release\CodexChatPane.exe`. See [Development and validation](doc/development.md) for environment requirements and details (Chinese).
+The script runs the same install, checks, and build steps as CI. The final executable is `release\CodexChatPane.exe`. See [Development and validation](doc/development.md) for environment requirements and details.
 
 ## Documentation
 
@@ -65,8 +65,6 @@ The script runs the same install, checks, and build steps as CI. The final execu
 | Code structure and data flow | [doc/architecture.md](doc/architecture.md) |
 | Codex data, deep links, and App MCP | [doc/integration.md](doc/integration.md) |
 | Development, tests, and builds | [doc/development.md](doc/development.md) |
-
-The linked documentation is currently in Chinese.
 
 ## Validation
 
