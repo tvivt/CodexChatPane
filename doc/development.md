@@ -55,7 +55,7 @@ The final output is `release/CodexChatPane.exe`; Cargo's intermediate output sta
 
 ## 4. GitHub Actions
 
-The `Windows portable build` workflow runs the same script on `windows-latest` and uploads the executable as a `CodexChatPane-windows-portable` artifact. A push to `main`, a `v*` tag, or a manual workflow run starts a build. A tag run also creates a GitHub Release after the build succeeds.
+The `Windows portable build` workflow runs the same script on `windows-latest` and uploads the executable as a `CodexChatPane-windows-portable` artifact. A `v*` tag push or a manual workflow run starts a build. A tag run also creates a GitHub Release after the build succeeds.
 
 The development repository is the source of truth for documentation. Its public `README.md`, `README.zh-CN.md`, `doc/`, and screenshots are copied to the release repository; internal design notes remain in the development repository. Update public documentation there once, then sync it for release.
 

@@ -55,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 
 ## 4. GitHub Actions
 
-发布仓库的 `Windows portable build` 工作流在 `windows-latest` 上运行同一脚本，并上传 `CodexChatPane-windows-portable` artifact。推送到 `main`、推送 `v*` 标签或手动运行工作流都会触发构建；标签构建成功后还会创建 GitHub Release。
+发布仓库的 `Windows portable build` 工作流在 `windows-latest` 上运行同一脚本，并上传 `CodexChatPane-windows-portable` artifact。推送 `v*` 标签或手动运行工作流会触发构建；标签构建成功后还会创建 GitHub Release。
 
 开发仓库是文档的唯一维护处。公开的 `README.md`、`README.zh-CN.md`、`doc/` 和截图同步到发布仓库；内部设计文档只保留在开发仓库。发布前在开发仓库更新一次，再同步公开子集。
 
