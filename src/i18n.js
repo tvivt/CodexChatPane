@@ -122,6 +122,7 @@ const english = {
   '新建子文件夹': 'New subfolder', '删除文件夹': 'Delete folder', '删除文件夹？不会删除项目或对话。': 'Delete this folder? No projects or chats will be deleted.',
   '复制到 Chats 文件夹': 'Copy to Chats folder', '移动到 Chats 文件夹': 'Move to Chats folder',
   '联动 Projects 与 Chats 文件夹': 'Link Projects and Chats folders',
+  '显示项目列': 'Show project column', '隐藏项目列': 'Hide project column',
   '文件夹': 'Folder', '未知': 'Unknown', '全选': 'Select all', '关闭': 'Close ', '打开': 'Open ', '开启': 'Enable ', '恢复': 'Restore', '归档': 'Archive',
   '重试': 'Retry', '复制链接': 'Copy link', '移到': 'Move to ', '管理': 'management', '列表': 'list', '小时': ' hours', '天': ' days', '秒': ' seconds', ' 个': ' items', '项 ': 'items ',
 };

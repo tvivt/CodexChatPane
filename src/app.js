@@ -58,6 +58,7 @@ const state = {
   dynamicProjectSort: "off",
   recentProjectSort: "off",
   projectRecentLinked: false,
+  recentProjectColumnVisible: true,
   chatsLowerPanel: '',
   projectArchiveOpen: false,
   chatTimelineLinked: false,
@@ -109,7 +110,7 @@ const state = {
 };
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
-const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'chatsLowerPanel', 'projectArchiveOpen', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
+const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
@@ -468,7 +469,7 @@ function sortProjects(rows) {
     return [...ranked].sort((a, b) => direction * projectLabel(a).localeCompare(projectLabel(b), language()) || a.id.localeCompare(b.id));
   }
   const rank = project => project.synthetic ? -1 : ({unread:0,working:1,read:2})[project.region || 'read'];
-  return [...ranked].sort((a, b) => rank(a) - rank(b) || regionTimeCompare(a, b, a.region) || a.id.localeCompare(b.id));
+  return [...ranked].sort((a, b) => rank(a) - rank(b) || regionTimeCompare(a, b) || a.id.localeCompare(b.id));
 }
 function pinFirst(rows, isPinned) {
   return [...rows].sort((a, b) => Number(isPinned(b)) - Number(isPinned(a)));
@@ -1159,7 +1160,7 @@ function projectRecentPanel() {
   const daysUnit = state.chatDays === 1 ? 'Day' : 'Days';
   const daysTip = ui`按最近 ${state.chatDays} 天过滤；0 天仅显示手动加入。`;
   const timeLabel = t('调整时间列宽'), projectWidthLabel = t('调整项目列宽');
-  return ui`<section class="project-recent-panel" style="${projectRecentColumnStyle()}"><div class="folder-view-label">${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span><span class="toolbar-spacer"></span><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
+  return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
 }
 
 function renderProjectPane() {
@@ -1290,10 +1291,10 @@ function projectPinButton(project) {
   return ui`<button class="icon-button project-pin-button ${active ? 'active' : ''} ${processing ? 'processing' : ''} ${unavailable ? 'is-disabled' : ''}" data-action="codex-project-pin" data-id="${project.id}" aria-disabled="${Boolean(unavailable || processing)}" title="${esc(processing ? t('Codex 操作进行中') : unavailable || label)}" aria-label="${esc(label)}" aria-pressed="${active}">${icon(processing ? 'clock' : 'pin')}</button>`;
 }
 const chatPriority = chat => chat.codexPinned ? 0 : 1;
-const regionTimeCompare = (a, b, region) => region === 'working' ? (a.regionEnteredAt || 0) - (b.regionEnteredAt || 0) : (b.regionEnteredAt || 0) - (a.regionEnteredAt || 0);
+const regionTimeCompare = (a, b) => (b.regionEnteredAt || 0) - (a.regionEnteredAt || 0);
 const chatRegionRank = chat => ({unread:0,working:1,read:2})[chatRegion(chat)];
 const receivedOrderAt = chat => chat.regionEnteredAt || 0;
-const statusTimeCompare = (a,b) => chatRegionRank(a) - chatRegionRank(b) || regionTimeCompare(a, b, chatRegion(a)) || a.id.localeCompare(b.id);
+const statusTimeCompare = (a,b) => chatRegionRank(a) - chatRegionRank(b) || regionTimeCompare(a, b) || a.id.localeCompare(b.id);
 const regionOrder = rows => [...rows].sort(statusTimeCompare);
 const timelineDayTone = day => day === 0 ? "time-today" : day === 1 ? "time-yesterday" : day === 2 ? "time-before" : day <= 7 ? "time-week" : day <= 30 ? "time-month" : "time-old";
 const chatStatusBar = chat => ui`<span class="row-bar chat-status-bar ${timelineDayTone(chat.dayOffset)}" aria-hidden="true"></span>`;
@@ -1759,7 +1760,7 @@ function chatGroupSection(group, items) {
   const scope = 'global';
   const open = !dynamic.collapsed(scope, group.id);
   const projectCompare = (a,b) => (state.dynamicProjectSort === 'desc' ? -1 : 1) * projectLabel(byProject(a.projectId) || {synthetic:true,name:t('无项目对话')}).localeCompare(projectLabel(byProject(b.projectId) || {synthetic:true,name:t('无项目对话')}), language());
-  items = state.dynamicProjectSort === 'off' ? regionOrder(items) : [...items].sort((a,b) => projectCompare(a,b) || statusTimeCompare(a,b));
+  items = state.dynamicProjectSort === 'off' ? regionOrder(items) : [...items].sort((a,b) => chatRegionRank(a) - chatRegionRank(b) || projectCompare(a,b) || statusTimeCompare(a,b));
   const rows = items.map((chat,index) => (state.dynamicProjectSort !== 'off' && index && chat.projectId !== items[index-1].projectId ? '<div class="dynamic-project-separator" role="separator"></div>' : '') + globalChatRow(chat, scope, group.id)).join('');
   return ui`<section class="dynamic-group fixed-group" data-dynamic-scope="${scope}" data-dynamic-group="${esc(group.id)}"><div class="dynamic-group-head" data-dynamic-heading draggable="false"><button class="dynamic-group-toggle" data-action="dynamic-toggle" data-scope="${scope}" data-group="${esc(group.id)}" aria-expanded="${open}">${icon(open ? 'chevron-down' : 'chevron-right')}<span class="row-name">${esc(group.name)}</span><span class="count">${items.length}</span></button></div>${open ? ui`<div class="dynamic-group-items">${rows}</div>` : ''}</section>`;
 }
@@ -1810,6 +1811,9 @@ function render() {
   const focusData = focused?.dataset ? {...focused.dataset} : null;
   const detailKey = el => `${el.className}:${el.closest('[data-panel-scope]')?.dataset.panelScope || ''}`;
   const openDetails = [...document.querySelectorAll('details[open]')].map(detailKey);
+  const openPicker = document.querySelector('.picker-menu:not([hidden])')?.closest('.picker');
+  const pickerId = openPicker?.dataset.picker;
+  const pickerQuery = openPicker?.querySelector('[data-input="picker-query"]')?.value || '';
   const caret = focused?.selectionStart;
   const scrollPositions = [...document.querySelectorAll('.scroll, .dynamic-list, .recycle-list, .archive-list')].map(element => element.scrollTop);
   document.documentElement.dataset.theme = state.theme;
@@ -1825,6 +1829,21 @@ function render() {
   applyChatLeadWidth();
   const content = state.settingsOpen ? renderSettingsPane() : state.tab === 'timeline' ? renderChatPane() : renderProjectPane();
   document.getElementById("app").innerHTML = ui`${renderTitlebar()}<div class="layout single-pane">${content}</div>${renderStatusbar()}`;
+  if (pickerId) {
+    const picker = [...document.querySelectorAll('.picker')].find(element => element.dataset.picker === pickerId);
+    const menu = picker?.querySelector('.picker-menu');
+    if (menu) {
+      menu.hidden = false;
+      picker.querySelector('.picker-trigger')?.setAttribute('aria-expanded','true');
+      menu.classList.toggle('open-up', menu.getBoundingClientRect().bottom > window.innerHeight - 6);
+      const input = menu.querySelector('[data-input="picker-query"]');
+      if (input) {
+        input.value = pickerQuery;
+        const query = pickerQuery.trim().toLocaleLowerCase('zh-CN');
+        menu.querySelectorAll('.project-choice').forEach(row => { row.hidden = Boolean(query && !row.textContent.toLocaleLowerCase('zh-CN').includes(query)); });
+      }
+    }
+  }
   document.querySelectorAll('.scroll, .dynamic-list, .recycle-list, .archive-list').forEach((element, index) => { element.scrollTop = scrollPositions[index] || 0; });
   savePreferences();
   saveFolders();
@@ -3100,6 +3119,7 @@ document.addEventListener("click", async event => {
       state.openChatFolders.has(key) ? state.openChatFolders.delete(key) : state.openChatFolders.add(key);
     }
     if (name === 'toggle-chat-timeline-link' || name === 'toggle-global-timeline-link') return;
+    if (name === 'toggle-recent-project-column') { state.recentProjectColumnVisible = !state.recentProjectColumnVisible; render(); return; }
     if (name === 'toggle-project-recent-link') { state.projectRecentLinked = !state.projectRecentLinked; savePreferences(); render(); return; }
     if (name === 'clear-selection') {
       state[action.dataset.kind === 'project' ? 'selectedProjectIds' : 'selectedChatIds'].clear();
@@ -3697,7 +3717,7 @@ function resizeColumn(type, width) {
   const panel = document.querySelector(config.panel);
   if (!panel) return;
   const otherType = type.endsWith('-time') ? type.replace(/-time$/, '-project') : type.replace(/-project$/, '-time');
-  const other = columnWidth(otherType, panel), min = COLUMN_MIN_WIDTH[type];
+  const other = type === 'project-recent-time' && !state.recentProjectColumnVisible ? 0 : columnWidth(otherType, panel), min = COLUMN_MIN_WIDTH[type];
   const max = Math.max(min, Math.min(420, panel.clientWidth - other - 120));
   const value = Math.round(Math.max(min, Math.min(max, width)));
   state[config.key] = value;

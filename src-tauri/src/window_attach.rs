@@ -198,6 +198,10 @@ mod windows {
 
     #[link(name = "user32")]
     extern "system" {
+        fn EnumWindows(
+            callback: Option<unsafe extern "system" fn(Hwnd, isize) -> i32>,
+            param: isize,
+        ) -> i32;
         fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut u32) -> u32;
         fn GetWindow(hwnd: Hwnd, command: u32) -> Hwnd;
         fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd;
@@ -401,6 +405,55 @@ mod windows {
         } else {
             std::ptr::null_mut()
         }
+    }
+
+    fn existing_codex_window(pane: Hwnd) -> Hwnd {
+        unsafe extern "system" fn find_codex(hwnd: Hwnd, param: isize) -> i32 {
+            if IsWindowVisible(hwnd) != 0
+                && GetWindow(hwnd, GW_OWNER).is_null()
+                && is_codex_window(hwnd)
+            {
+                *(param as *mut Hwnd) = hwnd;
+                0
+            } else {
+                1
+            }
+        }
+        let owner = unsafe { GetWindow(pane, GW_OWNER) };
+        if !owner.is_null() && is_codex_window(owner) && unsafe { IsWindowVisible(owner) } != 0 {
+            return owner;
+        }
+        let mut found = std::ptr::null_mut();
+        unsafe { EnumWindows(Some(find_codex), &mut found as *mut Hwnd as isize) };
+        found
+    }
+
+    fn attach_existing_codex(pane: Hwnd, logger: &Logger) -> Result<(), String> {
+        let codex = existing_codex_window(pane);
+        if codex.is_null() || unsafe { GetWindow(pane, GW_OWNER) } == codex {
+            return Ok(());
+        }
+        set_owner(pane, codex, logger);
+        if unsafe { GetWindow(pane, GW_OWNER) } != codex {
+            return Err("无法附着已运行的 Codex 窗口".into());
+        }
+        logger.info(format!(
+            "attached existing Codex window {}",
+            window_identity(codex)
+        ));
+        Ok(())
+    }
+
+    pub fn prepare_open(
+        window: &tauri::Window,
+        state: &State,
+        logger: &Logger,
+    ) -> Result<(), String> {
+        if state.0.load(Ordering::Relaxed) != 1 {
+            return Ok(());
+        }
+        let pane = window.hwnd().map_err(|error| error.to_string())?.0 as Hwnd;
+        attach_existing_codex(pane, logger)
     }
 
     fn is_attached_codex_object(record: &WinEventRecord, attached_codex: Hwnd) -> bool {
@@ -761,6 +814,13 @@ mod windows {
 
             let mut last_foreground = unsafe { GetForegroundWindow() };
             let mut attached_codex = codex_root_window(last_foreground);
+            if attached_codex.is_null() && state.0.load(Ordering::Relaxed) == 1 {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(raw) = window.hwnd() {
+                        attached_codex = existing_codex_window(raw.0 as Hwnd);
+                    }
+                }
+            }
             let mut attached_codex_process_id = if attached_codex.is_null() {
                 0
             } else {
@@ -1078,6 +1138,7 @@ mod windows {
         } else {
             set_owner(pane, std::ptr::null_mut(), logger);
             set_level(pane, -2isize as Hwnd, logger);
+            attach_existing_codex(pane, logger)?;
             sync(
                 pane,
                 unsafe { GetForegroundWindow() },
@@ -1184,6 +1245,9 @@ mod other {
     #[derive(Clone, Default)]
     pub struct State;
     pub fn start(_: tauri::AppHandle, _: State, _: TrayState, _: Logger) {}
+    pub fn prepare_open(_: &tauri::Window, _: &State, _: &Logger) -> Result<(), String> {
+        Ok(())
+    }
     pub fn set_mode(
         window: &tauri::Window,
         _: &State,

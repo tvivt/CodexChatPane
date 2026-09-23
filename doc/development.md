@@ -41,12 +41,15 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 
 ## 3. 构建便携版 Windows exe
 
+在仓库根目录运行（需联网安装依赖）：
+
 ```powershell
-npm run build
-cargo build --manifest-path src-tauri/Cargo.toml --bin CodexChatPane --features custom-protocol --release --locked
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 ```
 
-输出为 `src-tauri/target/release/CodexChatPane.exe`。它不包含 WebView2 Runtime 安装器，目标机器需要已有 WebView2 Runtime。
+脚本依次运行 `npm ci`、两项前端检查、`cargo fmt --check`、`cargo test --locked`、前端构建和发布版 Cargo 构建；CI 直接运行同一脚本。CI 使用 Node.js 22 和 Rust stable；本地使用相同版本可进一步对齐环境。
+
+最终输出为 `release/CodexChatPane.exe`，Cargo 的中间输出保留在 `src-tauri/target/release/`。EXE 不包含 WebView2 Runtime 安装器，目标机器需要已有 WebView2 Runtime。
 
 ## 4. GitHub Actions
 

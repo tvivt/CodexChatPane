@@ -142,29 +142,12 @@ fn normalize_tool_config(mut config: ToolConfig) -> Result<ToolConfig, String> {
     Ok(config)
 }
 
-fn legacy_config_path(name: &str) -> Result<std::path::PathBuf, String> {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|root| root.join("config").join(name))
-        .ok_or_else(|| "项目配置目录无效".into())
-}
-
 fn app_config_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
     let directory = app
         .path()
         .app_config_dir()
         .map_err(|error| error.to_string())?;
-    let path = directory.join(name);
-    if path.exists() {
-        return Ok(path);
-    }
-
-    let legacy = legacy_config_path(name)?;
-    if legacy.exists() {
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        fs::copy(&legacy, &path).map_err(|error| error.to_string())?;
-    }
-    Ok(path)
+    Ok(directory.join(name))
 }
 
 fn tool_config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -259,6 +242,8 @@ async fn get_snapshot(app: tauri::AppHandle) -> SourceSnapshot {
 #[tauri::command]
 fn open_chat(
     thread_id: String,
+    window: tauri::Window,
+    state: tauri::State<'_, window_attach::State>,
     logger: tauri::State<'_, diagnostics::Logger>,
 ) -> Result<(), String> {
     logger.info(format!("open_chat requested threadId={thread_id}"));
@@ -266,6 +251,7 @@ fn open_chat(
         logger.warn("open_chat rejected invalid thread ID");
         return Err("Chat ID 格式无效".to_string());
     }
+    window_attach::prepare_open(&window, &state, &logger)?;
     let result = open_uri(&format!("codex://threads/{thread_id}"));
     match &result {
         Ok(()) => logger.debug("open_chat deep link dispatched"),

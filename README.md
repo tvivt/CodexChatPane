@@ -46,6 +46,14 @@ npm run dev
 
 推送到 `main` 或手动运行 GitHub Actions 的 `Windows portable build` 后，在工作流的 Artifacts 中下载 `CodexChatPane-windows-portable`，其中的 `CodexChatPane.exe` 可以直接运行。当前构建未签名，Windows 可能显示 SmartScreen 提示；程序依赖系统已安装 WebView2 Runtime。
 
+从源码在 Windows 本地构建，在仓库根目录运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
+```
+
+脚本执行与 CI 相同的安装、检查和构建命令，生成 `release\CodexChatPane.exe`。环境要求和详细步骤见 [开发与验证](doc/development.md)。
+
 ## 文档
 
 | 目的 | 文档 |
