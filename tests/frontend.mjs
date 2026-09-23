@@ -7,6 +7,7 @@ const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), '
 assert.equal(tauriConf.app.windows.length, 0, 'Rust creates windows so they can share the CODEX_HOME data directory');
 assert.ok(rust.includes('source::codex_home()?.join(".codex-chat-pane")'), 'app data lives under CODEX_HOME/.codex-chat-pane');
 assert.equal((rust.match(/\.data_directory\(/g) || []).length, 2, 'main and preview windows share the app data directory');
+assert.match(rust, /#\[tauri::command\]\s+async fn open_conversation_preview_window\(/, 'Windows WebView creation must run in an async command to avoid deadlock');
 assert.ok(rust.includes('.drag_and_drop(false)'), 'Windows HTML5 folder drag requires native file-drop intercept off');
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8') + readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
 assert.ok(html.includes('.chat-row.drag-ready'), 'grab cursor waits for a hold');

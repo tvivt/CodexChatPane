@@ -334,7 +334,7 @@ fn new_chat(project_id: Option<String>, project_path: Option<String>) -> Result<
 }
 
 #[tauri::command]
-fn open_conversation_preview_window(
+async fn open_conversation_preview_window(
     app: tauri::AppHandle,
     thread_id: String,
 ) -> Result<(), String> {
