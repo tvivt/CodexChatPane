@@ -1,4 +1,4 @@
-use super::diagnostics::{Diagnostic, RateLimits};
+use super::diagnostics::Diagnostic;
 use super::{seconds_or_millis, ThreadActivity};
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,7 +32,6 @@ struct Payload {
     duration_ms: Option<i64>,
     status: Option<String>,
     error: Option<Value>,
-    rate_limits: Option<RateLimits>,
     #[serde(default, deserialize_with = "content_present")]
     content: bool,
     #[serde(default, deserialize_with = "content_present")]
@@ -67,7 +66,6 @@ struct Cursor {
     turn_id: Option<String>,
     activity: Option<ThreadActivity>,
     has_start: bool,
-    rate_limits: Option<RateLimits>,
     pending_tools: HashSet<String>,
     pending_message: bool,
 }
@@ -94,12 +92,6 @@ impl Cursor {
             return;
         }
         if record.kind == "event_msg" && payload.kind == "token_count" {
-            if let (Some(mut limits), Some(at)) = (payload.rate_limits, at) {
-                if limits.limit_id.as_deref().is_none_or(|id| id == "codex") {
-                    limits.observed_at = at;
-                    self.rate_limits = Some(limits);
-                }
-            }
             return; // Repeated token/limit snapshots are not proof of new model activity.
         }
         let user_message = record.kind == "event_msg" && payload.kind == "user_message"
@@ -331,11 +323,11 @@ impl Cursor {
 pub(super) fn read_rollout_snapshot(
     path: &Path,
     cutoff: Option<i64>,
-) -> Result<(Option<ThreadActivity>, Option<RateLimits>), String> {
+) -> Result<Option<ThreadActivity>, String> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cursor>>> = OnceLock::new();
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     let metadata = file.metadata().map_err(|error| error.to_string())?;
@@ -395,7 +387,7 @@ pub(super) fn read_rollout_snapshot(
             activity.execution_status = None;
         }
     }
-    Ok((activity, cursor.rate_limits.clone()))
+    Ok(activity)
 }
 
 #[cfg(test)]
@@ -407,7 +399,7 @@ mod tests {
         path: &Path,
         cutoff: Option<i64>,
     ) -> Result<Option<ThreadActivity>, String> {
-        read_rollout_snapshot(path, cutoff).map(|snapshot| snapshot.0)
+        read_rollout_snapshot(path, cutoff)
     }
 
     #[test]
@@ -482,17 +474,6 @@ mod tests {
             2,
         );
         assert_eq!(cursor.activity.as_ref().unwrap().last_response_at, 0);
-        assert_eq!(
-            cursor
-                .rate_limits
-                .as_ref()
-                .unwrap()
-                .primary
-                .as_ref()
-                .unwrap()
-                .used_percent,
-            9.0
-        );
         apply(
             &mut cursor,
             "response_item",

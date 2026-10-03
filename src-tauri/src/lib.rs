@@ -243,7 +243,6 @@ async fn load_snapshot(app: tauri::AppHandle, catalog_only: bool) -> SourceSnaps
                         error: Some(error),
                         projects: Vec::new(),
                         chats: Vec::new(),
-                        rate_limits: None,
                     }
                 }
             }
@@ -269,6 +268,28 @@ async fn get_chat_activity(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_live_rate_limits(
+    snapshot: tauri::State<'_, SnapshotState>,
+    logger: tauri::State<'_, diagnostics::Logger>,
+) -> Result<source::RateLimits, String> {
+    let thread_id = snapshot
+        .0
+        .try_lock()
+        .ok()
+        .and_then(|snapshot| snapshot.as_ref()?.chats.first().map(|chat| chat.id.clone()));
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        source::read_live_rate_limits(thread_id.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
+    if let Err(error) = &result {
+        logger.warn(format!("rate limits query failed error={error}"));
+    }
+    result
 }
 
 #[tauri::command]
@@ -885,6 +906,7 @@ pub fn run() {
             get_snapshot,
             get_catalog_snapshot,
             get_chat_activity,
+            get_live_rate_limits,
             get_tool_config,
             save_tool_config,
             open_chat,

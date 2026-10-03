@@ -386,8 +386,26 @@ function nativeChat(chat, index, previous) {
 let nativeLoaded = false;
 let nativeScanInFlight = false;
 let nativeSourceSignature = "";
+let liveRateLimitsInFlight = false;
 const recentlyActiveIds = new Set();
 const sourceRefreshBlocked = () => resizeSession || draggedDynamic || draggedFolder || draggedChatIds.length || draggedProjectIds.length;
+function acceptRateLimits(limits) {
+  if (!limits) return false;
+  if (JSON.stringify(state.rateLimits) === JSON.stringify(limits)) return false;
+  state.rateLimits = limits;
+  return true;
+}
+async function refreshLiveRateLimits() {
+  if (!nativeInvoke || liveRateLimitsInFlight || document.hidden) return;
+  liveRateLimitsInFlight = true;
+  try {
+    if (acceptRateLimits(await nativeInvoke('get_live_rate_limits'))) updateQuota();
+  } catch (_) {
+    // Keep the last value when Codex CLI or the network is unavailable.
+  } finally {
+    liveRateLimitsInFlight = false;
+  }
+}
 async function loadNativeSnapshot(catalogOnly = false) {
   if (!nativeInvoke || nativeScanInFlight) return;
   if (sourceRefreshBlocked()) {
@@ -405,14 +423,10 @@ async function loadNativeSnapshot(catalogOnly = false) {
       queueSourceRefresh();
       return;
     }
-    const {rateLimits, ...listSnapshot} = snapshot;
-    const rateLimitsChanged = JSON.stringify(state.rateLimits) !== JSON.stringify(rateLimits || null);
-    state.rateLimits = rateLimits || null;
     state.syncError = snapshot.error || '';
     if (!snapshot.error) state.syncAt = Date.now();
-    const signature = JSON.stringify(listSnapshot);
+    const signature = JSON.stringify(snapshot);
     if (signature === nativeSourceSignature) {
-      if (rateLimitsChanged) updateWorkingClocks();
       syncLiveTimers();
       return;
     }
@@ -525,10 +539,6 @@ async function flushSourceRefresh() {
         chats[index] = next;
         changed = true;
       }
-    }
-    if (JSON.stringify(state.rateLimits) !== JSON.stringify(update.rateLimits)) {
-      state.rateLimits = update.rateLimits || null;
-      changed = true;
     }
     if (changed) {
       for (const raw of update.chats || []) {
@@ -1584,6 +1594,8 @@ function updateWorkingClocks(now = Date.now()) {
     element.setAttribute('aria-label',ui`工作中 · 已执行 ${formatExecutionTime(executionClockNow - Number(element.dataset.workingStart))}`);
   });
   updateStatusChat();
+}
+function updateQuota(now = Date.now()) {
   const quota = document.querySelector(".status-quota");
   const markup = quotaMarkup(now);
   if (quota && quota.innerHTML !== markup) quota.innerHTML = markup;
@@ -1628,9 +1640,16 @@ function syncLiveTimers() {
     clearTimeout(executionClockTimer); executionClockTimer = 0;
     clearInterval(activityCheckTimer); activityCheckTimer = 0;
   }
-  clearTimeout(quotaTimer);
-  if (!document.hidden && !active && state.rateLimits) {
-    quotaTimer = setTimeout(() => { updateWorkingClocks(); syncLiveTimers(); }, 60000 - Date.now() % 60000);
+  if (document.hidden) {
+    clearTimeout(quotaTimer); quotaTimer = 0;
+  } else if (!quotaTimer && nativeInvoke) {
+    quotaTimer = setTimeout(() => {
+      quotaTimer = 0;
+      updateStatusChat();
+      updateQuota();
+      void refreshLiveRateLimits();
+      syncLiveTimers();
+    }, 60000 - Date.now() % 60000);
   }
 }
 
@@ -3981,6 +4000,7 @@ document.addEventListener('visibilitychange', () => {
   syncLiveTimers();
   if (!document.hidden && nativeInvoke) {
     queueSourceRefresh({full:true});
+    void refreshLiveRateLimits();
     if (previewChatId) refreshConversationPreview();
   }
 });
@@ -4009,7 +4029,10 @@ if (isPreviewWindow) {
     else windowRestoreDone = true;
     if (nativeConfigLoaded && codexMcpEnabled === null) confirmCodexMcpUse();
   });
-  void listenForSourceChanges().finally(() => loadNativeSnapshot());
+  void listenForSourceChanges().finally(async () => {
+    await loadNativeSnapshot();
+    void refreshLiveRateLimits();
+  });
   if (nativeWindow) {
     void nativeWindow.onResized(() => {
       void syncWindowState(); rememberWindowGeometry();

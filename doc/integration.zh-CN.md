@@ -19,8 +19,10 @@ CodexChatPane 自身的设置单独保存在该 Codex home 下的 `.codex-chat-p
 - `state_5.sqlite`：Thread 基础信息和 Project 关联。
 - `.codex-global-state.json`：全局 Project、Thread assignment、Pin 和未读状态。
 - `thread_history_1.sqlite`：消息时间和活动状态。
-- rollout JSONL：工作状态、执行时间、Token、额度、错误和预览内容。
+- rollout JSONL：工作状态、执行时间、错误和预览内容。
 - Codex Desktop 日志：有限的 retry 和活动诊断。
+
+额度优先通过 Codex App MCP 读取，使用已有对话作为上下文。MCP 失败时，通过 Desktop CLI 的 app-server 查询 `account/rateLimits/read`。启动、窗口恢复可见时刷新额度，可见期间每分钟刷新一次；查询失败保留上次结果。
 
 启动时会检查关键 SQLite 表和字段。schema 不满足要求时，应用报告不兼容，而不是猜测字段含义。
 

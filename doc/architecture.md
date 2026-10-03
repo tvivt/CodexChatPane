@@ -27,7 +27,8 @@ CODEX_HOME/.codex-chat-pane + localStorage
 
 - `src-tauri/src/lib.rs`: Tauri commands, window entry point, settings, and deep links.
 - `src-tauri/src/source.rs`: reads Codex state and aggregates project and chat snapshots.
-- `src-tauri/src/source/rollout.rs`: incrementally parses rollout activity, execution time, tokens, and usage limits.
+- `src-tauri/src/source/rollout.rs`: incrementally parses rollout activity and execution time.
+- `src-tauri/src/source/rate_limits.rs`: reads live usage limits through App MCP with a CLI app-server fallback and bounded process cleanup.
 - `src-tauri/src/source/diagnostics.rs`: reads a limited set of desktop diagnostic logs and classifies errors.
 - `src-tauri/src/source_watch.rs`: watches Codex data files for catalog and history changes.
 - `src-tauri/src/preview.rs`: reads conversation previews in pages with page and cache size limits.
@@ -49,6 +50,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 3. Rust scans Codex state, global state, and activity sources.
 4. The frontend merges snapshots by stable ID and restores local folder and group relationships.
 5. File changes trigger catalog refreshes; active chats receive a status query once per second. An open preview reads content separately.
+   Usage limits refresh separately once per minute while the window is visible.
 6. If the Rust scan fails, the app keeps the last valid snapshot and reports the error in the UI.
 
 Before native data finishes loading, the app does not write empty frontend state back to local settings. This prevents a startup race from clearing the user's organization.
@@ -58,7 +60,7 @@ Before native data finishes loading, the app does not write empty frontend state
 The frontend mainly consumes these snapshot fields:
 
 ```text
-state, error, scopeKey, hostId, projects, chats, rateLimits
+state, error, scopeKey, hostId, projects, chats
 ```
 
 Chat activity and diagnostics come from structured events and limited log reads. Rollout body text is excluded from normal snapshots. When changing a field, check Rust `serde` naming, frontend reads, and test fixtures together.

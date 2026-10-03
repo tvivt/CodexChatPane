@@ -7,9 +7,15 @@ use std::{
 };
 
 mod diagnostics;
+mod rate_limits;
 mod rollout;
-use diagnostics::{Diagnostic, RateLimits};
+use diagnostics::Diagnostic;
+pub(crate) use rate_limits::RateLimits;
 use rollout::read_rollout_snapshot;
+
+pub fn read_live_rate_limits(thread_id: Option<&str>) -> Result<RateLimits, String> {
+    rate_limits::read(thread_id)
+}
 
 const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "id",
@@ -32,14 +38,12 @@ pub struct SourceSnapshot {
     pub error: Option<String>,
     pub projects: Vec<ProjectSnapshot>,
     pub chats: Vec<ChatSnapshot>,
-    pub rate_limits: Option<RateLimits>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityUpdate {
     pub chats: Vec<ChatSnapshot>,
-    pub rate_limits: Option<RateLimits>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -294,7 +298,6 @@ fn scan_path_with_previous(
         read_thread_activity(&home.join("thread_history_1.sqlite"), app_server_started_at)
             .unwrap_or_default()
     };
-    let mut rate_limits = previous.and_then(|snapshot| snapshot.rate_limits.clone());
     let previous_paths: HashMap<&str, &Path> = previous
         .map(|snapshot| {
             snapshot
@@ -332,19 +335,10 @@ fn scan_path_with_previous(
             }) {
                 thread_activity.insert(thread.id.clone(), activity);
             }
-            let Ok((rollout, quota)) =
-                read_rollout_snapshot(&thread.rollout_path, app_server_started_at)
+            let Ok(rollout) = read_rollout_snapshot(&thread.rollout_path, app_server_started_at)
             else {
                 continue;
             };
-            if let Some(quota) = quota {
-                if rate_limits
-                    .as_ref()
-                    .is_none_or(|old| quota.observed_at > old.observed_at)
-                {
-                    rate_limits = Some(quota);
-                }
-            }
             if let Some(activity) = rollout {
                 merge_rollout_activity(&mut thread_activity, &thread.id, activity);
             }
@@ -490,7 +484,6 @@ fn scan_path_with_previous(
         error: None,
         projects,
         chats,
-        rate_limits,
     })
 }
 
@@ -558,18 +551,9 @@ pub fn refresh_activities(snapshot: &mut SourceSnapshot, ids: &[String]) -> Acti
         }) {
             activities.insert(id.clone(), activity);
         }
-        if let Ok((activity, quota)) = read_rollout_snapshot(&chat.rollout_path, cutoff) {
+        if let Ok(activity) = read_rollout_snapshot(&chat.rollout_path, cutoff) {
             if let Some(activity) = activity {
                 merge_rollout_activity(&mut activities, id, activity);
-            }
-            if let Some(quota) = quota {
-                if snapshot
-                    .rate_limits
-                    .as_ref()
-                    .is_none_or(|old| quota.observed_at > old.observed_at)
-                {
-                    snapshot.rate_limits = Some(quota);
-                }
             }
         }
     }
@@ -634,10 +618,7 @@ pub fn refresh_activities(snapshot: &mut SourceSnapshot, ids: &[String]) -> Acti
             project.latest = project.latest.max(chat.last_user_message_at);
         }
     }
-    ActivityUpdate {
-        chats: changed,
-        rate_limits: snapshot.rate_limits.clone(),
-    }
+    ActivityUpdate { chats: changed }
 }
 
 fn read_thread_activity_for(
@@ -766,9 +747,14 @@ fn activity_from_row(
     ))
 }
 
-#[cfg(windows)]
 fn desktop_app_server_started_at() -> Option<i64> {
+    desktop_app_server().map(|(started_at, _)| started_at)
+}
+
+#[cfg(windows)]
+fn desktop_app_server() -> Option<(i64, Option<PathBuf>)> {
     use std::ffi::c_void;
+    use std::os::windows::ffi::OsStringExt;
 
     type Handle = *mut c_void;
     const INVALID_HANDLE_VALUE: Handle = -1_isize as Handle;
@@ -808,6 +794,12 @@ fn desktop_app_server_started_at() -> Option<i64> {
         fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry) -> i32;
         fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry) -> i32;
         fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn QueryFullProcessImageNameW(
+            process: Handle,
+            flags: u32,
+            name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
         fn GetProcessTimes(
             process: Handle,
             creation: *mut FileTime,
@@ -861,18 +853,25 @@ fn desktop_app_server_started_at() -> Option<i64> {
                 let mut user = FileTime::default();
                 let succeeded =
                     GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
+                let mut name = vec![0u16; 32768];
+                let mut size = name.len() as u32;
+                let executable =
+                    (QueryFullProcessImageNameW(process, 0, name.as_mut_ptr(), &mut size) != 0)
+                        .then(|| {
+                            PathBuf::from(std::ffi::OsString::from_wide(&name[..size as usize]))
+                        });
                 CloseHandle(process);
                 succeeded.then(|| {
                     let ticks = ((creation.high as u64) << 32) | creation.low as u64;
-                    (ticks / 10_000_000) as i64 - 11_644_473_600
+                    ((ticks / 10_000_000) as i64 - 11_644_473_600, executable)
                 })
             })
-            .min()
+            .min_by_key(|(started_at, _)| *started_at)
     }
 }
 
 #[cfg(not(windows))]
-fn desktop_app_server_started_at() -> Option<i64> {
+fn desktop_app_server() -> Option<(i64, Option<PathBuf>)> {
     None
 }
 
@@ -1335,10 +1334,9 @@ mod tests {
                 );
             }
             println!(
-                "scan_ms={} chats={} states={counts:?} diagnostics={diagnostics:?} quota={:?}",
+                "scan_ms={} chats={} states={counts:?} diagnostics={diagnostics:?}",
                 started.elapsed().as_millis(),
-                snapshot.chats.len(),
-                snapshot.rate_limits
+                snapshot.chats.len()
             );
         }
     }
@@ -1405,7 +1403,6 @@ mod tests {
         assert_eq!(
             read_rollout_snapshot(&file, Some(100))
                 .unwrap()
-                .0
                 .unwrap()
                 .execution_ms,
             Some(12000)
@@ -1415,7 +1412,6 @@ mod tests {
         assert_eq!(
             read_rollout_snapshot(&file, Some(100))
                 .unwrap()
-                .0
                 .unwrap()
                 .execution_ms,
             None
@@ -1436,10 +1432,7 @@ mod tests {
         )
         .unwrap();
 
-        let activity = read_rollout_snapshot(&rollout, Some(100))
-            .unwrap()
-            .0
-            .unwrap();
+        let activity = read_rollout_snapshot(&rollout, Some(100)).unwrap().unwrap();
         assert!(activity.working);
         assert_eq!(activity.last_user_message_at, 140000);
         assert_eq!(activity.execution_started_at, Some(140000));

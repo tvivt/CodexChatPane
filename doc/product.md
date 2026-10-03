@@ -16,7 +16,7 @@ CodexChatPane makes local Codex Desktop projects and chats easier to browse, fil
 | Chat | Codex | Conversation identity, title, archive status, project, and timestamps |
 | Folder | CodexChatPane | Local hierarchical organization |
 | Group | CodexChatPane | Local collection that can overlap with other groups |
-| Timeline | Codex events and rollouts | Recent activity, execution time, current state, and usage limits |
+| Timeline | Codex events, rollouts, and live usage queries | Recent activity, execution time, current state, and usage limits |
 | Archive | Codex | Native Codex archive state, separate from the local folder recycle bin |
 
 ## 3. Data ownership

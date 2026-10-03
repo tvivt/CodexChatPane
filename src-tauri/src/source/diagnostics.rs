@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -116,23 +116,6 @@ impl Diagnostic {
             resets_at: None,
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RateWindow {
-    pub used_percent: f64,
-    pub window_minutes: i64,
-    pub resets_at: Option<i64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RateLimits {
-    pub limit_id: Option<String>,
-    pub primary: Option<RateWindow>,
-    pub secondary: Option<RateWindow>,
-    pub plan_type: Option<String>,
-    #[serde(default)]
-    pub observed_at: i64,
 }
 
 pub(super) fn timestamp(value: &str) -> Option<i64> {

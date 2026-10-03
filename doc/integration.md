@@ -19,8 +19,10 @@ CodexChatPane's own settings are kept separately in `.codex-chat-pane` under tha
 - `state_5.sqlite`: basic thread information and project associations.
 - `.codex-global-state.json`: global projects, thread assignments, pins, and unread state.
 - `thread_history_1.sqlite`: message times and activity state.
-- Rollout JSONL: working state, execution time, tokens, usage limits, errors, and preview content.
+- Rollout JSONL: working state, execution time, errors, and preview content.
 - Codex Desktop logs: a limited set of retry and activity diagnostics.
+
+Usage limits are read through Codex App MCP first, using an existing chat as context. If MCP fails, the app queries `account/rateLimits/read` through the Desktop CLI app-server. Limits refresh at startup, when the window becomes visible, and once per minute while visible. A failed query keeps the last value.
 
 At startup, the app checks key SQLite tables and columns. If the schema does not match, it reports an incompatibility instead of guessing what fields mean.
 

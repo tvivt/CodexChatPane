@@ -5,7 +5,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -18,6 +17,38 @@ const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(20);
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub fn read_usage_limits(thread_id: &str) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_error = "未发现可用的 Codex 额度 MCP 接口".to_string();
+    for path in discover_pipe_paths() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let result = (|| {
+            let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(500));
+            let mut client = RpcClient::connect_until(&path, probe_deadline)?;
+            let tools = client.request("tools/list", json!({"threadStartKind": "all"}))?;
+            let namespace = tool_namespace(&tools, "get_usage_limits")
+                .ok_or("当前 Codex 未提供 get_usage_limits")?;
+            client.deadline = deadline;
+            let result = call_tool(
+                &mut client,
+                &namespace,
+                "get_usage_limits",
+                thread_id,
+                json!({}),
+            )?;
+            let text = content_text(&result).ok_or("Codex MCP 未返回额度数据")?;
+            serde_json::from_str(&text).map_err(|error| format!("无法解析 Codex MCP 额度：{error}"))
+        })();
+        match result {
+            Ok(result) => return Ok(result),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
 
 static ACTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -183,31 +214,19 @@ fn wait_for_tool(tool: &str, timeout: Duration) -> Result<(String, String), Stri
 }
 
 fn discover_pipe_paths() -> Vec<String> {
-    let script = r#"
-$lines = @(
-  Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" |
-    Where-Object { $_.CommandLine -like '*CODEX_APP_TOOLS_PIPE_PATH*' } |
-    Select-Object -ExpandProperty CommandLine
-  Get-ChildItem '\\.\pipe\' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like 'codex-browser-use-*' } |
-    Select-Object -ExpandProperty FullName
-)
-$lines
-"#;
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            script,
-        ])
-        .output();
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| parse_pipe_paths(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or_default()
+    let Ok(entries) = fs::read_dir(r"\\.\pipe\") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("codex-browser-use-")
+                .then(|| parse_pipe_path(&name))
+                .flatten()
+        })
+        .collect()
 }
 
 fn parse_pipe_path(command_line: &str) -> Option<String> {
@@ -218,18 +237,6 @@ fn parse_pipe_path(command_line: &str) -> Option<String> {
         .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
         .collect();
     (!name.is_empty()).then(|| format!(r"\\.\pipe\{name}"))
-}
-
-fn parse_pipe_paths(output: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for line in output.lines() {
-        if let Some(path) = parse_pipe_path(line) {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-    }
-    paths
 }
 
 fn required_tool_namespace(pipe_path: &str, required: &str) -> Result<String, String> {
@@ -264,6 +271,7 @@ fn call_tool(
         "tools/call",
         json!({
             "arguments": arguments,
+            "callerSource": "codex",
             "callId": format!("CodexChatPane-{suffix}"),
             "namespace": namespace,
             "threadId": thread_id,
@@ -363,19 +371,111 @@ fn request_suffix() -> String {
     format!("{now}-{id}")
 }
 
-struct RpcClient(File);
+struct RpcClient {
+    pipe: File,
+    deadline: Instant,
+}
 
 impl RpcClient {
     fn connect(path: &str) -> Result<Self, String> {
-        OpenOptions::new()
+        Self::connect_until(path, Instant::now() + DISCOVERY_TIMEOUT)
+    }
+
+    fn connect_until(path: &str, deadline: Instant) -> Result<Self, String> {
+        let pipe = OpenOptions::new()
             .read(true)
             .write(true)
             .open(path)
-            .map(Self)
-            .map_err(|error| format!("无法连接 Codex MCP 管道：{error}"))
+            .map_err(|error| format!("无法连接 Codex MCP 管道：{error}"))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{AsRawHandle, RawHandle};
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn SetNamedPipeHandleState(
+                    pipe: RawHandle,
+                    mode: *const u32,
+                    count: *const u32,
+                    timeout: *const u32,
+                ) -> i32;
+            }
+            let mode = 1; // PIPE_NOWAIT: reads and writes must not block past the deadline.
+            if unsafe {
+                SetNamedPipeHandleState(
+                    pipe.as_raw_handle(),
+                    &mode,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            } == 0
+            {
+                return Err(format!(
+                    "无法设置 Codex MCP 管道超时模式：{}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(Self { pipe, deadline })
+    }
+
+    fn read_exact(&mut self, mut buffer: &mut [u8]) -> Result<(), String> {
+        while !buffer.is_empty() {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("Codex MCP 请求超时".into());
+            }
+            #[cfg(windows)]
+            let result = {
+                use std::os::windows::io::{AsRawHandle, RawHandle};
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn ReadFile(
+                        pipe: RawHandle,
+                        buffer: *mut u8,
+                        size: u32,
+                        read: *mut u32,
+                        overlapped: *mut std::ffi::c_void,
+                    ) -> i32;
+                }
+                let mut read = 0;
+                // std::fs::File maps ERROR_NO_DATA to EOF; preserve it for PIPE_NOWAIT.
+                if unsafe {
+                    ReadFile(
+                        self.pipe.as_raw_handle(),
+                        buffer.as_mut_ptr(),
+                        buffer.len() as u32,
+                        &mut read,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(read as usize)
+                }
+            };
+            #[cfg(not(windows))]
+            let result = self.pipe.read(buffer);
+            match result {
+                Ok(0) => return Err("Codex MCP 管道已断开".into()),
+                Ok(count) => buffer = &mut buffer[count..],
+                Err(error)
+                    if error.raw_os_error() == Some(232) // ERROR_NO_DATA in PIPE_NOWAIT mode
+                    || error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    thread::sleep(remaining.min(Duration::from_millis(10)));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(format!("Codex MCP 管道读取失败：{error}")),
+            }
+        }
+        Ok(())
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        if Instant::now() >= self.deadline {
+            return Err("Codex MCP 请求超时".into());
+        }
         let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let payload = serde_json::to_vec(
             &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
@@ -384,27 +484,22 @@ impl RpcClient {
         if payload.len() > MAX_FRAME_BYTES {
             return Err("Codex MCP 请求过大".into());
         }
-        self.0
+        self.pipe
             .write_all(&(payload.len() as u32).to_le_bytes())
             .map_err(|error| error.to_string())?;
-        self.0
+        self.pipe
             .write_all(&payload)
             .map_err(|error| error.to_string())?;
-        self.0.flush().map_err(|error| error.to_string())?;
 
         loop {
             let mut header = [0_u8; 4];
-            self.0
-                .read_exact(&mut header)
-                .map_err(|error| format!("Codex MCP 管道已断开：{error}"))?;
+            self.read_exact(&mut header)?;
             let length = u32::from_le_bytes(header) as usize;
             if length > MAX_FRAME_BYTES {
                 return Err("Codex MCP 响应过大".into());
             }
             let mut frame = vec![0_u8; length];
-            self.0
-                .read_exact(&mut frame)
-                .map_err(|error| format!("Codex MCP 响应不完整：{error}"))?;
+            self.read_exact(&mut frame)?;
             let response: Value = serde_json::from_slice(&frame)
                 .map_err(|error| format!("Codex MCP 响应无效：{error}"))?;
             if response.get("id").and_then(Value::as_u64) != Some(id) {
@@ -545,10 +640,116 @@ fn wait_for_renderer_line(
 #[cfg(test)]
 mod tests {
     use super::{
-        action_request, action_verified, parse_pipe_path, parse_pipe_paths,
-        renderer_activation_required, tool_namespace,
+        action_request, action_verified, parse_pipe_path, renderer_activation_required,
+        tool_namespace,
     };
     use serde_json::json;
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_calls_include_caller_source_and_bound_stalled_or_invalid_replies() {
+        use super::*;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateNamedPipeW(
+                name: *const u16,
+                access: u32,
+                mode: u32,
+                instances: u32,
+                out_size: u32,
+                in_size: u32,
+                timeout: u32,
+                security: *const std::ffi::c_void,
+            ) -> RawHandle;
+            fn ConnectNamedPipe(pipe: RawHandle, overlapped: *mut std::ffi::c_void) -> i32;
+        }
+        for mode in ["reply", "stall", "invalid", "disconnect"] {
+            let path = format!(
+                r"\\.\pipe\CodexChatPane-test-{}-{}",
+                std::process::id(),
+                request_suffix()
+            );
+            let name: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+            let handle = unsafe {
+                CreateNamedPipeW(name.as_ptr(), 3, 0, 1, 65536, 65536, 0, std::ptr::null())
+            };
+            assert_ne!(handle as isize, -1);
+            let mut pipe = unsafe { File::from_raw_handle(handle) };
+            let server = thread::spawn(move || {
+                let connected =
+                    unsafe { ConnectNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut()) };
+                assert!(
+                    connected != 0 || std::io::Error::last_os_error().raw_os_error() == Some(535)
+                );
+                let mut header = [0; 4];
+                pipe.read_exact(&mut header).unwrap();
+                let mut body = vec![0; u32::from_le_bytes(header) as usize];
+                pipe.read_exact(&mut body).unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["params"]["callerSource"], "codex");
+                assert_eq!(request["params"]["tool"], "get_usage_limits");
+                if mode == "stall" {
+                    thread::sleep(Duration::from_millis(350));
+                    return;
+                }
+                if mode == "disconnect" {
+                    return;
+                }
+                let response = if mode == "invalid" {
+                    b"invalid JSON".to_vec()
+                } else {
+                    serde_json::to_vec(&json!({"id":request["id"], "result":{"success":true,"contentItems":[{"text":"{}"}]}})).unwrap()
+                };
+                let header = (response.len() as u32).to_le_bytes();
+                pipe.write_all(&header[..2]).unwrap();
+                thread::sleep(Duration::from_millis(10));
+                pipe.write_all(&header[2..]).unwrap();
+                pipe.write_all(&response).unwrap();
+                // Keep the server handle alive until the client has consumed the reply.
+                thread::sleep(Duration::from_millis(100));
+            });
+            let started = Instant::now();
+            let timeout = if mode == "stall" {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(2)
+            };
+            let mut client = RpcClient::connect_until(&path, started + timeout).unwrap();
+            let result = call_tool(
+                &mut client,
+                "codex_app",
+                "get_usage_limits",
+                "test-context",
+                json!({}),
+            );
+            match mode {
+                "reply" => assert!(result.is_ok(), "{result:?}"),
+                "stall" => {
+                    assert!(result.unwrap_err().contains("超时"));
+                    assert!(started.elapsed() < Duration::from_millis(300));
+                }
+                "invalid" => assert!(result.unwrap_err().contains("响应无效")),
+                _ => assert!(result.is_err()),
+            }
+            drop(client);
+            server.join().unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a running Codex Desktop and CODEX_THREAD_ID"]
+    fn reads_live_usage_limits_over_mcp() {
+        let id = std::env::var("CODEX_PANE_VERIFY_THREAD")
+            .or_else(|_| std::env::var("CODEX_THREAD_ID"))
+            .unwrap();
+        let value = super::read_usage_limits(&id).unwrap();
+        assert!(
+            value["rateLimitsByLimitId"]["codex"]["primary"].is_object()
+                || value["rateLimits"]["primary"].is_object()
+        );
+    }
 
     #[test]
     fn parses_runtime_pipe_and_verifies_explicit_states() {
@@ -561,16 +762,6 @@ mod tests {
         assert_eq!(
             parse_pipe_path(line).as_deref(),
             Some(r"\\.\pipe\codex-browser-use-1234-abcd")
-        );
-        let listing = r"\\.\pipe\codex-browser-use-stale
-\\.\pipe\codex-browser-use-live
-\\.\pipe\codex-browser-use-stale";
-        assert_eq!(
-            parse_pipe_paths(listing),
-            vec![
-                r"\\.\pipe\codex-browser-use-stale",
-                r"\\.\pipe\codex-browser-use-live"
-            ]
         );
         let tools =
             json!({"tools": [{"name": "set_thread_title", "namespace": "codex-app-tools"}]});

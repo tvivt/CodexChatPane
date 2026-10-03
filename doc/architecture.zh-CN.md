@@ -27,7 +27,8 @@ CODEX_HOME/.codex-chat-pane + localStorage
 
 - `src-tauri/src/lib.rs`：Tauri command、窗口入口、配置和 Deep Link。
 - `src-tauri/src/source.rs`：读取 Codex 状态库并聚合 Project、Chat 快照。
-- `src-tauri/src/source/rollout.rs`：增量解析 rollout 活动、执行时间、Token 和额度。
+- `src-tauri/src/source/rollout.rs`：增量解析 rollout 活动和执行时间。
+- `src-tauri/src/source/rate_limits.rs`：通过 App MCP 读取实时额度，失败后走 CLI app-server，限制查询时间并清理查询进程。
 - `src-tauri/src/source/diagnostics.rs`：读取有限的桌面诊断日志并分类错误。
 - `src-tauri/src/source_watch.rs`：监听 Codex 数据文件的目录和历史变化。
 - `src-tauri/src/preview.rs`：按页读取对话预览，限制单页和缓存大小。
@@ -49,6 +50,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 3. Rust 扫描 Codex 状态库、全局状态和活动来源。
 4. 前端用稳定 ID 合并快照，恢复本地 Folder 和 Group 关系。
 5. 文件变化触发目录刷新；活动对话每秒查询一次状态，打开的预览另行按需读取。
+   窗口可见期间，额度独立每分钟刷新一次。
 6. Rust 扫描失败时保留最后有效快照，并向界面报告错误。
 
 原生数据加载完成前不会把空的前端状态写回本地配置，避免启动竞态清空用户整理结果。
@@ -58,7 +60,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 前端主要消费以下快照字段：
 
 ```text
-state, error, scopeKey, hostId, projects, chats, rateLimits
+state, error, scopeKey, hostId, projects, chats
 ```
 
 Chat 的工作状态和诊断来自结构化事件与受限日志读取；rollout 正文不进入普通快照。修改字段时必须同时检查 Rust 的 `serde` 命名、前端读取和测试 fixtures。

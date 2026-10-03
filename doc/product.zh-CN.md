@@ -16,7 +16,7 @@ CodexChatPane 解决的是本机 Codex Desktop 中 Project 和 Chat 较难同时
 | Chat | Codex | 对话身份、标题、归档状态、所属 Project 和时间 |
 | Folder | CodexChatPane | 本地的层级整理方式 |
 | Group | CodexChatPane | 可交叉复用的本地集合 |
-| Timeline | Codex 事件与 rollout | 最近活动、执行时间、当前状态和额度 |
+| Timeline | Codex 事件、rollout 与实时额度查询 | 最近活动、执行时间、当前状态和额度 |
 | Archive | Codex | Codex 原生归档状态，不等同于本地 Folder 回收站 |
 
 ## 3. 数据所有权
