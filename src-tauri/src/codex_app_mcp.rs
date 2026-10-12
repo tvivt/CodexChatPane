@@ -751,6 +751,37 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "temporarily restores a real archived thread; requires CODEX_PANE_VERIFY_THREAD"]
+    fn restores_archived_thread_over_external_mcp() {
+        let target = std::env::var("CODEX_PANE_VERIFY_THREAD").unwrap();
+        let before = crate::source::scan().unwrap();
+        assert!(before
+            .chats
+            .iter()
+            .any(|chat| chat.id == target && chat.archived));
+        println!(
+            "external_pid={} target={target} action=archive enabled=false",
+            std::process::id()
+        );
+        let result = super::run_action(&target, "archive", None, Some(false), 1_000);
+        println!("app_restore_result={result:?}");
+        let restored = crate::source::scan()
+            .unwrap()
+            .chats
+            .iter()
+            .any(|chat| chat.id == target && !chat.archived);
+        println!("readback_archived={} target={target}", !restored);
+        // Return the real thread to its original archived state after the restore check.
+        if restored {
+            super::run_action(&target, "archive", None, Some(true), 1_000).unwrap();
+            println!("final_archived=true target={target}");
+        }
+        result.unwrap();
+        assert!(restored);
+    }
+
     #[test]
     fn parses_runtime_pipe_and_verifies_explicit_states() {
         assert!(renderer_activation_required(

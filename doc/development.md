@@ -43,15 +43,17 @@ A few tests against local Codex data are ignored by default. They need real data
 
 ## 3. Build the portable Windows executable
 
-Run this from the repository root (network access is needed to install dependencies):
+Run this from the repository root (npm packages must be available for the first install or dependency changes; Rust dependencies must already be cached):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 ```
 
-The script runs `npm ci`, both frontend checks, `cargo fmt --check`, `cargo test --locked`, the frontend build, and the release Cargo build. CI runs the same script. CI uses Node.js 22 and Rust stable; using those versions locally aligns the environments more closely.
+The local script uses content fingerprints to decide whether to run `npm ci` and the frontend build, reusing unchanged `node_modules` and `dist`. Missing dependencies or changed frontend artifacts also trigger rebuilding. Fingerprints live in `.runtime/build-cache/`. Cargo still checks for changes on every run, using `--release --locked --offline` and `CARGO_INCREMENTAL=1`. The first run after enabling incremental compilation establishes its cache; changed embedded resources or Rust code still require compilation/linking.
 
-The final output is `release/CodexChatPane.exe`; Cargo's intermediate output stays in `src-tauri/target/release/`. The executable does not include a WebView2 Runtime installer, so the target machine needs WebView2 Runtime installed.
+The final output is `.runtime/bin/CodexChatPane.exe`; Cargo artifacts stay in `.runtime/app-target/` and dependencies in `.runtime/cargo-home/`. Identical executables are not copied again; exit the running app before replacing a changed executable. The executable does not include a WebView2 Runtime installer, so the target machine needs WebView2 Runtime installed.
+
+The development checkout's script does not run the full validation commands above; run the appropriate checks separately before release. In that checkout, run `powershell -NoProfile -File tests/build-app.ps1` for the isolated build-script regression check. It uses temporary files and fake npm/Cargo commands to verify cache invalidation and failure recovery without reinstalling project dependencies. The public release checkout retains its online build script, which runs validation and outputs `release/CodexChatPane.exe` for GitHub Actions.
 
 ## 4. GitHub Actions
 

@@ -69,8 +69,10 @@ mod windows {
         let name = lower.rsplit('\\').next().unwrap_or(&lower);
         if name == ".codex-global-state.json" || name.starts_with("state_5.sqlite") {
             change.catalog = true;
-        } else if name.starts_with("thread_history_1.sqlite") {
+        } else if name == "thread_history_1.sqlite" || name == "thread_history_1.sqlite-wal" {
             change.history = true;
+        } else if lower == "sessions" || lower == "archived_sessions" {
+            change.catalog = true;
         } else if (lower.starts_with("sessions\\") || lower.starts_with("archived_sessions\\"))
             && thread_id(&lower).is_some()
         {
@@ -93,24 +95,51 @@ mod windows {
     }
 
     pub fn start(app: tauri::AppHandle, root: &Path) -> Result<(), String> {
+        watch(app, root, String::new(), false)
+    }
+
+    fn watch(
+        app: tauri::AppHandle,
+        root: &Path,
+        prefix: String,
+        recursive: bool,
+    ) -> Result<(), String> {
         let name: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
         let directory = open_directory(&name);
         if directory == INVALID_HANDLE_VALUE {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let directory = directory as usize;
+        let root = root.to_path_buf();
         thread::spawn(move || {
             let mut directory = directory as Handle;
             let mut buffer = [0u8; 64 * 1024];
+            let mut watched = HashSet::new();
             loop {
                 loop {
+                    if !recursive {
+                        for folder in ["sessions", "archived_sessions"] {
+                            if !watched.contains(folder)
+                                && root.join(folder).is_dir()
+                                && watch(
+                                    app.clone(),
+                                    &root.join(folder),
+                                    format!("{folder}\\"),
+                                    true,
+                                )
+                                .is_ok()
+                            {
+                                watched.insert(folder);
+                            }
+                        }
+                    }
                     let mut returned = 0u32;
                     let ok = unsafe {
                         ReadDirectoryChangesW(
                             directory,
                             buffer.as_mut_ptr().cast(),
                             buffer.len() as u32,
-                            1,
+                            i32::from(recursive),
                             CHANGE_FILTER,
                             &mut returned,
                             std::ptr::null_mut(),
@@ -143,7 +172,13 @@ mod windows {
                                 .map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]]))
                                 .collect::<Vec<_>>(),
                         );
-                        classify(&path, &mut change, &mut ids);
+                        let action =
+                            u32::from_ne_bytes(buffer[offset + 4..offset + 8].try_into().unwrap());
+                        classify(&format!("{prefix}{path}"), &mut change, &mut ids);
+                        // A rollout can move or be replaced under the same thread ID.
+                        if recursive && action != 3 {
+                            change.catalog = true;
+                        }
                         if next == 0 {
                             break;
                         }
@@ -204,6 +239,10 @@ mod windows {
             classify("state_5.sqlite-wal", &mut change, &mut ids);
             classify("thread_history_1.sqlite-wal", &mut change, &mut ids);
             assert!(change.catalog && change.history);
+            let mut ignored = Change::default();
+            classify("thread_history_1.sqlite-shm", &mut ignored, &mut ids);
+            classify("logs\\codex.log", &mut ignored, &mut ids);
+            assert!(!ignored.full && !ignored.catalog && !ignored.history);
         }
     }
 }

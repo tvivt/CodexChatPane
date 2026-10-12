@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default desktop capability",
-  "windows": ["main", "conversation-preview"],
+  "windows": ["main", "conversation-preview", "chat-metrics"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

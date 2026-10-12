@@ -51,6 +51,14 @@ Conversation preview is off by default. Enable it in settings to show the previe
 
 To override the recent activity filter, right-click a chat and choose **Activity display → Auto, Include, or Exclude**. The Activity rules dialog shows both override lists and lets you return a chat to Auto.
 
+### View chat metrics
+
+Selecting a chat reads its local logs once. Metrics follow the time as `1.8s·62t/s·93%`, using the latest completed turn: native first-token latency, estimated generation speed including reasoning, and input cache hit rate. Details defaults to the same turn; whole-conversation totals remain selectable. The time keeps its width; truncated metrics remain available in tips with sample coverage. Click the metrics or choose **Conversation details**, the last item in an ordinary chat's context menu, to open a separate resizable window with a draggable header and minimize, maximize, and close controls instead of a system titlebar.
+
+Details show completed-turn totals or an individual turn, request exclusion reasons, activity records, tool times, and separate subagent summaries. Click a subagent to inspect its own records. Tool waits are excluded from generation speed; requests without reliable timing retain their usage but do not count toward speed. Missing values show `—`. Statistics refresh on another click, with no realtime polling. Archived menus still contain only **Restore chat**.
+
+Quotas show `5h ring percentage HH:mm` and `W ring percentage`; only 5h shows its reset time in the status bar. Each tooltip retains its full reset date/time and countdown, such as `2026-10-09 02:30 (-5h42m)`. Countdowns longer than 24 hours use days and whole hours, such as `(-1d2h)`; shorter ones, including exactly 24 hours, retain hours and minutes.
+
 ### Organize folders
 
 Create a local folder in Projects or Chats, then drag a project or chat into it. Folders, groups, order, and collapse state belong to CodexChatPane and are not written into Codex's project structure.

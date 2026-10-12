@@ -8,6 +8,9 @@ const PREVIEW_WINDOW_LABEL = 'conversation-preview';
 const PREVIEW_OPEN_EVENT = 'conversation-preview-open';
 const previewThreadId = new URLSearchParams(window.location?.search || '').get('preview') || '';
 const isPreviewWindow = Boolean(previewThreadId);
+const metricsThreadId = new URLSearchParams(window.location?.search || '').get('metrics') || '';
+const isMetricsWindow = Boolean(metricsThreadId);
+const isAuxiliaryWindow = isPreviewWindow || isMetricsWindow;
 configureLanguagePersistence(!nativeInvoke);
 const dynamicStorage = nativeInvoke ? {getItem: key => localStorage.getItem(key), setItem() {}} : localStorage;
 const dynamic = createDynamicStore(dynamicStorage);
@@ -85,6 +88,7 @@ const state = {
   projectRecentHeight: 170,
   projectRecentTimeWidth: 0,
   projectRecentProjectWidth: 0,
+  projectChatTimeWidth: 0,
   chatTimeWidth: 0,
   chatProjectWidth: 0,
   chatsLowerHeight: 220,
@@ -92,6 +96,7 @@ const state = {
   previewEnabled: false,
   showDateBars: true,
   logLevel: 'info',
+  remoteDebuggingPort: 0,
   settingsOpen: false,
   timelineGroupOverrides: new Set(),
   openFolders: new Set([PROJECT_DYNAMIC_FOLDER_KEY, AUTO_PROJECT_FOLDER_KEY, AUTO_PROJECT_PIN_KEY]),
@@ -111,7 +116,7 @@ const state = {
 };
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
-const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
+const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars', 'previewEnabled'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
@@ -234,6 +239,7 @@ const clampWindowHeight = value => {
   return Number.isFinite(height) ? Math.min(WINDOW_HEIGHT_MAX, Math.max(WINDOW_HEIGHT_MIN, height)) : 900;
 };
 const finiteNumber = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+const validDebugPort = value => Number.isInteger(value) && value >= 0 && value <= 65535;
 const formatFont = value => String(clampFont(value));
 function applyFontSize() {
   state.fontTab = clampFont(state.fontTab);
@@ -245,7 +251,7 @@ function applyFontSize() {
   root.setProperty('--font-row', `${state.fontRow}px`);
 }
 state.singlePaneWidth = clampWindowWidth(state.singlePaneWidth);
-const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowX:finiteNumber(state.windowX),windowY:finiteNumber(state.windowY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),previewEnabled:Boolean(state.previewEnabled),logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
+const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowX:finiteNumber(state.windowX),windowY:finiteNumber(state.windowY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),previewEnabled:Boolean(state.previewEnabled),logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',remoteDebuggingPort:state.remoteDebuggingPort,codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
 const configWindowMode = config => ['normal','codex','global'].includes(config.windowMode) ? config.windowMode : typeof config.windowPinned === 'boolean' ? (config.windowPinned ? 'global' : 'normal') : state.windowMode;
 const saveToolConfig = () => nativeInvoke?.('save_tool_config',{config:toolConfig()}).catch(error => showToast(t('无法保存工具配置'),String(error),'error'));
 function readFontConfig(config, key, field) {
@@ -259,7 +265,7 @@ async function loadToolConfig() {
       if (['zh','en'].includes(config.language)) setLanguage(config.language);
       if (['light','dark'].includes(config.theme)) state.theme = config.theme;
       if (THEME_FAMILIES.some(([id]) => id === config.themeFamily)) state.themeFamily = config.themeFamily;
-      if (!isPreviewWindow) state.windowMode = configWindowMode(config);
+      if (!isAuxiliaryWindow) state.windowMode = configWindowMode(config);
       readFontConfig(config, 'fontTab', 'fontTab');
       readFontConfig(config, 'fontPane', 'fontPane');
       readFontConfig(config, 'fontRow', 'fontRow');
@@ -269,17 +275,18 @@ async function loadToolConfig() {
       if (Number.isFinite(config.windowHeight)) state.windowHeight = clampWindowHeight(config.windowHeight);
       if (typeof config.showDateBars === 'boolean') state.showDateBars = config.showDateBars;
       if (typeof config.previewEnabled === 'boolean') state.previewEnabled = config.previewEnabled;
+      if (validDebugPort(config.remoteDebuggingPort)) state.remoteDebuggingPort = config.remoteDebuggingPort;
       if (['error','warn','info','debug'].includes(config.logLevel)) state.logLevel = config.logLevel;
     }
     if (typeof config?.codexMcpEnabled === 'boolean') codexMcpEnabled = config.codexMcpEnabled;
     else if (legacyMcpConsent === 'enabled' || legacyMcpConsent === 'disabled') {
       codexMcpEnabled = legacyMcpConsent === 'enabled';
-      if (!isPreviewWindow) await saveToolConfig();
+      if (!isAuxiliaryWindow) await saveToolConfig();
     } else codexMcpEnabled = null;
     if (legacyMcpConsent !== null) localStorage.removeItem?.(CODEX_MCP_CONSENT_KEY);
     localStorage.removeItem?.('CodexChatPane.language');
-    if (!config && !isPreviewWindow) await saveToolConfig();
-    if (!isPreviewWindow) await nativeInvoke('set_window_mode',{mode:state.windowMode});
+    if (!config && !isAuxiliaryWindow) await saveToolConfig();
+    if (!isAuxiliaryWindow) await nativeInvoke('set_window_mode',{mode:state.windowMode});
     applyFontSize();
     render();
     nativeConfigLoaded = true;
@@ -387,7 +394,6 @@ let nativeLoaded = false;
 let nativeScanInFlight = false;
 let nativeSourceSignature = "";
 let liveRateLimitsInFlight = false;
-const recentlyActiveIds = new Set();
 const sourceRefreshBlocked = () => resizeSession || draggedDynamic || draggedFolder || draggedChatIds.length || draggedProjectIds.length;
 function acceptRateLimits(limits) {
   if (!limits) return false;
@@ -406,10 +412,11 @@ async function refreshLiveRateLimits() {
     liveRateLimitsInFlight = false;
   }
 }
-async function loadNativeSnapshot(catalogOnly = false) {
+async function loadNativeSnapshot(catalogOnly = nativeLoaded || isPreviewWindow) {
   if (!nativeInvoke || nativeScanInFlight) return;
   if (sourceRefreshBlocked()) {
-    pendingFullRefresh = true;
+    if (catalogOnly || nativeLoaded) pendingCatalogRefresh = true;
+    else pendingFullRefresh = true;
     queueSourceRefresh();
     return;
   }
@@ -419,7 +426,8 @@ async function loadNativeSnapshot(catalogOnly = false) {
   try {
     const snapshot = await nativeInvoke(catalogOnly ? "get_catalog_snapshot" : "get_snapshot");
     if (sourceRefreshBlocked()) {
-      pendingFullRefresh = true;
+      if (catalogOnly || nativeLoaded) pendingCatalogRefresh = true;
+      else pendingFullRefresh = true;
       queueSourceRefresh();
       return;
     }
@@ -455,8 +463,6 @@ async function loadNativeSnapshot(catalogOnly = false) {
       nativeLoaded = true;
     }
     render();
-    if (!catalogOnly && !snapshot.error) recentlyActiveIds.clear();
-    chats.filter(chat => chat.working).forEach(chat => recentlyActiveIds.add(chat.id));
     syncLiveTimers();
     if (snapshot.error) showToast(snapshot.state, snapshot.error, "error");
   } catch (error) {
@@ -470,62 +476,77 @@ async function loadNativeSnapshot(catalogOnly = false) {
 }
 
 const pendingActivityIds = new Set();
+const pendingHistoryIds = new Set();
 let pendingFullRefresh = false;
 let pendingCatalogRefresh = false;
+let pendingHistoryRefresh = false;
 let sourceRefreshTimer = 0;
 let activityRefreshInFlight = false;
 function queueSourceRefresh(change = {}) {
-  let immediate = Boolean(change.activityTick);
-  if (change.full) pendingFullRefresh = true;
+  if (change.full) {
+    if (isPreviewWindow) {
+      pendingCatalogRefresh = true;
+      if (previewChatId) {
+        pendingActivityIds.add(previewChatId);
+        pendingHistoryIds.add(previewChatId);
+      }
+    } else pendingFullRefresh = true;
+  }
   if (change.catalog) pendingCatalogRefresh = true;
-  if (change.full || change.catalog) immediate = true;
   for (const id of change.threads || []) {
+    if (isPreviewWindow && id !== previewChatId) continue;
     const chat = chats.find(chat => chat.id === id);
-    if (chat && !chat.working) {
-      pendingActivityIds.add(id);
-      immediate = true;
-    }
+    if (!chat) pendingCatalogRefresh = true;
+    pendingActivityIds.add(id);
+    pendingHistoryIds.add(id);
   }
   if (change.history) {
-    const active = chats.filter(chat => chat.working);
+    // The main window owns the shared history baseline; previews only query their chat.
     if (isPreviewWindow) {
-      if (previewChatId && (active.some(chat => chat.id === previewChatId) || recentlyActiveIds.has(previewChatId))) pendingActivityIds.add(previewChatId);
-    } else if (active.length) {
-      for (const chat of active) pendingActivityIds.add(chat.id);
-      for (const id of recentlyActiveIds) pendingActivityIds.add(id);
-    } else {
-      pendingFullRefresh = true;
-      immediate = true;
-    }
+      if (previewChatId) {
+        pendingActivityIds.add(previewChatId);
+        pendingHistoryIds.add(previewChatId);
+      }
+    } else pendingHistoryRefresh = true;
   }
-  if (!pendingFullRefresh && !pendingCatalogRefresh && !pendingActivityIds.size) return;
+  if (!pendingFullRefresh && !pendingCatalogRefresh && !pendingHistoryRefresh && !pendingActivityIds.size) return;
   if (document.hidden) return;
-  if (!immediate && !pendingFullRefresh && !pendingCatalogRefresh) return;
-  clearTimeout(sourceRefreshTimer);
+  // A stream of tool writes must not postpone an already queued refresh forever.
+  if (sourceRefreshTimer) return;
   sourceRefreshTimer = setTimeout(flushSourceRefresh, 180);
 }
 async function flushSourceRefresh() {
+  sourceRefreshTimer = 0;
   if (document.hidden || nativeScanInFlight || activityRefreshInFlight || sourceRefreshBlocked()) {
     if (!document.hidden) sourceRefreshTimer = setTimeout(flushSourceRefresh, 250);
     return;
   }
   if (pendingFullRefresh || pendingCatalogRefresh || !nativeLoaded) {
-    const catalogOnly = pendingCatalogRefresh && !pendingFullRefresh && nativeLoaded;
+    const catalogOnly = isPreviewWindow || pendingCatalogRefresh && !pendingFullRefresh && nativeLoaded;
     const activityAfterCatalog = catalogOnly ? [...pendingActivityIds] : [];
+    const historyAfterCatalog = catalogOnly ? [...pendingHistoryIds] : [];
     pendingFullRefresh = false;
     pendingCatalogRefresh = false;
     pendingActivityIds.clear();
+    pendingHistoryIds.clear();
+    if (!catalogOnly) pendingHistoryRefresh = false;
     await loadNativeSnapshot(catalogOnly);
     activityAfterCatalog.forEach(id => pendingActivityIds.add(id));
-    if (pendingActivityIds.size || pendingFullRefresh || pendingCatalogRefresh) queueSourceRefresh();
+    historyAfterCatalog.forEach(id => pendingHistoryIds.add(id));
+    queueSourceRefresh();
     return;
   }
   const ids = [...pendingActivityIds];
+  const historyIds = [...pendingHistoryIds];
+  const historyChanged = pendingHistoryRefresh;
   pendingActivityIds.clear();
-  if (!ids.length) return;
+  pendingHistoryIds.clear();
+  pendingHistoryRefresh = false;
+  if (!ids.length && !historyChanged) return;
   activityRefreshInFlight = true;
+  let failed = false;
   try {
-    const update = await nativeInvoke('get_chat_activity', {threadIds:ids});
+    const update = await nativeInvoke('get_chat_activity', {threadIds:ids,historyIds,historyChanged});
     state.syncError = '';
     state.syncAt = Date.now();
     updateSyncStatus();
@@ -535,7 +556,6 @@ async function flushSourceRefresh() {
       if (index < 0) continue;
       const next = nativeChat(raw,index,chats[index]);
       if (JSON.stringify(next) !== JSON.stringify(chats[index])) {
-        if (next.working || chats[index].working) recentlyActiveIds.add(raw.id);
         chats[index] = next;
         changed = true;
       }
@@ -548,14 +568,19 @@ async function flushSourceRefresh() {
       render();
       syncLiveTimers();
     }
-    if (previewChatId && ids.includes(previewChatId)) refreshConversationPreview();
+    if (previewChatId && (update.chats || []).some(chat => chat.id === previewChatId)) refreshConversationPreview();
   } catch (error) {
-    pendingFullRefresh = true;
+    failed = true;
+    ids.forEach(id => pendingActivityIds.add(id));
+    historyIds.forEach(id => pendingHistoryIds.add(id));
+    pendingHistoryRefresh ||= historyChanged;
     state.syncError = String(error);
     updateSyncStatus();
   } finally {
     activityRefreshInFlight = false;
-    if (pendingFullRefresh || pendingCatalogRefresh || pendingActivityIds.size) queueSourceRefresh();
+    if (failed) {
+      if (!document.hidden && !sourceRefreshTimer) sourceRefreshTimer = setTimeout(flushSourceRefresh, 1500);
+    } else queueSourceRefresh();
   }
 }
 
@@ -737,10 +762,11 @@ function quotaResetTime(milliseconds, windowMinutes) {
 }
 function quotaCountdown(milliseconds, now = Date.now()) {
   const minutes = Math.max(0, Math.ceil((milliseconds - now) / 60000));
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.ceil(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d${hours % 24}h`;
+  if (minutes > 1440) {
+    const hours = Math.floor((milliseconds - now) / 3600000);
+    return `${Math.floor(hours / 24)}d${hours % 24}h`;
+  }
+  return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
 }
 
 function quotaMarkup(now = Date.now()) {
@@ -751,15 +777,170 @@ function quotaMarkup(now = Date.now()) {
     const expired = Number.isFinite(window.resets_at) && now >= window.resets_at * 1000;
     const remaining = expired ? "--" : Math.round(Math.max(0, Math.min(100, 100 - window.used_percent)));
     const tone = expired ? 'unknown' : remaining <= 10 ? 'low' : remaining <= 30 ? 'medium' : 'high';
-    const label = window.window_minutes === 300 ? '5h' : 'Week';
+    const label = window.window_minutes === 300 ? '5h' : 'W';
     const resetAt = Number.isFinite(window.resets_at) ? window.resets_at * 1000 : NaN;
-    const reset = Number.isFinite(resetAt) ? window.window_minutes === 300 ? quotaResetTime(resetAt,300) : quotaCountdown(resetAt,now) : t('未知');
     const exact = Number.isFinite(resetAt) ? fullLocalTime(resetAt).slice(0,16) : t('未知');
-    return ui`<span class="quota-window ${expired ? 'quota-expired' : ''}" title="${esc(t('重置：') + exact)}"><span>${label}</span><span class="quota-ring ${tone}" style="--remaining:${expired ? 0 : remaining}%" role="img" aria-label="${label}: ${remaining}%"></span><span class="quota-full">${remaining}% ${reset}</span><span class="quota-compact">${remaining}%</span></span>`;
+    const tip = Number.isFinite(resetAt) ? `${exact} (-${quotaCountdown(resetAt,now)})` : exact;
+    return ui`<span class="quota-window ${expired ? 'quota-expired' : ''}" title="${esc(tip)}"><span>${label}</span><span class="quota-ring ${tone}" style="--remaining:${expired ? 0 : remaining}%" role="img" aria-label="${label}: ${remaining}%"></span><span>${remaining}%</span>${window.window_minutes === 300 ? ui`<span class="quota-reset-time">${quotaResetTime(resetAt,300)}</span>` : ''}</span>`;
   }).join('');
 }
 
 let hoveredChatId = '';
+const chatMetrics = new Map();
+function rememberChatMetrics(data) {
+  chatMetrics.delete(data.threadId);
+  chatMetrics.set(data.threadId, data);
+  if (chatMetrics.size > 24) {
+    const oldest = [...chatMetrics.keys()].find(id => id !== state.selectedChatId);
+    chatMetrics.delete(oldest);
+  }
+}
+const metricsPending = new Map();
+let metricsSelectionRequest = 0;
+let metricsDetailRequest = 0;
+let metricsView = null;
+const metricValue = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const metricNumber = value => metricValue(value) ? value.toLocaleString(language() === 'en' ? 'en-US' : 'zh-CN') : '—';
+const metricSeconds = (value, digits = 1) => metricValue(value) ? `${(value / 1000).toFixed(digits)}s` : '—';
+const metricPercent = (value, digits = 1) => metricValue(value) ? `${(value * 100).toFixed(digits)}%` : '—';
+const metricsCompact = metrics => `${metricSeconds(metrics?.ttftMs)}·${metricValue(metrics?.tokenSpeed) ? Math.round(metrics.tokenSpeed) + 't/s' : '—'}·${metricPercent(metrics?.cacheHitRate, 0)}`;
+const metricStatus = value => t(({completed:'已完成',inProgress:'进行中',running:'进行中',interrupted:'已中断',failed:'失败',pending:'等待中',closed:'已关闭'})[value] || value || '未知');
+function metricsTooltip(metrics, data) {
+  if (!data) return t('点击查看对话详情；尚未读取统计');
+  return [t('最近完成轮'), t('原生首 token：') + metricSeconds(metrics?.ttftMs, 3),
+    t('估算生成速度，含推理：') + (metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'),
+    t('token 覆盖率：') + metricPercent(metrics?.coverage) + `；${metricNumber(metrics?.validRequestCount)}/${metricNumber(metrics?.requestCount)} ` + t('次请求'),
+    t('缓存命中率：') + metricPercent(metrics?.cacheHitRate, 2),
+    t('工具等待不计入生成速度；子智能体单独统计。'),
+    data.complete ? '' : t('记录不完整'), t('点击查看对话详情')].filter(Boolean).join('\n');
+}
+async function readChatMetrics(threadId) {
+  if (!nativeInvoke) throw new Error(t('桌面运行时不可用'));
+  if (metricsPending.has(threadId)) return metricsPending.get(threadId);
+  const pending = nativeInvoke('get_chat_metrics', {threadId});
+  metricsPending.set(threadId, pending);
+  try {
+    const data = await pending;
+    if (data?.threadId !== threadId) throw new Error(t('统计返回的对话 ID 不匹配'));
+    return data;
+  } finally { if (metricsPending.get(threadId) === pending) metricsPending.delete(threadId); }
+}
+async function loadSelectedChatMetrics(threadId) {
+  const request = ++metricsSelectionRequest;
+  chatMetrics.delete(threadId);
+  updateStatusChat();
+  if (!nativeInvoke) return;
+  try {
+    const data = await readChatMetrics(threadId);
+    if (request !== metricsSelectionRequest || state.selectedChatId !== threadId) return;
+    rememberChatMetrics(data);
+    updateStatusChat();
+  } catch (error) {
+    if (request === metricsSelectionRequest && state.selectedChatId === threadId) {
+      updateStatusChat();
+      showToast(t('无法读取对话统计'), String(error), 'error');
+    }
+  }
+}
+function metricsTime(value) {
+  const at = typeof value === 'number' ? value : Date.parse(value);
+  return fullLocalTime(at);
+}
+function metricsScope(data, scope = '') {
+  return scope === 'all' ? data?.summary || null : data?.turns?.find(turn => turn.turnId === (scope || data.latestTurnId))?.metrics || null;
+}
+function metricsTable(headers, rows) {
+  return `<div class="metrics-table-scroll"><table><thead><tr>${headers.map(label => `<th>${esc(t(label))}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}">${esc(t('没有可用记录'))}</td></tr>`}</tbody></table></div>`;
+}
+function metricCells(values) { return values.map(value => `<td>${value}</td>`).join(''); }
+function metricsTurnDetails(turn) {
+  const requests = (turn.requests || []).map(request => `<tr>${metricCells([
+    esc(request.responseId || '—'), metricNumber(request.inputTokens), metricNumber(request.cachedInputTokens), metricNumber(request.outputTokens), metricNumber(request.reasoningTokens),
+    esc(metricsTime(request.startMs)), esc(metricsTime(request.endMs)), esc(t(request.included ? '已纳入' : request.excludedReason || '未纳入'))
+  ])}</tr>`);
+  const activities = (turn.activities || []).map(activity => `<details class="metrics-activity"><summary><time>${esc(metricsTime(activity.at ?? activity.startedAt))}</time> ${esc(activity.label || activity.type || '—')} <span>${esc(t(activity.status || ''))}</span></summary><div class="metrics-note">${esc(activity.type || '')} · ${esc(metricsTime(activity.startedAt))} → ${esc(metricsTime(activity.completedAt))}</div>${activity.detail ? `<pre>${esc(typeof activity.detail === 'string' ? activity.detail : JSON.stringify(activity.detail, null, 2))}</pre>` : `<p class="metrics-note">${esc(t('没有可读详情；内容可能缺失或加密'))}</p>`}</details>`).join('');
+  return `<details class="metrics-section"><summary>${esc(t('请求明细'))} (${requests.length})</summary>${metricsTable(['响应 ID','输入 token','缓存输入','输出 token','其中推理','开始时间','结束时间','计时状态'], requests)}</details><details class="metrics-section"><summary>${esc(t('活动记录'))} (${turn.activities?.length || 0})</summary><p class="metrics-note">${esc(t('按日志时间展示；活动可能并行，空档不推断为生成时间。'))}</p>${activities || esc(t('没有可用记录'))}</details>`;
+}
+function metricsHeader(canGoBack = false) {
+  return ui`<header${isMetricsWindow ? ' data-window-drag' : ''}>${canGoBack ? ui`<button class="icon-button" data-metrics-action="back" title="${t('返回上层')}" aria-label="${t('返回上层')}">${icon('chevron-left')}</button>` : ''}<span>${t('对话详情')}</span><span class="toolbar-spacer"></span>${isMetricsWindow ? ui`<button class="icon-button" data-window-action="minimize" title="${t('最小化')}" aria-label="${t('最小化')}">${icon('window-minimize')}</button><button class="icon-button" data-window-action="toggleMaximize" title="${t(state.windowMaximized ? '还原' : '最大化')}" aria-label="${t(state.windowMaximized ? '还原' : '最大化')}">${icon(state.windowMaximized ? 'window-restore' : 'window-maximize')}</button>` : ''}<button class="icon-button" data-metrics-action="close" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></header>`;
+}
+function chatMetricsMarkup(data, scope = '', canGoBack = false) {
+  const metrics = metricsScope(data, scope), selectedTurnId = scope === 'all' ? '' : scope || data.latestTurnId;
+  const scopeLabel = scope === 'all' ? t('全会话（已完成轮次）') : scope ? t('所选轮次') : t('最近完成轮');
+  const unCached = metricValue(metrics?.inputTokens) && metricValue(metrics?.cachedInputTokens) && metrics.inputTokens >= metrics.cachedInputTokens ? metrics.inputTokens - metrics.cachedInputTokens : null;
+  const fields = [['原生首 token',metricSeconds(metrics?.ttftMs,3)],['估算生成速度',metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'],['缓存命中率',metricPercent(metrics?.cacheHitRate,2)],
+    ['输入 token',metricNumber(metrics?.inputTokens)],['缓存输入',metricNumber(metrics?.cachedInputTokens)],['未缓存输入',metricNumber(unCached)],['输出 token',metricNumber(metrics?.outputTokens)],['其中推理',metricNumber(metrics?.reasoningOutputTokens)],['总 token',metricNumber(metrics?.totalTokens)],
+    ['有效请求 / 全部请求',`${metricNumber(metrics?.validRequestCount)} / ${metricNumber(metrics?.requestCount)}`],['token 覆盖率',metricPercent(metrics?.coverage)],['生成样本耗时',metricSeconds(metrics?.generationMs)],['总轮次耗时',metricSeconds(metrics?.durationMs)],['工具阻塞',metricSeconds(metrics?.toolWaitMs)],
+    ['完成轮次 / 全部轮次',`${metricNumber(metrics?.completedTurnCount)} / ${metricNumber(metrics?.turnCount)}`]];
+  if (scope === 'all') fields.push(['首 token 中位数',metricSeconds(metrics?.ttftMedianMs,3)],['首 token 样本数',metricNumber(metrics?.ttftSampleCount)]);
+  const turnRows = (data.turns || []).map(turn => `<tr class="${turn.turnId === selectedTurnId ? 'metrics-selected' : ''}">${metricCells([
+    `<button class="metrics-link" data-metrics-action="scope" data-scope="${esc(turn.turnId)}">${esc(metricsTime(turn.startedAt))}</button>`, esc([turn.model, turn.effort].filter(Boolean).join(' / ') || '—'), esc(metricStatus(turn.status)),
+    metricSeconds(turn.metrics?.ttftMs), metricValue(turn.metrics?.tokenSpeed) ? turn.metrics.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(turn.metrics?.coverage), metricPercent(turn.metrics?.cacheHitRate), metricNumber(turn.metrics?.outputTokens), metricSeconds(turn.metrics?.durationMs), metricSeconds(turn.metrics?.toolWaitMs)
+  ])}</tr>`);
+  const toolRows = (data.tools || []).map(tool => `<tr>${metricCells([esc(tool.name),metricNumber(tool.count),metricNumber(tool.failures),metricSeconds(tool.runtimeMs),metricSeconds(tool.waitMs)])}</tr>`);
+  const agentRows = (data.subagents || []).map(agent => `<tr>${metricCells([
+    `<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(agent.path || agent.threadId)}">${esc(agent.name || agent.path || agent.threadId)}</button>`, esc(agent.model || '—'), esc(metricStatus(agent.status)), metricNumber(agent.summary?.outputTokens), metricValue(agent.summary?.tokenSpeed) ? agent.summary.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(agent.summary?.coverage), metricPercent(agent.summary?.cacheHitRate), agent.error ? esc(agent.error) : '—'
+  ])}</tr>`);
+  const currentTurn = data.turns?.find(turn => turn.turnId === selectedTurnId);
+  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title || data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd || '—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ') || '—')} · ${t(data.archived ? '已归档' : '未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p><div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${(data.turns || []).map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有完成轮次'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞'],turnRows)}${currentTurn ? metricsTurnDetails(currentTurn) : ''}<h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','读取错误'],agentRows)}</div>`;
+}
+function renderChatMetricsDialog() {
+  const dialog = document.getElementById('chat-metrics-dialog');
+  if (!metricsView || !dialog) return;
+  dialog.setAttribute('aria-label', t('对话详情'));
+  dialog.innerHTML = metricsView.data ? chatMetricsMarkup(metricsView.data,metricsView.scope,Boolean(metricsView.parents.length)) : ui`${metricsHeader(Boolean(metricsView.parents.length))}<div class="metrics-body">${esc(metricsView.error || t('正在读取统计…'))}${metricsView.parents.length ? ui`<button class="text-button" data-metrics-action="back">${t('返回上层')}</button>` : ''}</div>`;
+}
+async function openChatMetrics(threadId, child = false) {
+  if (nativeInvoke && !isMetricsWindow) {
+    try { await nativeInvoke('open_chat_metrics_window', {threadId}); }
+    catch (error) { showToast(t('无法读取对话统计'), String(error), 'error'); }
+    return;
+  }
+  const parents = child && metricsView ? [...metricsView.parents,{...metricsView,parents:undefined}] : [];
+  const request = ++metricsDetailRequest;
+  metricsView = {threadId,scope:'',parents,data:null,error:''};
+  hideConversationPreview('metrics-dialog');
+  renderChatMetricsDialog();
+  const dialog = document.getElementById('chat-metrics-dialog');
+  if (!dialog.open) {
+    if (isMetricsWindow) dialog.show();
+    else dialog.showModal();
+  }
+  try {
+    const data = await readChatMetrics(threadId);
+    if (request !== metricsDetailRequest || metricsView?.threadId !== threadId) return;
+    metricsView.data = data;
+    rememberChatMetrics(data);
+    renderChatMetricsDialog();
+    updateStatusChat();
+  } catch(error) {
+    if (request !== metricsDetailRequest || metricsView?.threadId !== threadId) return;
+    metricsView.error = t('无法读取对话统计') + ': ' + String(error);
+    renderChatMetricsDialog();
+  }
+}
+function closeChatMetrics() {
+  ++metricsDetailRequest;
+  metricsView = null;
+  document.getElementById('chat-metrics-dialog')?.close();
+  if (isMetricsWindow) void nativeWindow?.close();
+}
+function backChatMetrics() {
+  if (!metricsView?.parents.length) return;
+  ++metricsDetailRequest;
+  const parents = [...metricsView.parents], parent = parents.pop();
+  metricsView = {...parent,parents};
+  renderChatMetricsDialog();
+}
+document.addEventListener('cancel', event => {
+  if (event.target?.id === 'chat-metrics-dialog') closeChatMetrics();
+});
+document.addEventListener('change', event => {
+  if (event.target.matches?.('[data-metrics-scope]') && metricsView?.data) {
+    metricsView.scope = event.target.value;
+    renderChatMetricsDialog();
+  }
+});
 function fullLocalTime(at) {
   if (!Number.isFinite(at) || at <= 0) return t('未知');
   const date = new Date(at), pad = n => String(n).padStart(2,'0');
@@ -774,10 +955,11 @@ function statusLocalTime(at) {
   return `${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 function statusChatMarkup() {
-  const chat = chats.find(item => item.id === (hoveredChatId || state.selectedChatId));
+  const chat = chats.find(item => item.id === state.selectedChatId);
   if (!chat) return '';
   const duration = executionLabel(chat);
-  return ui`<span class="status-sent">${statusLocalTime(chat.lastUserMessageAt)}${duration ? ui`[<span class="status-duration">${duration}</span>]` : ''}</span>`;
+  const data = chatMetrics.get(chat.id), metrics = metricsScope(data);
+  return ui`<span class="status-sent">${statusLocalTime(chat.lastUserMessageAt)}${duration ? ui`[<span class="status-duration">${duration}</span>]` : ''}</span><button class="status-metrics" data-metrics-action="open" data-id="${esc(chat.id)}" title="${esc(metricsTooltip(metrics, data))}" aria-label="${t('对话详情')}">${metricsCompact(metrics)}</button>`;
 }
 function syncMarkup() {
   if (!state.syncError) return '';
@@ -820,6 +1002,11 @@ function hideConversationPreview(reason = 'unknown') {
   const preview = document.getElementById('chat-preview');
   if (preview) preview.hidden = true;
   if (isPreviewWindow) {
+    pendingActivityIds.clear();
+    pendingHistoryIds.clear();
+  }
+  syncLiveTimers();
+  if (isPreviewWindow) {
     void nativeWindow?.hide?.();
   } else if (PreviewWebviewWindow) {
     void PreviewWebviewWindow.getByLabel(PREVIEW_WINDOW_LABEL).then(previewWindow => previewWindow?.hide()).catch(() => {});
@@ -849,6 +1036,7 @@ async function showConversationPreview(id) {
   if (state.previewPinned && previewChatId && previewChatId !== id) return;
   if (previewChatId === id) return;
   previewChatId = id;
+  queueSourceRefresh({threads:[id]});
   syncLiveTimers();
   await queueConversationPage(id);
 }
@@ -1088,7 +1276,7 @@ function renderSettingsPane() {
       <section class="settings-section"><h2>${t('外观')}</h2>
         <div class="settings-row"><span>${t('语言')}</span><div class="settings-choices">${settingsChoice('set-language','data-language','zh',language()==='zh','中文')}${settingsChoice('set-language','data-language','en',language()==='en','EN')}</div></div>
         <div class="settings-row"><span>${t('亮色 / 暗色')}</span><div class="settings-choices">${settingsChoice('set-theme','data-theme','light',state.theme==='light',t('亮色'))}${settingsChoice('set-theme','data-theme','dark',state.theme==='dark',t('暗色'))}</div></div>
-        <div class="settings-row settings-row-wrap"><span>${t('主题')}</span><div class="settings-choices">${THEME_FAMILIES.map(([id,label]) => settingsChoice('set-theme-family','data-theme-family',id,state.themeFamily===id,label)).join('')}</div></div>
+        <div class="settings-row"><span>${t('主题')}</span><select class="settings-choice" data-input="theme-family" aria-label="${t('主题')}">${THEME_FAMILIES.map(([id,label]) => ui`<option value="${id}"${state.themeFamily === id ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></div>
         <div class="settings-fonts">${fontStep('tab','Tab',state.fontTab)}${fontStep('pane',t('栏'),state.fontPane)}${fontStep('row',t('文件夹与项目'),state.fontRow)}</div>
         <div class="settings-row settings-row-wrap"><span>${t('日期颜色竖条')}</span><div class="settings-choices">${settingsChoice('set-date-bars','data-date-bars','on',state.showDateBars,t('显示'))}${settingsChoice('set-date-bars','data-date-bars','off',!state.showDateBars,t('隐藏'))}</div></div>
       </section>
@@ -1099,6 +1287,8 @@ function renderSettingsPane() {
       <section class="settings-section"><h2>${t('诊断')}</h2>
         <div class="settings-row settings-row-wrap"><span>${t('日志级别')}</span><div class="settings-choices">${settingsChoice('set-log-level','data-log-level','error',state.logLevel==='error',t('错误'))}${settingsChoice('set-log-level','data-log-level','warn',state.logLevel==='warn',t('警告'))}${settingsChoice('set-log-level','data-log-level','info',state.logLevel==='info',t('信息'))}${settingsChoice('set-log-level','data-log-level','debug',state.logLevel==='debug',t('调试'))}</div></div>
         <p class="settings-note">${t('日志文件位于本机 CodexChatPane 数据目录；Debug 会记录窗口事件与状态细节。')}</p>
+        <div class="settings-row"><span>${t('调试端口')}</span><input class="settings-choice" style="width:8em" type="number" min="0" max="65535" step="1" data-input="remote-debugging-port" value="${state.remoteDebuggingPort}" aria-label="${t('调试端口')}"></div>
+        <p class="settings-note">${t('0 表示关闭；仅允许本机连接。修改后从托盘退出并重新启动。')}</p>
       </section>
       <section class="settings-section"><h2>Codex</h2>
         <div class="settings-row settings-row-wrap"><span>${t('对话预览')}</span><button type="button" class="settings-choice ${state.previewEnabled ? 'active' : ''}" data-action="toggle-conversation-preview" aria-pressed="${state.previewEnabled}">${t(state.previewEnabled ? '已开启' : '已关闭')}</button></div>
@@ -1219,11 +1409,11 @@ function rememberWindowGeometry() {
 async function windowAction(action) {
   if (!nativeWindow || !["minimize", "toggleMaximize", "close", "startDragging"].includes(action)) return;
   try {
-    if (action === "minimize" && nativeInvoke) {
+    if (action === "minimize" && nativeInvoke && !isAuxiliaryWindow) {
       await nativeInvoke("minimize_to_tray");
       return;
     }
-    if (action === "close" && nativeInvoke) {
+    if (action === "close" && nativeInvoke && !isAuxiliaryWindow) {
       await nativeInvoke("request_close");
       return;
     }
@@ -1297,10 +1487,10 @@ function projectRecentPanel() {
 function renderProjectPane() {
   const activeCount = filteredProjectFolderProjects().length;
   const archivedCount = projectChats().filter(chat => effectiveReasons(chat).length).length;
-  return ui`<aside class="workspace-pane project-pane projects-workspace ${state.projectArchiveOpen ? 'project-archive-open' : ''}" style="--project-recent-height:${state.projectRecentHeight}px;--project-structure-height:${state.projectStructureHeight}px;--project-label-width:${projectLabelWidth()}ch" aria-label="Project 管理">
+  return ui`<aside class="workspace-pane project-pane projects-workspace ${state.projectArchiveOpen ? 'project-archive-open' : ''}" style="--project-recent-height:${state.projectRecentHeight}px;--project-structure-height:${state.projectStructureHeight}px;--project-label-width:${projectLabelWidth()}ch;--project-chat-time-width:${state.projectChatTimeWidth > 0 ? `${state.projectChatTimeWidth}px` : 'calc(var(--chat-lead) + 4px)'}" aria-label="Project 管理">
     ${projectRecentPanel()}
     <div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}">${folderToggleAllButton('project')}<strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button></div><div class="scroll tree">${projectTree()}</div></div>
-    <div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="project-structure" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整 Project 与 Chat 文件夹高度')}">${folderToggleAllButton('chat')}<strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div></div>
+    <div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="project-structure" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整 Project 与 Chat 文件夹高度')}">${folderToggleAllButton('chat')}<strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>
     ${state.projectArchiveOpen ? ui`<div class="view-block project-archive-panel archive-block"><div class="view-head scope-head scope-archive">${icon('archive')}<span>${t('归档对话')}</span><span class="count">${archivedCount}</span><span class="toolbar-spacer"></span><button class="icon-button" data-action="toggle-project-archive" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></div><div class="scroll">${archivedChatList()}</div></div>` : ''}
   </aside>`;
 }
@@ -1554,19 +1744,18 @@ function leadTimestamp(chat) {
 }
 function workCellDateLabel(at) {
   const date = new Date(at);
-  if (!Number.isFinite(date.getTime()) || !at) return { day: t('未知'), time: '' };
+  if (!Number.isFinite(date.getTime()) || !at) return t('未知');
   const pad = n => String(n).padStart(2, '0');
   const now = new Date();
   const start = value => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const diff = Math.round((start(now) - start(date)) / 86400000);
-  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
   const zh = language() === 'zh';
-  if (diff === 0) return { day: zh ? '今天' : 'Today', time };
-  if (diff === 1) return { day: zh ? '昨天' : 'Yesterday', time };
-  if (diff === 2) return { day: zh ? '前天' : '2 Days', time };
-  if (diff >= 3 && diff <= 7) return { day: zh ? `${diff}天前` : `${diff} Days`, time };
+  if (diff === 0) return zh ? '今天' : 'Today';
+  if (diff === 1) return zh ? '昨天' : 'Yesterday';
+  if (diff === 2) return zh ? '前天' : '2 Days';
+  if (diff >= 3 && diff <= 7) return zh ? `${diff}天前` : `${diff} Days`;
   const monthDay = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-  return { day: zh || date.getFullYear() === now.getFullYear() ? monthDay : `${date.getFullYear()}-${monthDay}`, time };
+  return zh || date.getFullYear() === now.getFullYear() ? monthDay : `${date.getFullYear()}-${monthDay}`;
 }
 function chatLeadShowsDuration(chat) {
   return Boolean(chatDiagnostic(chat)) || chat.working || Boolean(chat.attentionAt);
@@ -1578,8 +1767,7 @@ function chatWorkStatus(chat) {
 function chatWorkCell(chat, asLead = false) {
   const status = chatWorkStatus(chat);
   if (asLead && !chatLeadShowsDuration(chat)) {
-    const {day, time} = workCellDateLabel(leadTimestamp(chat));
-    return ui`<span class="chat-work-cell date-cell">${ui`<span class="chat-work-day">${day}</span>`}${time ? ui`<span class="chat-work-time">${time}</span>` : ''}</span>`;
+    return ui`<span class="chat-work-cell date-cell"><span class="chat-work-day">${workCellDateLabel(leadTimestamp(chat))}</span></span>`;
   }
   const hasTime = chat.executionStatus !== 'interrupted' && (chat.working || Number.isFinite(chat.executionMs));
   const time = hasTime ? formatExecutionSlot(currentExecutionMs(chat)) : '';
@@ -1615,6 +1803,7 @@ function tickExecutionClock() {
   executionClockTimer = setTimeout(tickExecutionClock, 1000 - Date.now() % 1000);
 }
 function syncLiveTimers() {
+  if (isMetricsWindow) return;
   if (isPreviewWindow) {
     clearInterval(previewRefreshTimer);
     previewRefreshTimer = 0;
@@ -1653,11 +1842,10 @@ function syncLiveTimers() {
   }
 }
 
-function timelineDateTime(timestamp, executionBracket = "") {
+function timelineDate(timestamp) {
   const date = new Date(timestamp);
   const compactDate = ui`${String(date.getUTCFullYear()).slice(-2)}${String(date.getUTCMonth() + 1).padStart(2, "0")}${String(date.getUTCDate()).padStart(2, "0")}`;
-  const time = ui`${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}`;
-  return ui`<span class="timeline-row-time timeline-time-block"><span>${compactDate}</span><span>${time}${executionBracket}</span></span>`;
+  return ui`<span class="timeline-row-date">${compactDate}</span>`;
 }
 
 const DIAGNOSTICS = {
@@ -1741,8 +1929,8 @@ function chatRow(chat, timeline = false, showProject = timeline, compact = false
   const typeBtn = timeline ? '' : chatTypeButton(chat);
   const preview = timeline ? '' : chatPreviewIcon(chat);
   const lead = timeline ? '' : (check ? statusLead(check) : chatWorkCell(chat, true));
-  return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
-    ${lead}${chatStatusBar(chat)}${timeline ? compact || dynamicScope ? chatWorkCell(chat) : oldDate ? ui`${timelineDateTime(chat.timelineAt)}${chatWorkCell(chat)}` : ui`<span class="timeline-row-time">${chat.time}</span>${chatWorkCell(chat)}` : typeBtn}
+  return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : oldDate ? "timeline-row with-date" : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
+    ${lead}${chatStatusBar(chat)}${timeline ? ui`${!compact && !dynamicScope && oldDate ? timelineDate(chat.timelineAt) : ''}${chatWorkCell(chat)}` : typeBtn}
     ${globalTimeline ? globalContent : ui`<div class="chat-main"><div class="chat-title-line"><div class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</div></div>${timeline && compact || !meta ? "" : ui`<div class="chat-meta">${meta}</div>`}</div>`}
     ${dynamicScope ? ui`<div class="chat-actions">${codexActionButtons(chat)}</div>` : actions}${preview}
   </div>`;
@@ -2001,6 +2189,10 @@ function render() {
   applyFontSize();
   document.documentElement.lang = language() === 'en' ? 'en' : 'zh-CN';
   document.documentElement.dataset.runtime = 'native';
+  if (isMetricsWindow) {
+    document.body.classList.add('metrics-window');
+    return;
+  }
   if (isPreviewWindow) {
     document.body.classList.add('preview-window');
     return;
@@ -2089,8 +2281,7 @@ async function runCodexChatAction(chat, action, title = null, confirmed = false)
     return;
   }
   if (action === 'rename' && (!title || title === chat.title)) return;
-  if (action === 'archive' && chat.sourceArchived) return;
-  if (action === 'archive' && !confirmed) {
+  if (action === 'archive' && !chat.sourceArchived && !confirmed) {
     showAppConfirm({
       title: t('确认归档'),
       copy: chat.title,
@@ -2101,7 +2292,7 @@ async function runCodexChatAction(chat, action, title = null, confirmed = false)
     });
     return;
   }
-  const enabled = action === 'pin' ? !chat.codexPinned : action === 'archive' ? true : null;
+  const enabled = action === 'pin' ? !chat.codexPinned : action === 'archive' ? !chat.sourceArchived : null;
   codexActionInFlight = true;
   codexActionChatId = chat.id;
   render();
@@ -2199,6 +2390,9 @@ function restoreChatFolder(key) {
 function hideContextMenu() {
   document.getElementById("context-menu").hidden = true;
 }
+if (nativeWindow) void nativeWindow.onFocusChanged(({payload:focused}) => {
+  if (!focused) hideContextMenu();
+});
 
 function createProjectFolder(parent = '', value = '') {
   const name = value.trim();
@@ -2591,6 +2785,10 @@ function showTargetPicker(button) {
 }
 function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceFolder = '') {
   const id = chat?.id || project.id, ids = selectedIds.length ? selectedIds : [id], data = {id,ids:ids.join(','),scope};
+  if (chat?.sourceArchived) {
+    const unavailable = codexActionUnavailable(chat, 'archive');
+    return menuButton('恢复对话','codex-action',{id,codexaction:'archive'},Boolean(unavailable),unavailable);
+  }
   const multiple = ids.length > 1;
   let menu = multiple ? '' : chat ? '' : menuButton(project.synthetic ? '在 Codex 新建无项目对话' : '在 Codex 新建对话','new',data);
   if (chat) {
@@ -2598,7 +2796,7 @@ function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceF
     const allExcluded = ids.every(targetId => state.recentExcludedChatIds.has(targetId));
     const allAutomatic = ids.every(targetId => !state.recentIncludedChatIds.has(targetId) && !state.recentExcludedChatIds.has(targetId));
     menu += `<div class="context-submenu"><button type="button" class="context-submenu-trigger" aria-haspopup="menu" aria-expanded="false"><span>${esc(t('动态显示'))}</span><span aria-hidden="true">›</span></button><div class="context-submenu-popup" role="menu">${menuChoice('自动','recent-auto',data,allAutomatic)}${menuChoice('加入','recent-include',data,allIncluded)}${menuChoice('移出','recent-exclude',data,allExcluded)}</div></div>`;
-    if (!multiple) for (const [action, label] of [['rename','重命名对话'], ...chat.sourceArchived ? [] : [['archive','归档对话']]]) {
+    if (!multiple) for (const [action, label] of [['rename','重命名对话'],['archive','归档对话']]) {
       const unavailable = codexActionUnavailable(chat, action);
       menu += menuButton(label,'codex-action',{...data,codexaction:action},Boolean(unavailable),unavailable);
     }
@@ -2608,16 +2806,16 @@ function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceF
     const folders = [...state.localChatFolders].filter(key => key.startsWith(`${chat.projectId}${CHAT_FOLDER_SEPARATOR}`) && !state.recycledChatFolders.has(key));
     const sameProject = ids.every(targetId => chats.find(item => item.id === targetId)?.projectId === chat.projectId);
     menu += menuButton('移动到会话文件夹','choose-target',{...data,targetaction:'folder'},!folders.length || !sameProject,t('没有可用文件夹'));
-    if (!multiple) menu += menuButton('定位所属项目','locate',data);
+    if (!multiple) menu += menuButton('所属项目','locate',data);
   } else if (!chat && !project.synthetic) {
     const targets = ['', ...state.localProjectFolders].filter(folder => folder !== sourceFolder);
     menu += menuButton('移动到项目文件夹','choose-target',{...data,targetaction:'project-folder',sourcefolder:sourceFolder},!targets.length,t('没有可用文件夹'));
   }
-  if (!multiple && dirProject && !dirProject.synthetic && dirProject.pathValid) menu += menuButton('打开项目文件夹','directory',data);
+  if (!multiple && dirProject && !dirProject.synthetic && dirProject.pathValid) menu += menuButton('打开文件夹','directory',data);
   if (multiple) return menu;
   const copies = chat ? [['复制标题',chat.title],['复制链接',`codex://threads/${id}`]] : [['复制名称',project.name],['复制路径',project.path || ''],['复制 ID',id]];
   if (chat && chatDiagnostic(chat)) copies.push(['复制诊断信息',diagnosticTooltip(chat)]);
-  return menu + copies.map(([label,text]) => menuButton(label,'copy',{text})).join('');
+  return menu + copies.map(([label,text]) => menuButton(label,'copy',{text})).join('') + (chat ? menuButton('对话详情','chat-metrics',data) : '');
 }
 let menuTimeline = false;
 const CONFIG_KEYS = [PREFERENCES_KEY,FOLDERS_KEY,DYNAMIC_KEY,'CodexChatPane.language'];
@@ -2662,6 +2860,7 @@ function configurationDocument() {
     windowMode: state.windowMode,
     previewEnabled: state.previewEnabled,
     logLevel: state.logLevel,
+    remoteDebuggingPort: state.remoteDebuggingPort,
     windowWidth: clampWindowWidth(state.singlePaneWidth),
     fontTab: clampFont(state.fontTab),
     fontPane: clampFont(state.fontPane),
@@ -2759,14 +2958,18 @@ function importedDocument(parsed) {
   };
 }
 async function applyImportedAppearance(doc) {
-  if (doc.language === 'zh' || doc.language === 'en') setLanguage(doc.language);
   const appearance = doc.appearance && typeof doc.appearance === 'object' ? doc.appearance : {};
+  if (appearance.remoteDebuggingPort != null && !validDebugPort(appearance.remoteDebuggingPort)) throw new Error(t('调试端口必须是 0–65535 的整数'));
+  if (doc.language === 'zh' || doc.language === 'en') setLanguage(doc.language);
   if (['light','dark'].includes(appearance.theme)) state.theme = appearance.theme;
   if (THEME_FAMILIES.some(([id]) => id === appearance.themeFamily)) state.themeFamily = appearance.themeFamily;
   if (['normal','codex','global'].includes(appearance.windowMode)) state.windowMode = appearance.windowMode;
   else if (typeof appearance.windowPinned === 'boolean') state.windowMode = appearance.windowPinned ? 'global' : 'normal';
   if (typeof appearance.previewEnabled === 'boolean') state.previewEnabled = appearance.previewEnabled;
   if (['error','warn','info','debug'].includes(appearance.logLevel)) state.logLevel = appearance.logLevel;
+  if (appearance.remoteDebuggingPort != null) {
+    state.remoteDebuggingPort = appearance.remoteDebuggingPort;
+  }
   if (Number.isFinite(appearance.fontTab)) state.fontTab = clampFont(appearance.fontTab);
   if (Number.isFinite(appearance.fontPane)) state.fontPane = clampFont(appearance.fontPane);
   if (Number.isFinite(appearance.fontRow)) state.fontRow = clampFont(appearance.fontRow);
@@ -2809,7 +3012,7 @@ function validateConfiguration(input) {
     if (key === 'CodexChatPane.language') { if (!['zh','en'].includes(value)) throw new Error(t('工具配置格式无效')); result[key] = value; continue; }
     const parsed = JSON.parse(value);
     let valid = true;
-    if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter','openFolders','openChatFolders'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
+    if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter','openFolders','openChatFolders'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','projectChatTimeWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
     if (key === FOLDERS_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => ['projects','chats'].includes(field) ? object(v) && Object.values(v).every(item => object(item) && typeof item.folder === 'string' && Object.entries(item).every(([k,x]) => k === 'folder' ? x.length <= 4096 : k === 'folders' ? strings(x) : ['recycled','starred'].includes(k) ? typeof x === 'boolean' : k === 'region' ? typeof x === 'string' && x.length <= 32 : ['order','manualOrder','regionEnteredAt'].includes(k) && Number.isFinite(x))) : ['localProjectFolders','localChatFolders','recentIncludedChatIds','recentExcludedChatIds','recycledChatFolders','openFolders','openChatFolders','starredProjectIds','pinnedProjectIds'].includes(field) && strings(v));
     if (key === 'CodexChatPane.dynamic-v1') valid = object(parsed) && ['projects','chats'].every(kind => Array.isArray(parsed.groups?.[kind]) && parsed.groups[kind].every(g=>object(g) && typeof g.id==='string' && typeof g.name==='string' && g.name.length<=4096) && object(parsed.members?.[kind]) && Object.values(parsed.members[kind]).every(g=>typeof g==='string' || strings(g))) && object(parsed.views) && Object.values(parsed.views).every(v=>object(v) && strings(v.order) && strings(v.groups) && strings(v.collapsed) && (v.orders === undefined || object(v.orders) && Object.values(v.orders).every(strings)));
     if (!valid) throw new Error(t('工具配置格式无效'));
@@ -2861,6 +3064,7 @@ async function handleMenuAction(button) {
   const {menuAction:action,id,ids,scope,group,source,folder,key,text:copyText,codexaction} = button.dataset;
   const targetIds = (ids || id || '').split(',').filter(Boolean);
   const chat = chats.find(c => c.id === id), project = byProject(chat?.projectId || id);
+  if (action === 'chat-metrics') { await openChatMetrics(id); return; }
   if (action === 'choose-target') { showTargetPicker(button); return; }
   if (action === 'copy') { await navigator.clipboard.writeText(copyText); return; }
   if (action === 'open') {
@@ -3010,6 +3214,17 @@ function updateRowSelection(kind, row, event) {
 
 document.addEventListener("click", async event => {
   if (isPreviewWindow) previewLog('event-click', {target: previewEventTarget(event.target), button: event.button, detail: event.detail, x: event.clientX, y: event.clientY});
+  const metricsAction = event.target.closest('[data-metrics-action]');
+  if (metricsAction) {
+    event.preventDefault();
+    hideContextMenu();
+    const {metricsAction:action,id,scope} = metricsAction.dataset;
+    if (action === 'close') closeChatMetrics();
+    else if (action === 'back') backChatMetrics();
+    else if (action === 'scope' && metricsView?.data) { metricsView.scope = scope; renderChatMetricsDialog(); }
+    else if (action === 'open' || action === 'agent') await openChatMetrics(id,action === 'agent');
+    return;
+  }
   const submenuTrigger = event.target.closest('.context-submenu-trigger');
   if (submenuTrigger) {
     event.preventDefault();
@@ -3268,7 +3483,6 @@ document.addEventListener("click", async event => {
       return;
     }
     if (name === 'toggle-language') { setLanguage(language() === 'zh' ? 'en' : 'zh'); void saveToolConfig(); }
-    if (name === "set-theme-family") { state.themeFamily = action.dataset.themeFamily; void saveToolConfig(); }
     if (name === 'toggle-codex-mcp') {
       if (codexMcpEnabled) {
         codexMcpEnabled = false;
@@ -3371,6 +3585,7 @@ document.addEventListener("click", async event => {
     state.selectedChatFolder = "";
     state.selectedChatId = chat.id;
     state.chatSelectionAnchor = chat.id;
+    void loadSelectedChatMetrics(chat.id);
     if (!nativeInvoke) chat.openedAt = Date.now();
     if (fromProjectRecent && state.projectRecentLinked) {
       state.projectId = chat.projectId;
@@ -3446,7 +3661,7 @@ document.addEventListener("contextmenu", event => {
   } else if (target.closest('.timeline-view-block, .global-timeline-list, .view-block:has(.project-timeline)')) {
     menu = menuButton('全部展开','timeline-open-all') + menuButton('全部折叠','timeline-close-all') + menuButton('包含归档','timeline-archive') + menuButton('关闭 Timeline','timeline-close');
   } else if (target.closest('.status-chat')) {
-    const chat = chats.find(c => c.id === (hoveredChatId || state.selectedChatId));
+    const chat = chats.find(c => c.id === state.selectedChatId);
     if (chat) menu = menuButton('复制发送时间','copy',{text:fullLocalTime(chat.lastUserMessageAt)}) + menuButton('复制执行时间','copy',{text:executionLabel(chat)}) + menuButton('复制完整时间信息','copy',{text:`${t('执行: ')}${executionLabel(chat)} ${t('对话: ')}${fullLocalTime(chat.lastUserMessageAt)}`});
   } else if (target.closest('.status-quota')) {
     menu = menuButton('复制额度及重置时间','copy',{text:[state.rateLimits?.primary,state.rateLimits?.secondary].filter(Boolean).map(w => `${w.window_minutes === 300 ? '5h' : 'Week'} ${Date.now() >= w.resets_at*1000 ? '--' : Math.round(100-w.used_percent)}% · ${quotaResetTime(w.resets_at*1000,w.window_minutes)}`).join('\n')});
@@ -3468,8 +3683,28 @@ document.addEventListener("input", event => {
   }
 });
 
-document.addEventListener("change", event => {
+document.addEventListener("change", async event => {
   if (event.target.id === 'config-import') return;
+  if (event.target.dataset.input === 'theme-family') {
+    const theme = event.target.value;
+    if (!THEME_FAMILIES.some(([id]) => id === theme)) return;
+    const previous = state.themeFamily;
+    state.themeFamily = theme;
+    try { if (nativeInvoke) await nativeInvoke('save_tool_config',{config:toolConfig()}); }
+    catch (error) { state.themeFamily = previous; showToast(t('无法保存工具配置'),String(error),'error'); }
+  }
+  if (event.target.dataset.input === 'remote-debugging-port') {
+    const port = Number(event.target.value);
+    if (!event.target.value.trim() || !validDebugPort(port)) {
+      event.target.value = String(state.remoteDebuggingPort);
+      showToast(t('无法保存工具配置'),t('调试端口必须是 0–65535 的整数'),'error');
+      return;
+    }
+    const previous = state.remoteDebuggingPort;
+    state.remoteDebuggingPort = port;
+    try { if (nativeInvoke) await nativeInvoke('save_tool_config',{config:toolConfig()}); }
+    catch (error) { state.remoteDebuggingPort = previous; showToast(t('无法保存工具配置'),String(error),'error'); }
+  }
   if (event.target.dataset.input === 'chat-days') setChatDays(event.target.value);
   render();
 });
@@ -3886,11 +4121,12 @@ const PANEL_HEIGHT_KEYS = { 'project-recent': 'projectRecentHeight', 'project-st
 const PANEL_WIDTH_CONFIG = {
   'project-recent-time': {key:'projectRecentTimeWidth', panel:'.project-recent-panel', selector:'.project-recent-list .chat-work-cell', variable:'--project-recent-time-width', fallback:() => language() === 'en' ? 92 : 62},
   'project-recent-project': {key:'projectRecentProjectWidth', panel:'.project-recent-panel', selector:'.project-recent-list .global-chat-project', variable:'--project-recent-project-width', fallback:() => 160},
+  'project-chat-time': {key:'projectChatTimeWidth', panel:'.projects-workspace', selector:'.project-chat-list .chat-work-cell', variable:'--project-chat-time-width', fallback:() => language() === 'en' ? 92 : 42},
   'chat-time': {key:'chatTimeWidth', panel:'.global-dynamic', selector:'.dynamic-list .chat-work-cell', variable:'--chat-time-width', fallback:() => language() === 'en' ? 92 : 62},
   'chat-project': {key:'chatProjectWidth', panel:'.global-dynamic', selector:'.dynamic-list .global-chat-project', variable:'--chat-project-width', fallback:() => 160}
 };
 const PANEL_WIDTH_KEYS = Object.fromEntries(Object.entries(PANEL_WIDTH_CONFIG).map(([type, config]) => [type, config.key]));
-const COLUMN_MIN_WIDTH = {'project-recent-time':48, 'project-recent-project':72, 'chat-time':48, 'chat-project':72};
+const COLUMN_MIN_WIDTH = {'project-recent-time':24, 'project-recent-project':24, 'project-chat-time':24, 'chat-time':24, 'chat-project':24};
 function panelResizer(type, label) {
   return ui`<div class="panel-resizer" data-resize="${type}" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${label}" title="${label}"></div>`;
 }
@@ -3993,19 +4229,33 @@ async function listenForSourceChanges() {
   await window.__TAURI__?.event?.listen?.('codex-source-changed', event => {
     const change = event.payload || {};
     queueSourceRefresh(change);
-    if (previewChatId && (change.full || change.catalog || change.threads?.includes(previewChatId) && !chats.some(chat => chat.id === previewChatId && chat.working))) refreshConversationPreview();
+    if (!document.hidden && previewChatId && (change.full || change.threads?.includes(previewChatId))) refreshConversationPreview();
   });
 }
 document.addEventListener('visibilitychange', () => {
+  if (isMetricsWindow) return;
   syncLiveTimers();
   if (!document.hidden && nativeInvoke) {
-    queueSourceRefresh({full:true});
+    chats.filter(chat => chat.working && (!isPreviewWindow || chat.id === previewChatId)).forEach(chat => pendingActivityIds.add(chat.id));
+    queueSourceRefresh();
     void refreshLiveRateLimits();
     if (previewChatId) refreshConversationPreview();
   }
 });
 
-if (isPreviewWindow) {
+if (isMetricsWindow) {
+  document.body.classList.add('metrics-window');
+  render();
+  if (nativeWindow?.isMaximized) void syncWindowState();
+  void nativeWindow?.onResized?.(() => { void syncWindowState(); });
+  void (async () => {
+    await window.__TAURI__?.event?.listen?.('chat-metrics-open', event => {
+      if (typeof event.payload === 'string') void openChatMetrics(event.payload);
+    });
+    await loadToolConfig();
+    if (!metricsView) await openChatMetrics(metricsThreadId);
+  })();
+} else if (isPreviewWindow) {
   document.body.classList.add('preview-window');
   render();
   void (async () => {

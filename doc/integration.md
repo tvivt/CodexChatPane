@@ -18,8 +18,8 @@ CodexChatPane's own settings are kept separately in `.codex-chat-pane` under tha
 
 - `state_5.sqlite`: basic thread information and project associations.
 - `.codex-global-state.json`: global projects, thread assignments, pins, and unread state.
-- `thread_history_1.sqlite`: message times and activity state.
-- Rollout JSONL: working state, execution time, errors, and preview content.
+- `thread_history_1.sqlite`: supplements message times, missing execution details, and failure status by chat ID. File changes compare the latest-turn status summary; tool item writes do not refresh the whole list's activity.
+- Rollout JSONL: incrementally supplies working state, recent user-message and progress times, execution time, and errors. Body content is read only for an open, paged preview.
 - Codex Desktop logs: a limited set of retry and activity diagnostics.
 
 Usage limits are read through Codex App MCP first, using an existing chat as context. If MCP fails, the app queries `account/rateLimits/read` through the Desktop CLI app-server. Limits refresh at startup, when the window becomes visible, and once per minute while visible. A failed query keeps the last value.
@@ -52,7 +52,7 @@ Supported write operations include:
 
 - Rename a chat.
 - Pin or unpin a chat.
-- Archive a chat.
+- Archive or restore a chat.
 - Pin or unpin a project.
 
 If a tool is unavailable, the renderer is not active, or Codex returns an error, the UI reports failure instead of showing a false local success.

@@ -11,6 +11,7 @@ This is an experimental personal project, not an official Codex Desktop componen
 - Browse local Codex data by project, chat, recent activity, and archive status.
 - Organize projects and chats with local folders and groups, including nested folders, search, sorting, selection, and drag and drop.
 - See unread, running, and error states, execution time, last activity, and usage limits.
+- Select a chat to see first-token latency, estimated token speed, and cache hit rate; open Chat details for per-turn requests, tools, and separate subagent statistics.
 - Optionally enable conversation previews in settings (off by default); preview pages are read only when requested.
 - Mark chats as always included in or excluded from recent activity; review both lists in the Activity rules dialog. Local stars are kept separately from Codex pins.
 - Open or create conversations through Codex deep links.
@@ -47,7 +48,7 @@ The development server listens on `127.0.0.1:1420`. On first launch, the app rea
 
 ## Get the Windows executable
 
-After a push to `main` or a manual run of the `Windows portable build` GitHub Actions workflow, download the `CodexChatPane-windows-portable` artifact and run `CodexChatPane.exe`. The executable is unsigned, so Windows may show a SmartScreen prompt. The target machine needs WebView2 Runtime installed.
+Pushing a `v*` tag builds and publishes a GitHub Release with `CodexChatPane.exe`. A manual run of `Windows portable build` provides the `CodexChatPane-windows-portable` artifact. The executable is unsigned, so Windows may show a SmartScreen prompt. The target machine needs WebView2 Runtime installed.
 
 To build from source on Windows, run this from the repository root:
 
@@ -55,7 +56,7 @@ To build from source on Windows, run this from the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 ```
 
-The script runs the same install, checks, and build steps as CI. The final executable is `release\CodexChatPane.exe`. See [Development and validation](doc/development.md) for environment requirements and details.
+The development checkout uses an incremental local script and produces `.runtime/bin/CodexChatPane.exe`. The public release checkout's script runs validation and produces `release/CodexChatPane.exe`. See [Development and validation](doc/development.md) for environment requirements and validation steps.
 
 ## Documentation
 
@@ -65,6 +66,7 @@ The script runs the same install, checks, and build steps as CI. The final execu
 | Product behavior and data ownership | [doc/product.md](doc/product.md) |
 | Code structure and data flow | [doc/architecture.md](doc/architecture.md) |
 | Codex data, deep links, and App MCP | [doc/integration.md](doc/integration.md) |
+| Conversation metrics definitions and implementation (Chinese) | [doc/conversation-metrics.zh-CN.md](doc/conversation-metrics.zh-CN.md) |
 | Development, tests, and builds | [doc/development.md](doc/development.md) |
 
 ## Validation
@@ -82,7 +84,7 @@ A few Rust tests that require real local Codex data are explicitly ignored by de
 ## Data and safety
 
 - Codex state, history, rollout, and log files are opened read only.
-- Conversation text is read only when you request a preview; it is not stored in this app's snapshots or settings.
+- Conversation text and activity details are read on demand for previews and metrics; they are not stored in this app's snapshots or settings.
 - Folders, groups, themes, and window settings stay local and are not synced to the cloud by this app.
 - Rename, pin, and archive operations require you to enable Codex MCP. The app reloads state after each operation to verify the result.
 - Codex Desktop's internal App MCP is not a stable public API. Changes to it may temporarily disable write operations without affecting read only browsing.

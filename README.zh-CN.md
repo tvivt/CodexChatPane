@@ -11,6 +11,7 @@ CodexChatPane 是一个运行在 Windows 上的 Codex Desktop 辅助侧栏：把
 - 按 Project、Chat、最近活动和归档状态浏览本机 Codex 数据。
 - 使用本地 Folder 和 Group 整理 Project、Chat；支持多级文件夹、搜索、排序、多选和拖动。
 - 显示未读、执行中、错误、执行时间、最后活动时间和额度状态。
+- 点击对话显示首 token、估算 token 速度和缓存命中率；“对话详情”提供逐轮请求、工具活动和独立子代理统计。
 - 可在设置中开启对话预览（默认关闭）；使用预览入口时才分页读取 rollout 内容。
 - 可将对话始终加入或移出最近动态，并在“动态规则”对话框集中查看；工具 Star 与 Codex Pin 分开保存。
 - 通过 Deep Link 打开已有对话或新建对话。
@@ -47,7 +48,7 @@ npm run dev
 
 ## 获取 Windows 可执行文件
 
-推送到 `main` 或手动运行 GitHub Actions 的 `Windows portable build` 后，在工作流的 Artifacts 中下载 `CodexChatPane-windows-portable`，其中的 `CodexChatPane.exe` 可以直接运行。当前构建未签名，Windows 可能显示 SmartScreen 提示；程序依赖系统已安装 WebView2 Runtime。
+推送 `v*` 标签会构建并发布 GitHub Release，附带可直接运行的 `CodexChatPane.exe`。手动运行 `Windows portable build` 可下载 `CodexChatPane-windows-portable` 构建产物。当前构建未签名，Windows 可能显示 SmartScreen 提示；程序依赖系统已安装 WebView2 Runtime。
 
 从源码在 Windows 本地构建，在仓库根目录运行：
 
@@ -55,7 +56,7 @@ npm run dev
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 ```
 
-脚本执行与 CI 相同的安装、检查和构建命令，生成 `release\CodexChatPane.exe`。环境要求和详细步骤见 [开发与验证](doc/development.md)。
+开发仓库使用增量构建脚本，生成 `.runtime\bin\CodexChatPane.exe`；公开 release 仓库的脚本执行验证后生成 `release\CodexChatPane.exe`。环境要求和验证步骤见 [开发与验证](doc/development.zh-CN.md)。
 
 ## 文档
 
@@ -65,6 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 | 理解产品行为和数据所有权 | [doc/product.zh-CN.md](doc/product.zh-CN.md) |
 | 理解代码结构和数据流 | [doc/architecture.zh-CN.md](doc/architecture.zh-CN.md) |
 | 理解 Codex 数据、Deep Link 和 App MCP | [doc/integration.zh-CN.md](doc/integration.zh-CN.md) |
+| token 速度定义、日志解析与对话统计实现 | [doc/conversation-metrics.zh-CN.md](doc/conversation-metrics.zh-CN.md) |
 | 修改、测试和构建项目 | [doc/development.zh-CN.md](doc/development.zh-CN.md) |
 
 ## 验证
@@ -82,7 +84,7 @@ Rust 测试中有少量显式忽略的本机 Codex 数据检查；它们需要�
 ## 数据与安全边界
 
 - Codex 状态库、历史库、rollout 和日志以只读方式读取。
-- 对话正文只在用户请求预览时按需读取，不写入本项目的快照或配置。
+- 预览和统计详情按需读取对话正文、活动摘要，不写入本项目的快照或配置。
 - Folder、Group、主题和窗口设置属于本地工具状态，不同步到云端。
 - 改名、Pin、归档等写操作需要用户启用 Codex MCP，并在每次操作后重新加载状态验证结果。
 - Codex Desktop 内部 App MCP 不是公开稳定接口；接口变化可能使写操作暂时不可用，但不影响只读浏览。

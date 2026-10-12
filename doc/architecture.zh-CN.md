@@ -30,7 +30,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 - `src-tauri/src/source/rollout.rs`：增量解析 rollout 活动和执行时间。
 - `src-tauri/src/source/rate_limits.rs`：通过 App MCP 读取实时额度，失败后走 CLI app-server，限制查询时间并清理查询进程。
 - `src-tauri/src/source/diagnostics.rs`：读取有限的桌面诊断日志并分类错误。
-- `src-tauri/src/source_watch.rs`：监听 Codex 数据文件的目录和历史变化。
+- `src-tauri/src/source_watch.rs`：Codex home 根目录不递归监听，只递归监听 `sessions` / `archived_sessions`。
 - `src-tauri/src/preview.rs`：按页读取对话预览，限制单页和缓存大小。
 - `src-tauri/src/codex_app_mcp.rs`：发现、调用和验证 Codex Desktop 内部 App MCP。
 - `src-tauri/src/window_attach.rs`：Windows 前台窗口识别和 Pane 显示联动。
@@ -49,8 +49,9 @@ CODEX_HOME/.codex-chat-pane + localStorage
 2. 前端加载本地配置和兼容的 `localStorage` 状态。
 3. Rust 扫描 Codex 状态库、全局状态和活动来源。
 4. 前端用稳定 ID 合并快照，恢复本地 Folder 和 Group 关系。
-5. 文件变化触发目录刷新；活动对话每秒查询一次状态，打开的预览另行按需读取。
-   窗口可见期间，额度独立每分钟刷新一次。
+5. 目录变化只更新列表元数据并复用活动缓存；rollout 变化只更新受影响对话 ID。历史库变化比较缓存的最新轮次状态摘要，只补查实际变化的 ID，包括晚到的失败详情；工具输出和投影变化不重读所有 rollout。
+   活动对话每秒增量检查 rollout 和诊断，不查询历史库；耗时使用缓存开始时间和本地时钟。打开的预览另行按目标对话分页读取，隐藏或关闭后停止刷新。
+   窗口隐藏时保留待更新对象，恢复可见时集中处理，不全量重扫执行历史。额度在启动、恢复可见时独立刷新，可见期间每分钟刷新。监听溢出或重新连接时允许全量扫描，补回丢失的事件。
 6. Rust 扫描失败时保留最后有效快照，并向界面报告错误。
 
 原生数据加载完成前不会把空的前端状态写回本地配置，避免启动竞态清空用户整理结果。
@@ -68,6 +69,7 @@ Chat 的工作状态和诊断来自结构化事件与受限日志读取；rollou
 ## 5. 持久化边界
 
 - 稳定工具配置写入 `%CODEX_HOME%\.codex-chat-pane\settings.toml`。
+- `remoteDebuggingPort` 默认 `0`（关闭）。“设置 / 诊断”接受 `0–65535`；非零端口在完全退出并重启工具后开启仅本机连接的 WebView2 CDP。主窗口和预览共用启动时参数，并保留原有浏览器默认参数；保存新端口不改变当前运行的 WebView 环境。
 - Folder、Group、Star、动态规则和本地归属写入同目录下的 `folders.json`。未设置 `CODEX_HOME` 时根目录为 `%USERPROFILE%\.codex`。
 - 高频界面状态写入浏览器 `localStorage`。
 - Codex 原始数据库、rollout 和日志只读打开。

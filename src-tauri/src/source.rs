@@ -38,7 +38,18 @@ pub struct SourceSnapshot {
     pub error: Option<String>,
     pub projects: Vec<ProjectSnapshot>,
     pub chats: Vec<ChatSnapshot>,
+    #[serde(skip)]
+    pub(crate) history_summaries: HashMap<String, HistorySummary>,
 }
+
+pub(crate) type HistorySummary = (
+    String,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -272,6 +283,11 @@ fn scan_path_with_previous(
         unread_thread_ids,
     ) = read_global_state(&home.join(".codex-global-state.json"))?;
     let threads = read_threads(&connection)?;
+    let history_summaries = previous
+        .map(|snapshot| snapshot.history_summaries.clone())
+        .unwrap_or_else(|| {
+            read_history_summaries(&home.join("thread_history_1.sqlite")).unwrap_or_default()
+        });
     let app_server_started_at = desktop_app_server_started_at();
     let mut thread_activity = if let Some(previous) = previous {
         previous
@@ -484,7 +500,53 @@ fn scan_path_with_previous(
         error: None,
         projects,
         chats,
+        history_summaries,
     })
+}
+
+fn read_history_summaries(database: &Path) -> Result<HashMap<String, HistorySummary>, String> {
+    if !database.is_file() {
+        return Ok(HashMap::new());
+    }
+    let connection = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| error.to_string())?;
+    let has_error: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('thread_turns') WHERE name='error_json')",
+        [], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    let error_column = if has_error {
+        "turns.error_json"
+    } else {
+        "NULL"
+    };
+    // Compare status only: tool output and projection writes must not reread every rollout.
+    let mut statement = connection.prepare(&format!(
+        "WITH latest AS (SELECT thread_id, MAX(rollout_ordinal) AS ordinal FROM thread_turns \
+         WHERE first_user_item_id IS NOT NULL AND started_at IS NOT NULL GROUP BY thread_id) \
+         SELECT turns.thread_id, turns.turn_id, turns.status, turns.started_at, \
+         turns.completed_at, turns.duration_ms, {error_column} FROM latest \
+         JOIN thread_turns turns ON turns.thread_id=latest.thread_id AND turns.rollout_ordinal=latest.ordinal"
+    )).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                (
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ),
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())
 }
 
 fn merge_rollout_activity(
@@ -520,36 +582,96 @@ fn merge_rollout_activity(
     }
 }
 
-pub fn refresh_activities(snapshot: &mut SourceSnapshot, ids: &[String]) -> ActivityUpdate {
-    let home = codex_home().ok();
-    let cutoff = desktop_app_server_started_at();
-    let history = home.as_ref().and_then(|home| {
-        Connection::open_with_flags(
-            home.join("thread_history_1.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()
-    });
-    let has_error = history.as_ref().is_some_and(|connection| {
-        connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('thread_turns') WHERE name='error_json')",
-                [],
-                |row| row.get::<_, bool>(0),
+pub fn refresh_activities(
+    snapshot: &mut SourceSnapshot,
+    ids: &[String],
+    history_ids: &[String],
+    history_changed: bool,
+) -> Result<ActivityUpdate, String> {
+    refresh_activities_at(
+        snapshot,
+        ids,
+        history_ids,
+        history_changed,
+        &codex_home()?,
+        desktop_app_server_started_at(),
+    )
+}
+
+fn refresh_activities_at(
+    snapshot: &mut SourceSnapshot,
+    ids: &[String],
+    history_ids: &[String],
+    history_changed: bool,
+    home: &Path,
+    cutoff: Option<i64>,
+) -> Result<ActivityUpdate, String> {
+    let mut ids: HashSet<String> = ids.iter().cloned().collect();
+    let mut history_ids: HashSet<String> = history_ids.iter().cloned().collect();
+    let summaries = if history_changed {
+        let summaries = read_history_summaries(&home.join("thread_history_1.sqlite"))?;
+        for (id, summary) in &summaries {
+            if snapshot.history_summaries.get(id) != Some(summary) {
+                ids.insert(id.clone());
+                history_ids.insert(id.clone());
+            }
+        }
+        Some(summaries)
+    } else {
+        None
+    };
+    if ids.is_empty() {
+        if let Some(summaries) = summaries {
+            snapshot.history_summaries = summaries;
+        }
+        return Ok(ActivityUpdate { chats: Vec::new() });
+    }
+    let database = home.join("thread_history_1.sqlite");
+    let history = if !history_ids.is_empty() && database.is_file() {
+        Some(
+            Connection::open_with_flags(
+                database,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
-            .unwrap_or(false)
-    });
+            .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let has_error = match history.as_ref() {
+        Some(connection) => connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('thread_turns') WHERE name='error_json')",
+            [],
+            |row| row.get::<_, bool>(0),
+        ).map_err(|error| error.to_string())?,
+        None => false,
+    };
     let mut activities = HashMap::new();
-    for id in ids {
+    for id in &ids {
         let Some(chat) = snapshot.chats.iter_mut().find(|chat| &chat.id == id) else {
             continue;
         };
-        if let Some(activity) = history.as_ref().and_then(|connection| {
-            read_thread_activity_for(connection, id, cutoff, has_error)
-                .ok()
-                .flatten()
-        }) {
-            activities.insert(id.clone(), activity);
+        activities.insert(
+            id.clone(),
+            ThreadActivity {
+                turn_id: chat.turn_id.clone(),
+                working: chat.working,
+                last_user_message_at: chat.last_user_message_at,
+                execution_started_at: chat.execution_started_at,
+                execution_ms: chat.execution_ms,
+                execution_status: chat.execution_status.clone(),
+                activity_at: chat.activity_at,
+                diagnostic: chat.diagnostic.clone(),
+                ..Default::default()
+            },
+        );
+        if history_ids.contains(id) {
+            if let Some(connection) = history.as_ref() {
+                if let Some(activity) = read_thread_activity_for(connection, id, cutoff, has_error)?
+                {
+                    activities.insert(id.clone(), activity);
+                }
+            }
         }
         if let Ok(activity) = read_rollout_snapshot(&chat.rollout_path, cutoff) {
             if let Some(activity) = activity {
@@ -585,12 +707,15 @@ pub fn refresh_activities(snapshot: &mut SourceSnapshot, ids: &[String]) -> Acti
             continue;
         }
         if let Some(mut activity) = activities.remove(&chat.id) {
-            if activity.working {
-                activity.update_diagnostic(
-                    activity.turn_id.as_ref().and_then(|turn| retries.get(turn)),
-                    now,
-                );
+            if cutoff.is_none() && activity.working {
+                activity.working = false;
+                activity.execution_started_at = None;
+                activity.execution_status = None;
             }
+            activity.update_diagnostic(
+                activity.turn_id.as_ref().and_then(|turn| retries.get(turn)),
+                now,
+            );
             chat.turn_id = activity.turn_id;
             chat.working = activity.working;
             chat.last_user_message_at = if activity.last_user_message_at > 0 {
@@ -618,7 +743,10 @@ pub fn refresh_activities(snapshot: &mut SourceSnapshot, ids: &[String]) -> Acti
             project.latest = project.latest.max(chat.last_user_message_at);
         }
     }
-    ActivityUpdate { chats: changed }
+    if let Some(summaries) = summaries {
+        snapshot.history_summaries = summaries;
+    }
+    Ok(ActivityUpdate { chats: changed })
 }
 
 fn read_thread_activity_for(
@@ -1164,6 +1292,143 @@ mod tests {
         assert!(renamed.archived && renamed.working);
         assert!(!renamed.codex_pinned);
         assert!(updated.chats.iter().any(|chat| chat.id == "t4"));
+
+        let moved = directory.path().join("archived.jsonl");
+        fs::write(&moved, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"moved-turn\",\"started_at\":10,\"completed_at\":20}}\n").unwrap();
+        connection
+            .execute(
+                "UPDATE threads SET rollout_path=?1 WHERE id='t1'",
+                [moved.to_str().unwrap()],
+            )
+            .unwrap();
+        let moved_snapshot =
+            scan_path_with_previous(&database, directory.path(), Some(&updated)).unwrap();
+        let moved_chat = moved_snapshot
+            .chats
+            .iter()
+            .find(|chat| chat.id == "t1")
+            .unwrap();
+        assert_eq!(moved_chat.turn_id.as_deref(), Some("moved-turn"));
+        assert_eq!(moved_chat.execution_status.as_deref(), Some("completed"));
+        assert!(!moved_chat.working);
+    }
+
+    #[test]
+    fn history_summary_refreshes_only_changed_status_and_retries_failed_reads() {
+        let directory = tempdir().unwrap();
+        let home = directory.path();
+        fs::write(
+            home.join(".codex-global-state.json"),
+            r#"{"local-projects":{}}"#,
+        )
+        .unwrap();
+        let database = home.join("state_5.sqlite");
+        let catalog = Connection::open(&database).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT, title TEXT, name TEXT, created_at INTEGER, updated_at INTEGER, archived INTEGER, rollout_path TEXT, source TEXT, thread_source TEXT, cwd TEXT, project_id TEXT);").unwrap();
+        for id in ["late", "idle"] {
+            let path = home.join(format!("{id}.jsonl"));
+            fs::write(&path, format!("{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"turn_id\":\"{id}-turn\",\"started_at\":10,\"completed_at\":20}}}}\n")).unwrap();
+            catalog
+                .execute(
+                    "INSERT INTO threads VALUES(?1,?1,NULL,1,2,0,?2,'vscode','user','',NULL)",
+                    rusqlite::params![id, path.to_str().unwrap()],
+                )
+                .unwrap();
+        }
+        let history = Connection::open(home.join("thread_history_1.sqlite")).unwrap();
+        history.execute_batch("CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, rollout_ordinal INTEGER, status TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER, first_user_item_id TEXT, error_json TEXT); CREATE TABLE thread_items(thread_id TEXT,turn_id TEXT,item_type TEXT,created_at_ms INTEGER); INSERT INTO thread_turns VALUES('late','late-turn',1,'inProgress',10,NULL,NULL,'u1',NULL); INSERT INTO thread_turns VALUES('idle','idle-turn',1,'completed',10,20,10000,'u2',NULL);").unwrap();
+        let mut snapshot = scan_path(&database, home).unwrap();
+        assert_eq!(
+            snapshot
+                .chats
+                .iter()
+                .find(|chat| chat.id == "late")
+                .unwrap()
+                .execution_status
+                .as_deref(),
+            Some("completed")
+        );
+        history
+            .execute_batch(
+                "INSERT INTO thread_items VALUES('late','late-turn','commandExecution',30000);",
+            )
+            .unwrap();
+        assert!(
+            refresh_activities_at(&mut snapshot, &[], &[], true, home, Some(100))
+                .unwrap()
+                .chats
+                .is_empty(),
+            "tool output does not change the status summary"
+        );
+        let previous_summaries = snapshot.history_summaries.clone();
+        history.execute_batch("UPDATE thread_turns SET status='failed',completed_at=20,duration_ms=10000,error_json='{\"message\":\"late failure\"}' WHERE thread_id='late'; ALTER TABLE thread_items RENAME TO unavailable_items;").unwrap();
+        assert!(refresh_activities_at(&mut snapshot, &[], &[], true, home, Some(100)).is_err());
+        assert_eq!(
+            snapshot.history_summaries, previous_summaries,
+            "a failed per-thread read must not consume a changed summary"
+        );
+        history
+            .execute_batch("ALTER TABLE unavailable_items RENAME TO thread_items;")
+            .unwrap();
+        let preview_catalog = scan_path_with_previous(&database, home, Some(&snapshot)).unwrap();
+        assert_eq!(
+            preview_catalog.history_summaries, previous_summaries,
+            "preview initialization must not reset the shared history baseline"
+        );
+        let preview_ids = vec!["late".to_string()];
+        let preview_update = refresh_activities_at(
+            &mut snapshot,
+            &preview_ids,
+            &preview_ids,
+            false,
+            home,
+            Some(100),
+        )
+        .unwrap();
+        assert_eq!(
+            preview_update.chats[0].execution_status.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            snapshot.history_summaries, previous_summaries,
+            "preview target queries leave the main window's pending summary change intact"
+        );
+        let update = refresh_activities_at(&mut snapshot, &[], &[], true, home, Some(100)).unwrap();
+        assert_eq!(update.chats.len(), 1);
+        assert_eq!(update.chats[0].id, "late");
+        assert_eq!(
+            update.chats[0].execution_status.as_deref(),
+            Some("failed"),
+            "late failure survives an older JSONL completion and an earlier turn start"
+        );
+        assert_eq!(
+            update.chats[0].diagnostic.as_ref().unwrap().message,
+            "late failure"
+        );
+        history
+            .execute_batch("ALTER TABLE thread_items RENAME TO unavailable_items;")
+            .unwrap();
+        let ids = vec!["late".to_string()];
+        let tick = refresh_activities_at(&mut snapshot, &ids, &[], false, home, Some(100)).unwrap();
+        assert_eq!(
+            tick.chats[0].execution_status.as_deref(),
+            Some("failed"),
+            "status ticks use cached history without querying the database"
+        );
+        let chat = snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == "late")
+            .unwrap();
+        chat.working = true;
+        chat.execution_started_at = Some(100000);
+        chat.rollout_path = home.join("missing.jsonl");
+        let stopped = refresh_activities_at(&mut snapshot, &ids, &[], false, home, None).unwrap();
+        assert!(!stopped.chats[0].working);
+        assert!(
+            stopped.chats[0].execution_started_at.is_none(),
+            "process exit invalidates cached activity even when its rollout is missing"
+        );
     }
 
     #[test]

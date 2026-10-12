@@ -1,5 +1,6 @@
 mod codex_app_mcp;
 mod diagnostics;
+mod metrics;
 mod preview;
 mod source;
 mod source_watch;
@@ -16,6 +17,14 @@ use tauri::{
 
 #[derive(Default)]
 struct SnapshotState(Mutex<Option<SourceSnapshot>>);
+
+struct RemoteDebuggingPort(u16);
+
+fn debug_browser_args(port: u16) -> Option<String> {
+    (port != 0).then(|| format!(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-address=127.0.0.1 --remote-debugging-port={port}"
+    ))
+}
 
 fn default_font_tab() -> f64 {
     15.0
@@ -83,6 +92,7 @@ struct ToolConfig {
     codex_mcp_enabled: Option<bool>,
     #[serde(default)]
     log_level: diagnostics::Level,
+    remote_debugging_port: u16,
 }
 
 fn missing_window_mode() -> String {
@@ -108,6 +118,7 @@ impl Default for ToolConfig {
             preview_enabled: false,
             codex_mcp_enabled: None,
             log_level: diagnostics::Level::default(),
+            remote_debugging_port: 0,
         }
     }
 }
@@ -243,6 +254,7 @@ async fn load_snapshot(app: tauri::AppHandle, catalog_only: bool) -> SourceSnaps
                         error: Some(error),
                         projects: Vec::new(),
                         chats: Vec::new(),
+                        history_summaries: Default::default(),
                     }
                 }
             }
@@ -256,15 +268,27 @@ async fn load_snapshot(app: tauri::AppHandle, catalog_only: bool) -> SourceSnaps
 async fn get_chat_activity(
     app: tauri::AppHandle,
     thread_ids: Vec<String>,
+    history_ids: Option<Vec<String>>,
+    history_changed: Option<bool>,
 ) -> Result<source::ActivityUpdate, String> {
-    if thread_ids.iter().any(|id| !is_thread_id(id)) {
+    let history_ids = history_ids.unwrap_or_default();
+    if thread_ids
+        .iter()
+        .chain(&history_ids)
+        .any(|id| !is_thread_id(id))
+    {
         return Err("Chat ID 格式无效".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<SnapshotState>();
         let mut guard = state.0.lock().map_err(|error| error.to_string())?;
         let snapshot = guard.as_mut().ok_or("快照尚未加载")?;
-        Ok(source::refresh_activities(snapshot, &thread_ids))
+        source::refresh_activities(
+            snapshot,
+            &thread_ids,
+            &history_ids,
+            history_changed.unwrap_or(false),
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -376,7 +400,7 @@ async fn open_conversation_preview_window(
     let url = WebviewUrl::App(
         format!("index.html?preview={}", encode_query_component(&thread_id)).into(),
     );
-    WebviewWindowBuilder::new(&app, "conversation-preview", url)
+    let mut builder = WebviewWindowBuilder::new(&app, "conversation-preview", url)
         .title("CodexChatPane")
         .inner_size(680.0, 720.0)
         .min_inner_size(320.0, 220.0)
@@ -385,9 +409,44 @@ async fn open_conversation_preview_window(
         .drag_and_drop(false)
         .center()
         .focused(true)
-        .data_directory(app_data_dir()?)
-        .build()
-        .map_err(|error| error.to_string())?;
+        .data_directory(app_data_dir()?);
+    if let Some(args) = debug_browser_args(app.state::<RemoteDebuggingPort>().0) {
+        builder = builder.additional_browser_args(&args);
+    }
+    builder.build().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_chat_metrics_window(app: tauri::AppHandle, thread_id: String) -> Result<(), String> {
+    if !is_thread_id(&thread_id) {
+        return Err("Chat ID 格式无效".into());
+    }
+    if let Some(window) = app.get_webview_window("chat-metrics") {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        app.emit_to("chat-metrics", "chat-metrics-open", thread_id)
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let url = WebviewUrl::App(
+        format!("index.html?metrics={}", encode_query_component(&thread_id)).into(),
+    );
+    let mut builder = WebviewWindowBuilder::new(&app, "chat-metrics", url)
+        .title("CodexChatPane · 对话详情")
+        .inner_size(1080.0, 800.0)
+        .min_inner_size(640.0, 400.0)
+        .resizable(true)
+        .decorations(false)
+        .drag_and_drop(false)
+        .center()
+        .focused(true)
+        .data_directory(app_data_dir()?);
+    if let Some(args) = debug_browser_args(app.state::<RemoteDebuggingPort>().0) {
+        builder = builder.additional_browser_args(&args);
+    }
+    builder.build().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -419,6 +478,16 @@ async fn get_chat_preview(
         started_at.elapsed().as_millis()
     ));
     result
+}
+
+#[tauri::command]
+async fn get_chat_metrics(thread_id: String) -> Result<metrics::ChatMetrics, String> {
+    if !is_thread_id(&thread_id) {
+        return Err("Chat ID 格式无效".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || metrics::read(&thread_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -856,28 +925,37 @@ pub fn run() {
         .manage(window_attach::TrayState::default())
         .setup(|app| {
             let data_dir = app_data_dir().map_err(std::io::Error::other)?;
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("CodexChatPane")
-                .inner_size(760.0, 900.0)
-                .min_inner_size(320.0, 240.0)
-                .resizable(true)
-                .decorations(false)
-                .drag_and_drop(false)
-                .data_directory(data_dir.clone())
-                .build()?;
             let log_path = data_dir.join("logs").join("window-attach.log");
             let logger = diagnostics::Logger::new(log_path.clone(), diagnostics::Level::default());
+            let mut debug_port = 0;
             match read_tool_config(app.handle()) {
-                Ok(Some(config)) => logger.set_level(config.log_level),
+                Ok(Some(config)) => {
+                    logger.set_level(config.log_level);
+                    debug_port = config.remote_debugging_port;
+                }
                 Ok(None) => {}
                 Err(error) => logger.warn(format!("tool config read failed error={error}")),
             }
+            app.manage(RemoteDebuggingPort(debug_port));
+            app.manage(logger.clone());
+            let mut builder =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("CodexChatPane")
+                    .inner_size(760.0, 900.0)
+                    .min_inner_size(320.0, 240.0)
+                    .resizable(true)
+                    .decorations(false)
+                    .drag_and_drop(false)
+                    .data_directory(data_dir.clone());
+            if let Some(args) = debug_browser_args(debug_port) {
+                builder = builder.additional_browser_args(&args);
+            }
+            builder.build()?;
             logger.info(format!(
-                "app startup logLevel={} logPath={}",
+                "app startup logLevel={} logPath={} remoteDebuggingPort={debug_port}",
                 logger.level().as_str(),
                 log_path.display()
             ));
-            app.manage(logger.clone());
             setup_tray(app)?;
             window_attach::start(
                 app.handle().clone(),
@@ -895,7 +973,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "conversation-preview" {
+                if matches!(window.label(), "conversation-preview" | "chat-metrics") {
                     return;
                 }
                 api.prevent_close();
@@ -913,7 +991,9 @@ pub fn run() {
             run_codex_action,
             new_chat,
             open_conversation_preview_window,
+            open_chat_metrics_window,
             get_chat_preview,
+            get_chat_metrics,
             log_preview_event,
             open_project_directory,
             set_always_on_top,
@@ -934,9 +1014,30 @@ pub fn run() {
 mod tests {
     use super::diagnostics;
     use super::{
-        encode_query_component, exported_toml, is_thread_id, new_chat_uri, normalize_tool_config,
-        parse_exported_contents, write_folder_layout, ToolConfig,
+        debug_browser_args, encode_query_component, exported_toml, is_thread_id, new_chat_uri,
+        normalize_tool_config, parse_exported_contents, write_folder_layout, ToolConfig,
     };
+
+    #[test]
+    fn remote_debugging_is_opt_in_with_a_valid_port() {
+        let legacy = toml::from_str::<ToolConfig>("").unwrap();
+        assert_eq!(legacy.remote_debugging_port, 0);
+        assert_eq!(debug_browser_args(0), None);
+        for port in [1, 9222, 65535] {
+            let config: ToolConfig =
+                toml::from_str(&format!("remoteDebuggingPort = {port}")).unwrap();
+            assert_eq!(config.remote_debugging_port, port);
+            let args = debug_browser_args(port).unwrap();
+            assert!(args.contains("--remote-debugging-address=127.0.0.1"));
+            assert!(args.contains(&format!("--remote-debugging-port={port}")));
+            assert!(args.contains("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"));
+        }
+        for value in ["-1", "65536", "1.5", "\"9222\""] {
+            assert!(
+                toml::from_str::<ToolConfig>(&format!("remoteDebuggingPort = {value}")).is_err()
+            );
+        }
+    }
 
     #[test]
     fn validates_deep_link_identifier() {

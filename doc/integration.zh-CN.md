@@ -18,8 +18,8 @@ CodexChatPane 自身的设置单独保存在该 Codex home 下的 `.codex-chat-p
 
 - `state_5.sqlite`：Thread 基础信息和 Project 关联。
 - `.codex-global-state.json`：全局 Project、Thread assignment、Pin 和未读状态。
-- `thread_history_1.sqlite`：消息时间和活动状态。
-- rollout JSONL：工作状态、执行时间、错误和预览内容。
+- `thread_history_1.sqlite`：按对话 ID 补充消息时间、缺失执行信息和失败状态；文件变化先比较最新轮次状态摘要，工具项写入不刷新全列表活动。
+- rollout JSONL：增量提供工作状态、最近用户消息与进展时间、执行时间和错误；正文只在打开预览后按页读取。
 - Codex Desktop 日志：有限的 retry 和活动诊断。
 
 额度优先通过 Codex App MCP 读取，使用已有对话作为上下文。MCP 失败时，通过 Desktop CLI 的 app-server 查询 `account/rateLimits/read`。启动、窗口恢复可见时刷新额度，可见期间每分钟刷新一次；查询失败保留上次结果。
@@ -52,7 +52,7 @@ codex://threads/new?path=<project-path>
 
 - Chat 重命名。
 - Chat Pin / Unpin。
-- Chat 归档。
+- Chat 归档或恢复。
 - Project Pin / Unpin。
 
 如果发现工具不可用、Renderer 未激活或 Codex 返回错误，界面显示失败提示，不把本地状态伪装成成功。

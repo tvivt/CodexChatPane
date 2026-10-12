@@ -6,8 +6,12 @@ const tauriConf = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json'
 const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
 assert.equal(tauriConf.app.windows.length, 0, 'Rust creates windows so they can share the CODEX_HOME data directory');
 assert.ok(rust.includes('source::codex_home()?.join(".codex-chat-pane")'), 'app data lives under CODEX_HOME/.codex-chat-pane');
-assert.equal((rust.match(/\.data_directory\(/g) || []).length, 2, 'main and preview windows share the app data directory');
+assert.equal((rust.match(/\.data_directory\(/g) || []).length, 3, 'main, preview and metrics windows share the app data directory');
 assert.match(rust, /#\[tauri::command\]\s+async fn open_conversation_preview_window\(/, 'Windows WebView creation must run in an async command to avoid deadlock');
+assert.match(rust, /#\[tauri::command\]\s+async fn open_chat_metrics_window\(/);
+assert.ok(rust.includes('format!("index.html?metrics={}"'), 'metrics uses a separate window route');
+assert.ok(rust.includes('matches!(window.label(), "conversation-preview" | "chat-metrics")'), 'closing details must not mark the main pane as user-closed');
+assert.ok(JSON.parse(readFileSync(new URL('../src-tauri/capabilities/default.json',import.meta.url),'utf8')).windows.includes('chat-metrics'));
 assert.ok(rust.includes('.drag_and_drop(false)'), 'Windows HTML5 folder drag requires native file-drop intercept off');
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8') + readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
 assert.ok(html.includes('.chat-row.drag-ready'), 'grab cursor waits for a hold');
@@ -26,6 +30,11 @@ assert.ok(html.includes('.chat-actions .chat-star-button.active::after, .chat-ac
 assert.match(html, /\.folder-row \{[^}]*color: var\(--project\)/, 'folder names use the project color token');
 assert.match(html, /body\.preview-window #chat-preview \{[^}]*top:0; right:0; width:100%; height:100%/, 'conversation preview fills its webview window');
 assert.ok(html.includes('.conversation-preview-head[data-window-drag]'), 'preview titlebar is draggable');
+assert.match(html, /body\.metrics-window \.project-chooser\.chat-metrics-dialog \{[^}]*width:100%; height:100%/, 'details fills its own window');
+assert.match(html, /\.status-sent \{ flex:0 0 auto;/, 'metrics do not shrink the left timing text');
+assert.match(html, /\.status-metrics \{[^}]*margin-left:10px;/, 'metrics follow time with a fixed gap');
+assert.match(rust, /"chat-metrics", url\)[\s\S]*?\.resizable\(true\)\s*\.decorations\(false\)/, 'details has no system titlebar');
+assert.ok(!html.includes('.status-chat { max-width:45%; }'), 'narrow pane can use the space freed by compact quotas');
 assert.match(html, /\.row-bar\.time-today,\s*\.chat-status-bar\.time-today\s*\{\s*background:var\(--danger\)/, 'today bars use the today color');
 assert.match(html, /\.row-bar\.time-old,\s*\.chat-status-bar\.time-old\s*\{\s*background:var\(--activity-old\)/, 'old bars use gray');
 assert.ok(html.includes('.chat-status-bar.manual-include { background:var(--local); }'), 'manual include uses a solid purple bar');
@@ -47,15 +56,15 @@ assert.ok(html.includes('.settings-workspace') && html.includes('id="i-settings"
 assert.ok(html.includes('.chat-type-button.is-archived'), 'archived chats use the archive icon color');
 assert.ok(html.includes('.folder-row.drop-before::before') && html.includes('.folder-row.drop-after::after'), 'folder reorder uses an edge insertion line');
 assert.match(html, /\.tree-row\.project-row, \.tree-row\.project-row\.has-check \{ grid-template-columns: 15px var\(--row-bar\)/, 'project rows use the folder chevron slot instead of 8ch');
-assert.ok(html.includes('.chat-work-cell { box-sizing:content-box; width:var(--chat-lead,var(--row-status));') && html.includes('padding:0 4px;'), 'chat indent uses a fixed lead column');
-assert.ok(html.includes('.chat-work-day { width:var(--chat-lead,var(--row-status)); overflow:hidden; text-overflow:ellipsis; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }') && html.includes('.chat-work-time { width:var(--chat-lead,var(--row-status)); text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }'), 'left time status uses soft gray-white text');
+assert.ok(html.includes('.chat-work-cell { box-sizing:content-box; width:var(--chat-lead,var(--row-status));') && html.includes('padding:0 2px; display:grid; grid-template-rows:15px 15px;'), 'chat indent uses a fixed lead column with compact padding');
+assert.ok(html.includes('.chat-work-day { width:var(--chat-lead,var(--row-status)); overflow:hidden; text-overflow:ellipsis; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }') && html.includes('.chat-work-time { width:var(--chat-lead,var(--row-status)); font:600 9px/15px "Cascadia Mono",Consolas,monospace; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }'), 'left time status retains monospace text and soft gray-white color');
 assert.match(html, /\.project-row > \.row-status, \.project-row > \.project-state-slot \{[^}]*width:15px/s, 'project indent stays 15px');
 assert.match(html, /\.project-recent-list \.global-chat-row\.without-type\s*\{[^}]*var\(--project-recent-time-width/);
 assert.ok(html.includes('.project-recent-column-resizer.time-column') && html.includes('.project-recent-column-resizer.project-column'), '3 Days columns have vertical resize handles');
 assert.ok(html.includes('.project-recent-column-resizer::before { content:""; position:absolute; inset:0 3px; background:transparent; opacity:0; }'), '3 Days column lines stay hidden until hovered');
 assert.ok(html.includes('.project-recent-panel.project-column-hidden .global-chat-row.without-type') && html.includes('.project-recent-panel.project-column-hidden .global-chat-project, .project-recent-panel.project-column-hidden .project-recent-column-resizer.project-column { display:none; }'), 'hidden project column reclaims its width and hides its resize handle');
 assert.ok(html.includes('.chat-column-resizer.time-column') && html.includes('.chat-column-resizer.project-column'), 'Chats columns have vertical resize handles');
-const script = ['dynamic.js','i18n.js','app.js'].map(file => readFileSync(new URL('../src/' + file, import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'')).join('\n');
+const script = ['dynamic.js','i18n.js','app.js'].map(file => readFileSync(new URL('../src/' + file, import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'')).join('\n').replace('const nativeInvoke =', 'let nativeInvoke =').replace('const isPreviewWindow =', 'let isPreviewWindow =').replace('const isMetricsWindow =', 'let isMetricsWindow =').replace('const isAuxiliaryWindow =', 'let isAuxiliaryWindow =');
 assert.ok(!script.includes("if (nativeInvoke) void nativeInvoke('set_window_mode',{mode:state.windowMode}).catch(() => {});"), 'startup does not race the loaded window mode');
 assert.ok(script.includes("PREVIEW_WINDOW_LABEL = 'conversation-preview'"), 'preview uses a separate webview window');
 assert.ok(script.includes("nativeInvoke('open_conversation_preview_window'"), 'native preview creation shares the CODEX_HOME webview data');
@@ -84,7 +93,6 @@ assert.ok(script.includes("nativeInvoke('log_preview_event'") && script.includes
 assert.ok(script.includes("hideConversationPreview('close-action')") && script.includes("hideConversationPreview('context-menu')"), 'preview hide sources are tagged in debug logs');
 assert.equal((script.match(/queueSourceRefresh\(\{activityTick:true\}\)/g) || []).length, 2, 'active main and preview windows refresh status once per tick');
 assert.ok(!script.includes('setInterval(() => { void loadNativeSnapshot(); }, 1000);'), 'active polling does not reload the full catalog');
-assert.ok(script.includes("action === 'archive' && !confirmed") && script.includes("runCodexChatAction(chat, action, title, true)"), 'archive actions require confirmation');
 const fixtures = readFileSync(new URL('./fixtures.js', import.meta.url), 'utf8');
 const app = { innerHTML: '' };
 const toast = { className:'', title:'', innerHTML:'', classList:{add(){},remove(){}} };
@@ -112,6 +120,7 @@ const nativeWindow = {
   startDragging: async () => windowCalls.push('startDragging'),
   isMaximized: async () => maximized,
   onResized: async () => () => {},
+  onFocusChanged: async callback => { handlers.set('native-window-focus', [callback]); return () => {}; },
   outerPosition: async () => windowPosition,
   outerSize: async () => reportedGeometry.outer || windowSize,
   innerSize: async () => windowSize,
@@ -137,14 +146,45 @@ const context = vm.createContext({
   setInterval: (callback, milliseconds) => intervals.push({ callback, milliseconds }),
   setTimeout: (callback, milliseconds) => timeouts.push({ callback, milliseconds }),
   clearTimeout: () => {},
+  clearInterval: () => {},
   requestAnimationFrame: () => {},
   reportedGeometry,
+  windowCalls,
   assert,
   handlers,
   intervals,
   timeouts,
   toast,
 });
+const metricsCommands = [], metricsEvents = new Map(), metricsWindowCalls = [];
+const standaloneDialog = {innerHTML:'',open:false,setAttribute(){},show(){this.open=true;},close(){this.open=false;},showModal(){throw new Error('details is a standalone window');}};
+const standaloneContext = vm.createContext({
+  ...context,
+  window:{location:{search:'?metrics=standalone'},__TAURI__:{
+    core:{invoke:async (command,args) => {
+      metricsCommands.push(command);
+      if (command === 'get_tool_config') return {language:'zh',theme:'dark',windowMode:'codex',codexMcpEnabled:false};
+      if (command === 'get_chat_metrics') return {threadId:args.threadId,title:args.threadId,turns:[],tools:[],subagents:[],warnings:[],summary:{},complete:true};
+      throw new Error('unexpected standalone command: '+command);
+    }},
+    window:{getCurrentWindow:() => ({onFocusChanged:async () => () => {},close:async () => metricsWindowCalls.push('close')})},
+    event:{listen:async (name,callback) => {metricsEvents.set(name,callback);return () => {};}}
+  }},
+  document:{...context.document,body:{classList:{add(){}}},getElementById:id => id === 'chat-metrics-dialog' ? standaloneDialog : {innerHTML:''},addEventListener:(name,callback) => metricsEvents.set(name,callback)},
+});
+vm.runInContext(script,standaloneContext);
+await new Promise(setImmediate);
+assert.equal(vm.runInContext('metricsView.threadId',standaloneContext),'standalone');
+assert.equal(vm.runInContext('metricsView.scope',standaloneContext),'');
+assert.ok(standaloneDialog.innerHTML.includes('data-window-drag') && standaloneDialog.innerHTML.includes('data-window-action="minimize"') && standaloneDialog.innerHTML.includes('data-window-action="toggleMaximize"'), 'details keeps draggable header and window controls');
+assert.deepEqual(metricsCommands,['get_tool_config','get_chat_metrics'],'standalone startup reads config and requested thread only');
+metricsEvents.get('visibilitychange')();
+assert.equal(metricsCommands.length,2,'details visibility does not poll catalog, quota or metrics');
+metricsEvents.get('chat-metrics-open')({payload:'another-thread'});
+await new Promise(setImmediate);
+assert.equal(vm.runInContext('metricsView.threadId',standaloneContext),'another-thread','reused window switches to the requested conversation');
+vm.runInContext('closeChatMetrics()',standaloneContext);
+assert.deepEqual(metricsWindowCalls,['close'],'closing details closes its own native window');
 vm.runInContext(script, context);
 for (const [key,value] of legacyStorage) {
   assert.ok(savedLocal.has(key.replace('codex-chat-pane.', 'CodexChatPane.')), `legacy storage key ${key} migrates before startup reads`);
@@ -179,12 +219,25 @@ vm.runInContext(`
   assert.ok(toast.className.includes('error') && toast.innerHTML.includes('data-toast-action="copy"') && toast.innerHTML.includes('data-toast-action="close"'), 'error notifications stay actionable');
   assert.equal(timeouts.length, 0, 'warning and error notifications do not auto-dismiss');
   const savedChatsForRefresh = chats;
-  chats = [chat]; pendingActivityIds.clear(); pendingFullRefresh = false; pendingCatalogRefresh = false; timeouts.length = 0;
+  chats = [chat]; pendingActivityIds.clear(); pendingHistoryIds.clear(); pendingFullRefresh = false; pendingCatalogRefresh = false; pendingHistoryRefresh = false; timeouts.length = 0;
   queueSourceRefresh({history:true});
-  assert.equal(timeouts.length, 0, 'active history writes wait for the next status tick');
+  assert.equal(timeouts.length, 1, 'history writes queue a status summary check without a full scan');
   queueSourceRefresh({activityTick:true});
-  assert.equal(timeouts.length, 1, 'the status tick coalesces active history writes into one query');
-  chats = savedChatsForRefresh; pendingActivityIds.clear(); sourceRefreshTimer = 0; timeouts.length = 0;
+  assert.equal(timeouts.length, 1, 'the status tick coalesces with the pending summary check');
+  assert.equal(pendingFullRefresh, false);
+  const previousWorkingForRefresh = chat.working;
+  chat.working = false; sourceRefreshTimer = 0; timeouts.length = 0;
+  queueSourceRefresh({history:true});
+  assert.equal(pendingFullRefresh, false, 'idle history writes never escalate to a full scan');
+  assert.equal(pendingActivityIds.size, 0, 'history writes do not query all cached chats');
+  document.hidden = true; sourceRefreshTimer = 0; timeouts.length = 0;
+  queueSourceRefresh({threads:[chat.id, 'new-thread']});
+  assert.equal(timeouts.length, 0, 'hidden windows retain dirty IDs without refreshing');
+  assert.equal(pendingCatalogRefresh, true, 'an unknown rollout discovers its catalog row');
+  assert.ok(pendingActivityIds.has(chat.id) && pendingActivityIds.has('new-thread'));
+  document.hidden = false;
+  chat.working = previousWorkingForRefresh;
+  chats = savedChatsForRefresh; pendingActivityIds.clear(); pendingHistoryIds.clear(); pendingHistoryRefresh = false; pendingCatalogRefresh = false; sourceRefreshTimer = 0; timeouts.length = 0;
   assert.ok(effectiveReasons(nativeChat({...fixture, archived:true},0,{...chat,archiveOverride:false})).includes('已归档'), 'Codex archive must override stale local restore');
   assert.ok(!effectiveReasons(nativeChat({...fixture, archived:false},0,{...chat,sourceArchived:true,reasons:['已归档']})).includes('已归档'), 'Codex unarchive returns the chat to the normal list');
   assert.ok(!/\stitle=/.test(chatRow(chat).split('>')[0]), 'row preview must survive refresh, not use a native title');
@@ -252,15 +305,17 @@ vm.runInContext(`
   assert.equal(formatExecutionSlot(152000), '2m32s');
   assert.equal(formatExecutionSlot(10920000), '3h2m');
   assert.equal(formatExecutionSlot(266400000), '3d2h');
-  const finishedTimer = {...example, working:false, executionStatus:'completed', executionMs:12000, time:'20:16'};
+  const finishedTimer = {...example, working:false, executionStatus:'completed', executionMs:12000, timelineAt:Date.UTC(2026, 9, 1, 20, 16), time:'20:16'};
   assert.ok(!chatRow(finishedTimer,true,false,true).includes('execution-bracket'));
-  for (const compact of [false]) {
+  for (const compact of [false, true]) {
     const finishedRow = chatRow(finishedTimer,true,!compact,compact);
-    assert.ok(finishedRow.includes('20:16') && finishedRow.includes('chat-work-time">12s</span>'));
-    assert.ok(chatRow(finishedTimer,true,!compact,compact,false,true).includes('chat-work-time">12s</span>'), 'older completed rows also show duration');
+    assert.ok(!finishedRow.includes('20:16') && !finishedRow.includes('timeline-row-time') && finishedRow.includes('chat-work-time">12s</span>'), 'timeline rows omit clock time and keep duration');
+    const olderRow = chatRow(finishedTimer,true,!compact,compact,false,true);
+    assert.ok(olderRow.includes('chat-work-time">12s</span>'), 'older completed rows also show duration');
+    assert.equal(olderRow.includes('timeline-row-date">261001</span>'), !compact, 'older full timeline rows retain their date');
     const unknownDuration = chatRow({...finishedTimer,executionMs:null},true,!compact,compact);
     assert.ok(!unknownDuration.includes('execution-bracket'));
-    assert.ok(unknownDuration.includes('class="timeline-row-time"'), 'missing duration keeps the same fixed time column');
+    assert.ok(!unknownDuration.includes('timeline-row-time') && !unknownDuration.includes('with-date'), 'recent rows do not reserve a clock-time column');
   }
   const unreadDone = {...example, working:false, executionStatus:'completed', executionMs:5000, codexUnread:true, attentionAt:Date.now(), lastUserMessageAt:Date.now()};
   assert.ok(chatRow(unreadDone).includes('chat-work-time">5s</span>'), 'unclicked completed chats keep execution time in the lead');
@@ -269,6 +324,7 @@ vm.runInContext(`
   const dated = (at) => ({...readNow, lastUserMessageAt:at, completedAt:at, activityAt:at, timelineAt:at});
   assert.ok(chatRow(readNow).includes('chat-work-day">今天</span>'), 'clicked chats show 今天 in Chinese');
   assert.ok(chatRow(readNow).includes('chat-work-cell date-cell'));
+  assert.ok(!chatWorkCell(readNow,true).includes('chat-work-time'), 'shared date leads omit clock time in all lists');
   assert.ok(!chatRow(readNow).includes('chat-work-time">5s</span>'), 'clicked chats do not keep execution time in the lead');
   assert.ok(chatRow(dated(daysAgoAt(1))).includes('chat-work-day">昨天</span>'), 'clicked chats from yesterday show 昨天');
   assert.ok(chatRow(dated(daysAgoAt(2))).includes('chat-work-day">前天</span>'), 'clicked chats from two days ago show 前天');
@@ -311,15 +367,17 @@ vm.runInContext(`
   assert.ok(recentRulesDialogMarkup().includes('role="tablist"') && recentRulesDialogMarkup().includes('data-rule-tab="include"') && recentRulesDialogMarkup().includes('data-rule-tab="exclude"'), 'activity rules dialog has include and exclude tabs');
   assert.ok(!chatMenu.includes('在 Codex 打开') && !chatMenu.includes('data-menu-action="toggle-chat-star"') && !chatMenu.includes('data-codexaction="pin"') && !chatMenu.includes('复制 ID'), 'conversation menus only keep shared actions');
   const projectMenu = itemMenu(null, project, '');
-  assert.ok(projectMenu.includes('data-menu-action="new"') && projectMenu.includes('移动到项目文件夹') && projectMenu.includes('打开项目文件夹') && projectMenu.includes('data-menu-action="directory"'), 'project menu keeps folder actions separate');
+  assert.ok(projectMenu.includes('data-menu-action="new"') && projectMenu.includes('移动到项目文件夹') && projectMenu.includes('打开文件夹') && projectMenu.includes('data-menu-action="directory"'), 'project menu keeps folder actions separate');
   assert.ok(!projectMenu.includes('data-menu-action="toggle-project-star"') && !projectMenu.includes('data-menu-action="codex-project-pin"'), 'project menu has no Star or Pin actions');
-  assert.ok(chatMenu.includes('打开项目文件夹') && chatMenu.includes('data-menu-action="directory"') && !chatMenu.includes('data-menu-action="new"'), 'chat context menu can open the project folder');
-  assert.ok(!itemMenu(null, {...project,synthetic:true,pathValid:false}, '').includes('打开项目文件夹'));
+  assert.ok(chatMenu.includes('打开文件夹') && chatMenu.includes('data-menu-action="directory"') && !chatMenu.includes('data-menu-action="new"'), 'chat context menu can open the project folder');
+  assert.ok(chatMenu.includes('所属项目') && !chatMenu.includes('定位所属项目'), 'project locator uses the shorter label');
+  assert.ok(!itemMenu(null, {...project,synthetic:true,pathValid:false}, '').includes('打开文件夹'));
   codexMcpEnabled = true;
   const archivedMenu = itemMenu({...example,sourceArchived:true}, project, '');
+  assert.equal((archivedMenu.match(/data-menu-action=/g) || []).length, 1, 'archived chat menu contains only restore');
   assert.ok(!archivedMenu.includes('在 Codex 打开'));
-  assert.ok(!archivedMenu.includes('data-codexaction="archive"'), 'the tool does not restore archived chats');
-  assert.ok(archivedMenu.includes('请先恢复对话后再重命名'));
+  assert.ok(archivedMenu.includes('data-codexaction="archive"') && archivedMenu.includes('恢复对话'), 'archived chats offer restore through the archive MCP action');
+  assert.ok(!archivedMenu.includes('data-codexaction="rename"'), 'restore replaces the unavailable rename action');
   assert.ok(!archivedMenu.includes('data-codexaction="pin"'));
   const projectMarkup = projectRow(project, 0);
   assert.ok(projectMarkup.indexOf('row-status') < projectMarkup.indexOf('chat-status-bar'), 'folder-aligned lead comes before the color bar');
@@ -387,7 +445,8 @@ vm.runInContext(`
   assert.ok(!renderTitlebar().includes('theme-control'));
   assert.ok(!renderTitlebar().includes('toggle-codex-mcp') && !renderTitlebar().includes('toggle-language'));
   const settings = renderSettingsPane();
-  assert.ok(settings.includes('data-action="set-language"') && settings.includes('data-action="set-theme"') && settings.includes('data-action="set-theme-family"'));
+  assert.ok(settings.includes('data-action="set-language"') && settings.includes('data-action="set-theme"') && settings.includes('data-input="theme-family"'));
+  assert.ok(settings.includes('<option value="tokyo" selected>Tokyo Night</option>'));
   assert.ok(settings.includes('data-action="nudge-font"') && settings.includes('data-action="toggle-codex-mcp"'));
   assert.ok(!renderTitlebar().includes('data-window-action="minimize"'), 'titlebar hides minimize control');
   assert.ok(settings.includes('data-action="set-date-bars"') && settings.includes('data-date-bars="on"') && settings.includes('data-date-bars="off"'));
@@ -424,6 +483,11 @@ vm.runInContext(`
   document.getElementById('context-menu').hidden = false;
   dispatch('click',{target:{closest(){return null;}}});
   assert.equal(document.getElementById('context-menu').hidden,true,'clicking outside hides the context menu');
+  for (const focused of [true, false]) {
+    document.getElementById('context-menu').hidden = false;
+    dispatch('native-window-focus', {payload:focused});
+    assert.equal(document.getElementById('context-menu').hidden, !focused, 'all context menus close when the native window loses focus');
+  }
   for (const type of ['project-structure', 'chats-lower']) {
     const handle = { dataset: {resize: type}, classList: {add() {}, remove() {}}, closest(selector) { return selector === '[data-resize]' ? this : null; } };
     const event = { target:handle, clientX: 0, clientY: 100, preventDefault() {} };
@@ -445,6 +509,36 @@ vm.runInContext(`
   assert.equal(state.projectRecentHeight + state.projectStructureHeight,sectionTotal,'middle header keeps the lower pane fixed');
   assert.equal(state.projectStructureHeight,240);
 `, context);
+{
+  const calls = [], confirmations = [], errors = [];
+  let reloads = 0;
+  const actionContext = vm.createContext({
+    codexActionInFlight:false, codexActionChatId:'', nativeSourceSignature:'previous',
+    codexActionUnavailable:() => '', t:text => text, render() {},
+    showToast:(...args) => errors.push(args), showAppConfirm:options => confirmations.push(options),
+    nativeInvoke:async (command, args) => calls.push({command, args}),
+    loadNativeSnapshot:async () => { reloads++; },
+  });
+  vm.runInContext(vm.runInContext('runCodexChatAction.toString()', context), actionContext);
+  await vm.runInContext("runCodexChatAction({id:'archived',sourceArchived:true}, 'archive')", actionContext);
+  assert.equal(calls.length, 1, 'restore dispatches a native MCP action');
+  assert.equal(calls[0].command, 'run_codex_action');
+  assert.equal(calls[0].args.threadId, 'archived');
+  assert.equal(calls[0].args.action, 'archive');
+  assert.equal(calls[0].args.enabled, false, 'restore requests archived=false');
+  assert.equal(confirmations.length, 0, 'restore does not ask to archive');
+  assert.equal(reloads, 1, 'successful restore reloads the Codex source state');
+  await vm.runInContext("runCodexChatAction({id:'active',sourceArchived:false,title:'Active'}, 'archive')", actionContext);
+  assert.equal(calls.length, 1, 'archive waits for confirmation');
+  assert.equal(confirmations.length, 1);
+  confirmations[0].onConfirm();
+  await new Promise(setImmediate);
+  assert.equal(calls[1].args.threadId, 'active');
+  assert.equal(calls[1].args.enabled, true, 'confirmed archive requests archived=true');
+  assert.equal(reloads, 2);
+  assert.equal(actionContext.codexActionInFlight, false);
+  assert.deepEqual(errors, []);
+}
 await vm.runInContext(`(async () => { await windowAction('minimize'); await windowAction('toggleMaximize'); assert.equal(state.windowMaximized,true); assert.ok(renderTitlebar().includes('#i-window-restore')); assert.ok(renderTitlebar().includes('class="window-titlebar" data-window-drag')); await windowAction('startDragging'); await windowAction('close'); await windowAction('invalid'); })()`, context);
 await vm.runInContext(`(async () => {
   const first = projects[0], second = projects[1];
@@ -480,6 +574,8 @@ await vm.runInContext(`(async () => {
   assert.equal(toolConfig().fontRow, 11.5);
   assert.equal(toolConfig().windowWidth, state.singlePaneWidth);
   assert.equal(toolConfig().logLevel, 'info');
+  assert.equal(toolConfig().remoteDebuggingPort, 0, 'remote debugging is disabled by default');
+  assert.ok(renderSettingsPane().includes('data-input="remote-debugging-port"'));
   state.singlePaneWidth = 252;
   assert.equal(toolConfig().windowWidth, 320, 'narrow window width is clamped before save');
   state.singlePaneWidth = 5120;
@@ -514,7 +610,10 @@ assert.ok(!html.includes('@keyframes working-frame'));
 assert.ok(!html.includes('.working-frame:last-child'));
 assert.match(html, /\.timeless-row\s*\{ grid-template-columns: 3px 48px minmax\(0, 1fr\) auto/);
 assert.match(html, /\.compact-timeline-row\s*\{ grid-template-columns: 3px 48px minmax\(0, 1fr\) auto/);
-assert.match(html, /\.timeline-row-time\s*\{ width: 90px;[^}]*text-align: left/);
+assert.match(html, /\.timeline-row\s*\{[^}]*grid-template-columns: 3px 48px minmax\(0, 1fr\) auto/, 'recent timeline rows reclaim the clock-time column');
+assert.match(html, /\.timeline-row\.with-date\s*\{ grid-template-columns: 3px 48px 48px minmax\(0, 1fr\) auto/, 'older timeline rows keep a compact date column');
+assert.match(html, /\.timeline-row-date\s*\{ width: 48px;[^}]*text-align: left/);
+assert.match(html, /\.chat-work-cell\.time-only, \.chat-work-cell\.date-cell\s*\{ grid-template-rows:30px;/, 'single date labels have no empty second row');
 assert.ok(!/\.execution-time\s*\{[^}]*width:/.test(html));
 assert.match(html,/\.context-menu\s*\{[^}]*overflow:\s*visible/);
 assert.ok(!/\.context-menu\s*\{[^}]*overflow:\s*auto/.test(html));
@@ -549,13 +648,24 @@ vm.runInContext(`
   const quotaWeek = {used_percent:17, window_minutes:10080, resets_at:quotaReset / 1000};
   state.rateLimits = {primary:{used_percent:9,window_minutes:300,resets_at:quotaReset / 1000},secondary:quotaWeek,observed_at:quotaNow};
   assert.ok(quotaMarkup(quotaNow).includes('>5h<'));
-  assert.ok(quotaMarkup(quotaNow).includes('91% 13:23'));
-  assert.ok(quotaMarkup(quotaNow).includes('>Week<'));
-  assert.ok(quotaMarkup(quotaNow).includes('83% 1d2h'));
+  assert.ok(quotaMarkup(quotaNow).includes('>91%<'));
+  assert.ok(quotaMarkup(quotaNow).includes('>W<'));
+  assert.ok(quotaMarkup(quotaNow).includes('>83%<'));
+  assert.ok(quotaMarkup(quotaNow).includes('title="2026-09-01 13:23 (-1d1h)"'), 'exact reset and day/hour countdown are both in tips');
+  assert.equal((quotaMarkup(quotaNow).match(/class="quota-reset-time"/g) || []).length,1, 'only the 5h window shows a reset time');
+  assert.ok(quotaMarkup(quotaNow).includes('class="quota-reset-time">13:23<'));
+  assert.equal(quotaCountdown(quotaNow+342*60000,quotaNow),'5h42m');
+  assert.equal(quotaCountdown(quotaNow+24*3600000,quotaNow),'24h0m');
+  assert.equal(quotaCountdown(quotaNow+24*3600000+1,quotaNow),'1d0h');
+  assert.equal(quotaCountdown(quotaNow+26*3600000,quotaNow),'1d2h');
+  assert.equal(quotaCountdown(quotaNow+48*3600000-1,quotaNow),'1d23h','day/hour display does not round up to the next day');
+  assert.equal(quotaCountdown(quotaNow+48*3600000,quotaNow),'2d0h');
+  assert.equal(quotaCountdown(quotaNow-60000,quotaNow),'0h0m');
   assert.ok(quotaMarkup(quotaReset).includes('--%'), 'expired snapshots must not invent a reset');
   state.rateLimits = {primary:quotaWeek, secondary:null, observed_at:quotaNow, plan_type:'pro'};
   assert.ok(!quotaMarkup(quotaNow).includes('>5h<'));
-  assert.ok(quotaMarkup(quotaNow).includes('>Week<'));
+  assert.ok(quotaMarkup(quotaNow).includes('>W<'));
+  assert.ok(!quotaMarkup(quotaNow).includes('quota-reset-time'), 'weekly reset remains in tips only');
   state.rateLimits = null;
   assert.equal(quotaMarkup(quotaNow), '');
   let issueChat = nativeChat({...fixture,working:false,executionStatus:'failed',codexUnread:true,diagnostic:{kind:'quota',severity:'error',message:'limit <b> & "reason"',at:600,source:'rollout',resetsAt:quotaReset / 1000}},0,null);
@@ -903,7 +1013,7 @@ vm.runInContext(`
   assert.ok(!statusChatMarkup().includes('工作中 &lt;对话&gt;'));
   chats.push({...dynamicChat,id:'hovered',title:'另一个',executionMs:5000});
   hoveredChatId = 'hovered';
-  assert.ok(statusChatMarkup().includes('[<span class="status-duration">5s</span>]'));
+  assert.ok(statusChatMarkup().includes('[<span class="status-duration">12s</span>]'), 'hover keeps the selected conversation metrics and timing scope');
   hoveredChatId = '';
   assert.ok(statusChatMarkup().includes('[<span class="status-duration">12s</span>]'));
   setLanguage('en');
@@ -1317,5 +1427,254 @@ vm.runInContext(`
   render();
   assert.equal(filter.menu.hidden,true,'explicitly closed filter stays closed after rerender');
 `,context);
-console.log('Frontend checks passed: archive source truth, previews, folders, project sort, config validation, locale, clocks and resizing.');
+await vm.runInContext(`(async () => {
+  const calls = [];
+  const savedChats = chats;
+  const savedTimers = syncLiveTimers;
+  const savedLoad = loadNativeSnapshot;
+  const savedQuota = refreshLiveRateLimits;
+  const savedNativeLoaded = nativeLoaded;
+  const savedPreviewChatId = previewChatId;
+  const savedSignature = nativeSourceSignature;
+  const reset = () => {
+    pendingActivityIds.clear(); pendingHistoryIds.clear(); pendingHistoryRefresh = false;
+    pendingFullRefresh = false; pendingCatalogRefresh = false; sourceRefreshTimer = 0;
+    calls.length = 0; timeouts.length = 0;
+  };
+  try {
+    nativeLoaded = true;
+    chats = [{id:'active-1',working:true},{id:'active-2',working:true},{id:'idle',working:false}];
+    syncLiveTimers = () => {};
+    loadNativeSnapshot = async catalogOnly => calls.push({command:catalogOnly ? 'get_catalog_snapshot' : 'get_snapshot'});
+    refreshLiveRateLimits = async () => calls.push({command:'quota'});
+    nativeInvoke = async (command,args) => { calls.push({command,args}); return {chats:[]}; };
+    reset();
+    queueSourceRefresh({threads:['active-1','active-2']});
+    await flushSourceRefresh();
+    assert.equal(calls.length,1);
+    assert.deepEqual(calls[0].args.threadIds.sort(),['active-1','active-2']);
+    assert.deepEqual(calls[0].args.historyIds.sort(),['active-1','active-2']);
+    reset();
+    chats.forEach(chat => chat.working = false);
+    queueSourceRefresh({history:true});
+    await flushSourceRefresh();
+    assert.equal(calls[0].command,'get_chat_activity');
+    assert.equal(calls[0].args.historyChanged,true);
+    assert.equal(calls[0].args.threadIds.length,0,'idle history changes only compare status summaries');
+    reset();
+    pendingActivityIds.add('active-1'); pendingActivityIds.add('active-2');
+    queueSourceRefresh({activityTick:true});
+    await flushSourceRefresh();
+    assert.equal(calls[0].args.historyIds.length,0,'timer ticks never request history SQL');
+    assert.equal(calls[0].args.historyChanged,false);
+    reset();
+    queueSourceRefresh({catalog:true,threads:['new-thread']});
+    await flushSourceRefresh();
+    assert.equal(calls[0].command,'get_catalog_snapshot');
+    assert.ok(pendingActivityIds.has('new-thread') && pendingHistoryIds.has('new-thread'),'catalog replay preserves both sets');
+    await flushSourceRefresh();
+    assert.deepEqual(calls[1].args.threadIds,['new-thread']);
+    assert.deepEqual(calls[1].args.historyIds,['new-thread']);
+    reset();
+    nativeInvoke = async () => { throw new Error('temporary history lock'); };
+    queueSourceRefresh({threads:['idle'],history:true});
+    await flushSourceRefresh();
+    assert.ok(pendingActivityIds.has('idle') && pendingHistoryIds.has('idle') && pendingHistoryRefresh);
+    assert.equal(pendingFullRefresh,false);
+    assert.ok(timeouts.some(timer => timer.callback === flushSourceRefresh && timer.milliseconds === 1500),'failed terminal reads get a delayed local retry');
+    nativeInvoke = async (command,args) => { calls.push({command,args}); return {chats:[]}; };
+    await flushSourceRefresh();
+    assert.equal(calls[0].args.historyChanged,true);
+    reset();
+    document.hidden = true;
+    queueSourceRefresh({threads:['idle'],history:true});
+    await flushSourceRefresh();
+    assert.equal(calls.length,0);
+    assert.equal(timeouts.length,0,'hidden windows do not schedule retries');
+    document.hidden = false;
+    for (const callback of handlers.get('visibilitychange') || []) callback();
+    assert.equal(pendingFullRefresh,false,'visibility resume does not rescan execution history');
+    assert.ok(pendingActivityIds.has('idle') && pendingHistoryRefresh);
+    assert.equal(calls[0].command,'quota','quota refresh stays independent on resume');
+    await flushSourceRefresh();
+    assert.equal(calls[1].command,'get_chat_activity');
+    reset();
+    isPreviewWindow = true;
+    previewChatId = 'idle';
+    queueSourceRefresh({history:true,threads:['active-1']});
+    await flushSourceRefresh();
+    assert.deepEqual(calls[0].args.threadIds,['idle'],'preview history supplements only its target chat');
+    assert.deepEqual(calls[0].args.historyIds,['idle']);
+    assert.equal(calls[0].args.historyChanged,false,'preview does not consume the shared history baseline');
+    reset();
+    queueSourceRefresh({full:true});
+    assert.equal(pendingFullRefresh,false,'preview recovery never resets the shared history baseline');
+    assert.ok(pendingCatalogRefresh && pendingActivityIds.has('idle'));
+    nativeLoaded = false;
+    await flushSourceRefresh();
+    assert.equal(calls[0].command,'get_catalog_snapshot','preview events during initialization preserve the shared history baseline');
+    reset();
+    nativeLoaded = false;
+    const initialPreviewSnapshot = {state:'Ready',error:null,projects:[],chats:[]};
+    nativeSourceSignature = JSON.stringify(initialPreviewSnapshot);
+    nativeInvoke = async command => { calls.push({command}); return initialPreviewSnapshot; };
+    await savedLoad();
+    assert.equal(calls[0].command,'get_catalog_snapshot','preview initialization reuses the backend catalog/cache');
+  } finally {
+    chats = savedChats; syncLiveTimers = savedTimers; loadNativeSnapshot = savedLoad;
+    refreshLiveRateLimits = savedQuota; nativeLoaded = savedNativeLoaded; nativeInvoke = undefined;
+    isPreviewWindow = false; previewChatId = savedPreviewChatId; nativeSourceSignature = savedSignature;
+    document.hidden = false; reset();
+  }
+})()`,context);
+await vm.runInContext(`(async () => {
+  const savedRender = render, savedPort = state.remoteDebuggingPort, savedTheme = state.themeFamily;
+  const calls = [];
+  const change = handlers.get('change').at(-1);
+  const target = value => ({id:'',dataset:{input:'remote-debugging-port'},value});
+  try {
+    render = () => {};
+    nativeInvoke = async (command,args) => calls.push({command,args});
+    await change({target:target('9222')});
+    assert.equal(state.remoteDebuggingPort,9222);
+    assert.equal(calls[0].command,'save_tool_config');
+    assert.equal(calls[0].args.config.remoteDebuggingPort,9222);
+    assert.equal(configurationDocument().appearance.remoteDebuggingPort,9222);
+    for (const value of ['', '-1', '65536', '1.5']) await change({target:target(value)});
+    assert.equal(calls.length,1,'invalid ports never reach the backend');
+    assert.equal(state.remoteDebuggingPort,9222);
+    await assert.rejects(applyImportedAppearance({appearance:{remoteDebuggingPort:65536}}));
+    nativeInvoke = async () => { throw new Error('settings write failed'); };
+    await change({target:target('9333')});
+    assert.equal(state.remoteDebuggingPort,9222,'failed saves retain the last saved port');
+    nativeInvoke = async () => {};
+    await change({target:target('0')});
+    assert.equal(state.remoteDebuggingPort,0);
+    calls.length = 0;
+    nativeInvoke = async (command,args) => calls.push({command,args});
+    await change({target:{id:'',dataset:{input:'theme-family'},value:'ayu'}});
+    assert.equal(state.themeFamily,'ayu');
+    assert.equal(calls[0].args.config.themeFamily,'ayu');
+    nativeInvoke = async () => { throw new Error('settings write failed'); };
+    await change({target:{id:'',dataset:{input:'theme-family'},value:'tokyo'}});
+    assert.equal(state.themeFamily,'ayu','failed theme saves restore the selected theme');
+  } finally { render = savedRender; state.remoteDebuggingPort = savedPort; state.themeFamily = savedTheme; nativeInvoke = undefined; }
+})()`,context);
+vm.runInContext(`
+  const savedQuery = document.querySelector;
+  const panel = {clientWidth:504,style:{setProperty(name,value){this[name]=value;}}};
+  const savedWidths = Object.fromEntries(Object.values(PANEL_WIDTH_KEYS).map(key=>[key,state[key]]));
+  try {
+    document.querySelector = () => panel;
+    for (const key of Object.values(PANEL_WIDTH_KEYS)) state[key] = 100;
+    for (const [type,config] of Object.entries(PANEL_WIDTH_CONFIG)) {
+      resizeColumn(type,32);
+      assert.equal(state[config.key],32,'each column can shrink below the old minimum');
+      resizeColumn(type,-1);
+      assert.equal(state[config.key],24,'each column retains a small usable minimum');
+      assert.equal(panel.style[config.variable],'24px');
+    }
+    assert.ok(renderProjectPane().includes('data-resize="project-chat-time"'),'project Chats renders the column handle');
+    const handle = {dataset:{resize:'project-chat-time'},classList:{add(){},remove(){}},closest(selector){return selector === '[data-resize]' ? this : panel;}};
+    const target = {closest(selector){return selector === '[data-resize]' ? handle : null;}};
+    handlers.get('pointerdown').at(-1)({target,clientX:100,clientY:0,preventDefault(){}});
+    handlers.get('pointermove').at(-1)({clientX:116,clientY:0});
+    handlers.get('pointerup').at(-1)({});
+    assert.equal(state.projectChatTimeWidth,40,'project Chats uses the existing drag handler');
+    handlers.get('keydown').at(-1)({target:handle,key:'ArrowLeft',preventDefault(){}});
+    assert.equal(state.projectChatTimeWidth,24,'project Chats supports keyboard resizing');
+    assert.equal(JSON.parse(localStorage.getItem(PREFERENCES_KEY)).projectChatTimeWidth,24,'project Chats width is persisted');
+    assert.ok(validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({projectChatTimeWidth:0})}}),'auto column width remains importable');
+  } finally { document.querySelector = savedQuery; Object.assign(state,savedWidths); }
+`,context);
+await vm.runInContext(`(async () => {
+  const savedChats = chats, savedSelected = state.selectedChatId, savedHover = hoveredChatId;
+  const savedGet = document.getElementById, savedInvoke = nativeInvoke, savedMetricsWindow = isMetricsWindow, savedAuxiliaryWindow = isAuxiliaryWindow;
+  const dialog = {innerHTML:'',open:false,setAttribute(){},show(){this.open=true;},showModal(){throw new Error('native details must not use a modal');},close(){this.open=false;}};
+  const summary = {ttftMs:1800,tokenSpeed:61.6,cacheHitRate:0.934,coverage:0.862,validRequestCount:61,requestCount:82,inputTokens:1000,cachedInputTokens:934,outputTokens:100,reasoningOutputTokens:20,generationMs:1600,durationMs:8000,toolWaitMs:4000,turnCount:1,completedTurnCount:1};
+  const fixture = id => ({threadId:id,title:'<script>unsafe</script>',cwd:'C:/<project>',model:'model',complete:true,warnings:[],latestTurnId:'latest',summary:{...summary,outputTokens:999,tokenSpeed:10},turns:[{turnId:'latest',startedAt:1700000000000,status:'completed',metrics:{...summary},requests:[{responseId:'<request>',included:false,excludedReason:'缺少输出起点',outputTokens:3}],activities:[{type:'tool',label:'<tool>',detail:'<img src=x onerror=alert(1)>',at:1700000000000}]}],tools:[],subagents:[{threadId:'child',name:'<child>',summary:null,status:'completed'}]});
+  try {
+    setLanguage('zh');
+    assert.equal(metricsCompact(summary),'1.8s·62t/s·93%');
+    assert.equal(metricsCompact(null),'—·—·—');
+    assert.equal(metricsCompact({ttftMs:0,tokenSpeed:0,cacheHitRate:0}),'0.0s·0t/s·0%','zero is present; null is missing');
+    assert.equal(metricsCompact({ttftMs:NaN,tokenSpeed:Infinity,cacheHitRate:null}),'—·—·—');
+    const data = fixture('first');
+    assert.equal(metricsScope(data).outputTokens,100,'default scope is latest completed turn');
+    assert.equal(metricsScope(data,'all').outputTokens,999,'conversation total remains available explicitly');
+    assert.equal(metricsScope({...data,latestTurnId:'missing'}),null,'no completed turn must not fall back to totals');
+    assert.equal(metricsScope(undefined),null);
+    assert.equal(metricsScope(data,'latest').outputTokens,100,'individual turn remains available');
+    const html = chatMetricsMarkup(data);
+    assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;') && chatMetricsMarkup(data,'latest').includes('&lt;img src=x onerror=alert(1)&gt;'),'log content is escaped');
+    assert.ok(html.includes('工具统计（全会话）') && html.includes('子智能体（各自全会话）'),'tools and subagents declare their own scope');
+    assert.ok(chatMetricsMarkup(data,'latest').includes('缺少输出起点') && html.includes('data-metrics-action="agent"'));
+    assert.ok(metricsTooltip(summary,data).includes('61/82') && metricsTooltip(summary,data).includes('86.2%'));
+    setLanguage('en');
+    assert.ok(chatMetricsMarkup(data).includes('Conversation details'));
+    assert.ok(chatMetricsMarkup(data,'latest').includes('Missing output start'));
+    setLanguage('zh');
+    const pending = new Map(), calls = [];
+    nativeInvoke = (command,args) => { calls.push({command,args}); return new Promise(resolve => pending.set(args.threadId,resolve)); };
+    chats = [{id:'first',executionMs:1000},{id:'second',executionMs:2000}];
+    state.selectedChatId = 'first';
+    const first = loadSelectedChatMetrics('first');
+    state.selectedChatId = 'second';
+    const second = loadSelectedChatMetrics('second');
+    pending.get('second')(fixture('second')); await second;
+    pending.get('first')(fixture('first')); await first;
+    assert.ok(chatMetrics.has('second') && !chatMetrics.has('first'),'late result cannot replace or cache old selection');
+    hoveredChatId = 'first';
+    assert.ok(statusChatMarkup().includes('data-id="second"'),'hover does not change the selected metrics scope');
+    assert.ok(statusChatMarkup().includes('1.8s·62t/s·93%'),'statusbar uses latest completed turn rather than totals');
+    assert.ok(statusChatMarkup().includes('最近完成轮') && !statusChatMarkup().includes('首 token 均值'));
+    await handlers.get('pointerover')[0]({target:{closest:() => ({dataset:{chat:'first'}})}});
+    assert.equal(calls.length,2,'hover does not fetch metrics');
+    const refreshed = loadSelectedChatMetrics('second');
+    assert.equal(calls.length,3,'selecting again refreshes instead of keeping stale cached data');
+    pending.get('second')(fixture('second')); await refreshed;
+    document.getElementById = id => id === 'chat-metrics-dialog' ? dialog : savedGet(id);
+    const openedWindows = [];
+    nativeInvoke = async (command,args) => { openedWindows.push({command,args}); };
+    await openChatMetrics('first');
+    assert.deepEqual(openedWindows,[{command:'open_chat_metrics_window',args:{threadId:'first'}}], 'pane opens native window without reading another modal');
+    assert.equal(metricsView,null);
+    isMetricsWindow = true; isAuxiliaryWindow = true;
+    const controlsBefore = windowCalls.length;
+    await windowAction('minimize');
+    await windowAction('toggleMaximize');
+    assert.equal(windowCalls.slice(controlsBefore).join(','),'minimize,toggleMaximize','details controls act on their window without tray operations');
+    nativeInvoke = async (command,args) => fixture(args.threadId);
+    await openChatMetrics('first');
+    metricsView.scope = 'all';
+    await openChatMetrics('child',true);
+    assert.equal(metricsView.threadId,'child');
+    assert.equal(metricsView.scope,'','child also defaults to latest completed turn');
+    assert.equal(metricsView.parents[0].threadId,'first');
+    backChatMetrics();
+    assert.equal(metricsView.threadId,'first');
+    assert.equal(metricsView.scope,'all','back restores explicit parent total scope');
+    assert.equal(metricsScope(metricsView.data,metricsView.scope).outputTokens,999);
+    for (let index=0;index<30;index++) rememberChatMetrics(fixture('cached-' + index));
+    assert.equal(chatMetrics.size,24,'retained metric bodies are bounded like preview pages');
+    assert.ok(chatMetrics.has('second'),'cache eviction retains the selected conversation status');
+    assert.ok(!chatMetrics.has('cached-0') && chatMetrics.has('cached-29'),'oldest unselected data is evicted');
+    assert.equal(metricsView.data.threadId,'first','open details retain their data independently of the cache');
+    assert.ok(chatMetricsMarkup(data).includes(' · 已完成</option>'),'scope choices use localized statuses');
+    nativeInvoke = (command,args) => new Promise(resolve => pending.set(args.threadId,resolve));
+    const afterClose = openChatMetrics('late'); closeChatMetrics();
+    pending.get('late')(fixture('late')); await afterClose;
+    assert.equal(metricsView,null,'close invalidates pending detail navigation');
+    assert.equal(dialog.open,false);
+    assert.ok(!itemMenu({...savedChats[0],sourceArchived:true},{id:'project'},'global').includes('chat-metrics'),'archived menu remains restore-only');
+    assert.equal(itemMenu({...savedChats[0],sourceArchived:false},{id:'project'},'global').match(/data-menu-action="[^"]+"/g).at(-1), 'data-menu-action="chat-metrics"', 'details is the last ordinary chat menu action');
+    assert.ok(!JSON.stringify(configurationDocument()).includes('chatMetrics'),'metrics are not persisted in configuration');
+  } finally {
+    chats = savedChats; state.selectedChatId = savedSelected; hoveredChatId = savedHover;
+    nativeInvoke = savedInvoke; document.getElementById = savedGet;
+    isMetricsWindow = savedMetricsWindow; isAuxiliaryWindow = savedAuxiliaryWindow;
+    chatMetrics.clear(); metricsPending.clear(); metricsView = null; setLanguage('zh');
+  }
+})()`,context);
+console.log('Frontend checks passed: source refresh, previews, folders, config, metrics windows, quota tips, scope, async selection, subagent navigation, locale and resizing.');
 process.exit(0);

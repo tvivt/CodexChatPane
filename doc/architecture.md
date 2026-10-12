@@ -30,7 +30,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 - `src-tauri/src/source/rollout.rs`: incrementally parses rollout activity and execution time.
 - `src-tauri/src/source/rate_limits.rs`: reads live usage limits through App MCP with a CLI app-server fallback and bounded process cleanup.
 - `src-tauri/src/source/diagnostics.rs`: reads a limited set of desktop diagnostic logs and classifies errors.
-- `src-tauri/src/source_watch.rs`: watches Codex data files for catalog and history changes.
+- `src-tauri/src/source_watch.rs`: watches the Codex home root without recursion and only watches `sessions` / `archived_sessions` recursively.
 - `src-tauri/src/preview.rs`: reads conversation previews in pages with page and cache size limits.
 - `src-tauri/src/codex_app_mcp.rs`: discovers, calls, and verifies Codex Desktop's internal App MCP.
 - `src-tauri/src/window_attach.rs`: detects the foreground Windows window and coordinates pane visibility.
@@ -49,8 +49,9 @@ CODEX_HOME/.codex-chat-pane + localStorage
 2. The frontend loads local settings and compatible `localStorage` state.
 3. Rust scans Codex state, global state, and activity sources.
 4. The frontend merges snapshots by stable ID and restores local folder and group relationships.
-5. File changes trigger catalog refreshes; active chats receive a status query once per second. An open preview reads content separately.
-   Usage limits refresh separately once per minute while the window is visible.
+5. Catalog changes update list metadata and reuse activity caches; rollout changes update only the affected chat IDs. History changes compare a cached latest-turn status summary and supplement only changed IDs, including late failure details. Tool output and projection changes do not reload all rollouts.
+   Active chats receive an incremental rollout / diagnostic check once per second without querying history; elapsed clocks use cached start times. An open preview reads its own content separately in pages and stops refreshing when hidden or closed.
+   Hidden windows retain pending changes; becoming visible flushes those changes without a full history scan. Usage limits refresh independently at startup, on visibility resume, and once per minute while visible. Watcher overflow or recovery can trigger a full scan to restore lost events.
 6. If the Rust scan fails, the app keeps the last valid snapshot and reports the error in the UI.
 
 Before native data finishes loading, the app does not write empty frontend state back to local settings. This prevents a startup race from clearing the user's organization.
@@ -68,6 +69,7 @@ Chat activity and diagnostics come from structured events and limited log reads.
 ## 5. Persistence boundary
 
 - Stable tool settings are written to `%CODEX_HOME%\.codex-chat-pane\settings.toml`.
+- `remoteDebuggingPort` defaults to `0` (off). Settings / Diagnostics accepts `0–65535`; a nonzero port enables loopback-only WebView2 CDP after a complete app restart. The main and preview windows share the startup arguments, including the existing browser defaults. Changing the saved port does not alter the running WebView environment.
 - Folders, groups, stars, recent activity overrides, and local assignments are written to `folders.json` in the same directory. Without `CODEX_HOME`, the root is `%USERPROFILE%\.codex`.
 - Frequently changing UI state is stored in browser `localStorage`.
 - Original Codex databases, rollouts, and logs are opened read only.

@@ -217,6 +217,9 @@ fn rollout_chain(home: &Path, id: &str, current_path: &Path) -> Result<RolloutCh
     } else {
         Vec::new()
     };
+    if current.meta.history_base.is_some() {
+        descriptors.extend(rollout_descriptors(&home.join("archived_sessions"), id)?);
+    }
     if !descriptors
         .iter()
         .any(|candidate| candidate.path == current.path)
@@ -257,6 +260,29 @@ fn rollout_chain(home: &Path, id: &str, current_path: &Path) -> Result<RolloutCh
     }
     chain.reverse();
     Ok(RolloutChain { segments: chain })
+}
+
+pub(crate) fn metrics_segments(
+    home: &Path,
+    id: &str,
+    path: &Path,
+) -> Result<Vec<(PathBuf, u64)>, String> {
+    let path = if path.is_file() {
+        path.to_path_buf()
+    } else {
+        let mut candidates = rollout_descriptors(&home.join("sessions"), id)?;
+        candidates.extend(rollout_descriptors(&home.join("archived_sessions"), id)?);
+        candidates
+            .into_iter()
+            .max_by_key(|entry| entry.modified)
+            .ok_or_else(|| "无法定位对话日志".to_string())?
+            .path
+    };
+    Ok(rollout_chain(home, id, &path)?
+        .segments
+        .into_iter()
+        .map(|segment| (segment.path, segment.end))
+        .collect())
 }
 
 fn rollout_descriptor(path: &Path) -> Result<RolloutDescriptor, String> {
