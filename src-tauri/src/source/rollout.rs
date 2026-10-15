@@ -1,11 +1,11 @@
 use super::diagnostics::Diagnostic;
 use super::{seconds_or_millis, ThreadActivity};
+use crate::rollout_log;
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
-    io::{BufRead, BufReader, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::SystemTime,
@@ -63,6 +63,7 @@ struct Cursor {
     offset: u64,
     length: u64,
     modified: Option<SystemTime>,
+    source: Option<rollout_log::Stamp>,
     turn_id: Option<String>,
     activity: Option<ThreadActivity>,
     has_start: bool,
@@ -301,9 +302,8 @@ impl Cursor {
         });
     }
 
-    fn read(&mut self, file: &mut File, end: u64) -> std::io::Result<()> {
-        file.seek(SeekFrom::Start(self.offset))?;
-        let mut reader = BufReader::new(file);
+    fn read(&mut self, file: impl Read, end: u64) -> std::io::Result<()> {
+        let mut reader = BufReader::new(file.take(end.saturating_sub(self.offset)));
         let mut line = String::new();
         while self.offset < end {
             line.clear();
@@ -325,55 +325,79 @@ pub(super) fn read_rollout_snapshot(
     cutoff: Option<i64>,
 ) -> Result<Option<ThreadActivity>, String> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cursor>>> = OnceLock::new();
-    let mut file = match File::open(path) {
+    let mut log = match rollout_log::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
-    let length = metadata.len();
-    let modified = metadata.modified().ok();
+    let source = log.stamp.clone();
+    let modified = source.modified;
     let mut cache = CACHE
         .get_or_init(Default::default)
         .lock()
         .map_err(|error| error.to_string())?;
-    let cursor = cache.entry(path.to_path_buf()).or_default();
-    if cursor.modified.is_none()
-        || length < cursor.length
-        || length == cursor.length && modified != cursor.modified
-    {
-        // Bootstrap from the tail; grow only until the latest task start is found.
-        let mut window = 65536;
-        loop {
+    let cursor = cache.entry(rollout_log::logical_path(path)).or_default();
+    if log.compressed {
+        if cursor.source.as_ref() != Some(&source) {
             *cursor = Cursor::default();
-            cursor.offset = length.saturating_sub(window);
-            if cursor.offset > 0 {
-                file.seek(SeekFrom::Start(cursor.offset))
-                    .map_err(|error| error.to_string())?;
-                let skipped = BufReader::new(&mut file)
-                    .read_until(b'\n', &mut Vec::new())
-                    .map_err(|error| error.to_string())?;
-                cursor.offset += skipped as u64;
-            }
             cursor
-                .read(&mut file, length)
+                .read(
+                    log.reader_at(0).map_err(|error| error.to_string())?,
+                    u64::MAX,
+                )
                 .map_err(|error| error.to_string())?;
-            let old_terminal = cursor.activity.as_ref().is_some_and(|activity| {
-                !activity.working
-                    && cutoff.is_some_and(|cutoff| activity.activity_at < seconds_or_millis(cutoff))
-            });
-            if cursor.has_start || cursor.pending_message || old_terminal || window >= length {
-                break;
-            }
-            window = window.saturating_mul(2);
         }
-    } else if length > cursor.length {
-        cursor
-            .read(&mut file, length)
-            .map_err(|error| error.to_string())?;
+    } else {
+        let length = log.len().map_err(|error| error.to_string())?;
+        if cursor
+            .source
+            .as_ref()
+            .is_some_and(|stamp| stamp.path != source.path)
+            || cursor.modified.is_none()
+            || length < cursor.length
+            || length == cursor.length && modified != cursor.modified
+        {
+            // Bootstrap from the tail; grow only until the latest task start is found.
+            let mut window = 65536;
+            loop {
+                *cursor = Cursor::default();
+                cursor.offset = length.saturating_sub(window);
+                let file = rollout_log::open(path)
+                    .and_then(|log| log.reader_at(cursor.offset))
+                    .map_err(|error| error.to_string())?;
+                let mut reader = BufReader::new(file);
+                if cursor.offset > 0 {
+                    let skipped = reader
+                        .read_until(b'\n', &mut Vec::new())
+                        .map_err(|error| error.to_string())?;
+                    cursor.offset += skipped as u64;
+                }
+                cursor
+                    .read(reader, length)
+                    .map_err(|error| error.to_string())?;
+                let old_terminal = cursor.activity.as_ref().is_some_and(|activity| {
+                    !activity.working
+                        && cutoff
+                            .is_some_and(|cutoff| activity.activity_at < seconds_or_millis(cutoff))
+                });
+                if cursor.has_start || cursor.pending_message || old_terminal || window >= length {
+                    break;
+                }
+                window = window.saturating_mul(2);
+            }
+        } else if length > cursor.length {
+            cursor
+                .read(
+                    log.reader_at(cursor.offset)
+                        .map_err(|error| error.to_string())?,
+                    length,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        cursor.length = length;
     }
-    cursor.length = length;
     cursor.modified = modified;
+    cursor.source = Some(source);
     let mut activity = cursor.activity.clone();
     if let Some(activity) = activity.as_mut() {
         activity.observed = true;
@@ -393,7 +417,7 @@ pub(super) fn read_rollout_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{fs::File, io::Write};
 
     fn read_rollout_activity(
         path: &Path,
@@ -569,6 +593,15 @@ mod tests {
         assert_eq!(completed.execution_status.as_deref(), Some("completed"));
         assert_eq!(completed.execution_ms, Some(10000));
         assert_eq!(completed.last_user_message_at, active.last_user_message_at);
+        crate::rollout_log::compress_fixture(&path);
+        let compressed = read_rollout_activity(&path, Some(1788150000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(compressed.execution_ms, completed.execution_ms);
+        assert_eq!(
+            compressed.last_user_message_at,
+            completed.last_user_message_at
+        );
         std::fs::write(&path, start).unwrap();
         assert!(
             read_rollout_activity(&path, Some(1788150000))

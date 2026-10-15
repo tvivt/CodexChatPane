@@ -34,7 +34,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CodexChatPane-windows-portable
-          path: release/CodexChatPane.exe
+          path: release/CodexChatPane-v*.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -57,6 +57,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $asset = Join-Path $env:GITHUB_WORKSPACE "release\CodexChatPane.exe"
+          $asset = Join-Path $env:GITHUB_WORKSPACE "release\CodexChatPane-$env:GITHUB_REF_NAME.exe"
           if (-not (Test-Path -LiteralPath $asset)) { throw "Missing release asset: $asset" }
           gh release create "$env:GITHUB_REF_NAME" $asset --repo "$env:GITHUB_REPOSITORY" --verify-tag --title "$env:GITHUB_REF_NAME" --generate-notes

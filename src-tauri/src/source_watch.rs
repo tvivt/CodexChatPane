@@ -52,7 +52,7 @@ mod windows {
     fn thread_id(path: &str) -> Option<String> {
         let name = path.rsplit('\\').next()?;
         let id = name.strip_prefix("rollout-")?.get(20..56)?;
-        (name.ends_with(".jsonl")
+        ((name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
             && id.len() == 36
             && id.bytes().enumerate().all(|(index, byte)| {
                 if [8, 13, 18, 23].contains(&index) {
@@ -228,11 +228,20 @@ mod windows {
                 "01a0cd2a-48fe-7991-8579-b85b5d06ce51",
                 "01a0c86d-7ae6-7ea1-92b5-382f9e6bbc0b",
             ] {
-                classify(
-                    &format!("sessions\\2026\\09\\23\\rollout-2026-09-23T15-38-49-{id}.jsonl"),
-                    &mut change,
-                    &mut ids,
-                );
+                for suffix in ["jsonl", "jsonl.zst"] {
+                    classify(
+                        &format!(
+                            "sessions\\2026\\09\\23\\rollout-2026-09-23T15-38-49-{id}.{suffix}"
+                        ),
+                        &mut change,
+                        &mut ids,
+                    );
+                    classify(
+                        &format!("archived_sessions\\rollout-2026-09-23T15-38-49-{id}.{suffix}"),
+                        &mut change,
+                        &mut ids,
+                    );
+                }
             }
             assert_eq!(ids.len(), 2);
             assert!(!change.full);

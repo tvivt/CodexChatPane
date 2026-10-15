@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fs::File,
     io::{BufRead, BufReader, Read},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -827,9 +826,12 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
     let mut parser = Parser::new(thread_id);
     let mut last_fallback = None;
     let mut subagent = false;
+    let mut inherited_history = false;
     let mut parent_thread_id = None;
     for (path, end) in segments {
-        let file = File::open(&path).map_err(|e| e.to_string())?;
+        let file = crate::rollout_log::open(&path)
+            .and_then(|log| log.reader_at(0))
+            .map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(file.take(end));
         let mut line = String::new();
         loop {
@@ -843,6 +845,9 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
             }
             match serde_json::from_str::<Value>(&line) {
                 Ok(record) => {
+                    if record["type"] == "session_meta" && record["payload"]["id"] != thread_id {
+                        inherited_history = true;
+                    }
                     if record["type"] == "session_meta" && record["payload"]["id"] == thread_id {
                         subagent |= record["payload"]["thread_source"] == "subagent";
                         parent_thread_id = record["payload"]["parent_thread_id"]
@@ -858,6 +863,9 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
                     if parser.active_thread == thread_id
                         && record["type"] == "event_msg"
                         && record["payload"]["type"] == "token_count"
+                        && record["payload"]["thread_id"]
+                            .as_str()
+                            .is_none_or(|id| id == thread_id)
                     {
                         last_fallback = serde_json::from_value::<Usage>(
                             record["payload"]["info"]["total_token_usage"].clone(),
@@ -872,7 +880,7 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
     }
     let (turns, tools, mut subagents, mut warnings, mut complete) = parser.finish();
     let mut summary = aggregate(&turns);
-    if turns.iter().all(|turn| turn.requests.is_empty()) && !subagent {
+    if turns.iter().all(|turn| turn.requests.is_empty()) && !subagent && !inherited_history {
         if let Some(usage) = last_fallback {
             summary.input_tokens = usage.input_tokens;
             summary.cached_input_tokens = usage.cached_input_tokens;
@@ -1144,6 +1152,125 @@ mod tests {
                 assert_eq!(turn.metrics.generation_ms, 635213);
             }
         }
+    }
+
+    #[test]
+    fn compressed_fork_and_subagent_usage_stay_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE threads(id TEXT, rollout_path TEXT, title TEXT, cwd TEXT, model TEXT, archived INTEGER, created_at INTEGER, updated_at INTEGER);").unwrap();
+        let write_log = |id: &str, records: Vec<Value>| {
+            let path = sessions.join(format!("rollout-{id}.jsonl"));
+            let bytes = records
+                .into_iter()
+                .map(|v| format!("{v}\n"))
+                .collect::<String>();
+            std::fs::write(&path, &bytes).unwrap();
+            db.execute(
+                "INSERT INTO threads VALUES(?1,?2,?1,NULL,'test',0,1,2)",
+                rusqlite::params![id, path.to_str().unwrap()],
+            )
+            .unwrap();
+            (path, bytes.len())
+        };
+        let request = |id: &str, tokens: u64| json!({"type":"token_usage_record","payload":{"thread_id":id,"turn_id":"turn","response_id":format!("request-{id}"),"usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":tokens,"reasoning_output_tokens":0,"total_tokens":1000+tokens}}});
+        let start = json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}});
+        let end = json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn","time_to_first_token_ms":1234}});
+        let output = json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn","started_at_ms":1000,"completed_at_ms":2000,"item":{"type":"AgentMessage","id":"answer"}}});
+        let (parent, size) = write_log(
+            "parent",
+            vec![
+                json!({"type":"session_meta","payload":{"id":"parent"}}),
+                start.clone(),
+                output.clone(),
+                request("parent", 900),
+                end.clone(),
+            ],
+        );
+        let (child, _) = write_log(
+            "agent",
+            vec![
+                json!({"type":"session_meta","payload":{"id":"agent","thread_source":"subagent","parent_thread_id":"main"}}),
+                start.clone(),
+                output.clone(),
+                request("agent", 75),
+                end.clone(),
+            ],
+        );
+        let header = json!({"type":"session_meta","payload":{"id":"main","history_base":{"thread_id":"parent","end_byte_offset":size,"end_ordinal_exclusive":5}}});
+        let (main, _) = write_log(
+            "main",
+            vec![
+                header.clone(),
+                start.clone(),
+                output,
+                request("agent", 5000),
+                request("main", 100),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn","item":{"type":"SubAgentActivity","id":"agent-event","agent_thread_id":"agent","agent_path":"/root/agent","kind":"completed"}}}),
+                end.clone(),
+            ],
+        );
+        let before = read_at(home, "main", true).unwrap();
+        assert_eq!(before.summary.output_tokens, Some(100));
+        assert_eq!(before.summary.request_count, 1);
+        assert_eq!(
+            before.subagents[0].summary.as_ref().unwrap().output_tokens,
+            Some(75)
+        );
+        for path in [&parent, &main, &child] {
+            crate::rollout_log::compress_fixture(path);
+        }
+        let after = read_at(home, "main", true).unwrap();
+        assert_eq!(
+            serde_json::to_value(&after.summary).unwrap(),
+            serde_json::to_value(&before.summary).unwrap()
+        );
+        assert_eq!(
+            after.subagents[0].summary.as_ref().unwrap().output_tokens,
+            Some(75)
+        );
+        // A legacy cumulative snapshot may include the fork base; do not use it as own usage.
+        std::fs::write(&main, [header, start, json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"output_tokens":9000}}}}), end].into_iter().map(|r|format!("{r}\n")).collect::<String>()).unwrap();
+        assert_eq!(
+            read_at(home, "main", false).unwrap().summary.output_tokens,
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "requires read-only access to the complete local Codex catalog"]
+    fn local_compressed_catalog() {
+        let home = crate::source::codex_home().unwrap();
+        let db = Connection::open_with_flags(
+            home.join("state_5.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let ids = db
+            .prepare("SELECT id FROM threads")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut failures = Vec::new();
+        for id in &ids {
+            if let Err(error) = read_at(&home, id, false) {
+                failures.push((id.clone(), error));
+            }
+        }
+        println!(
+            "catalog total={} failures={failures:?} elapsed={:?}",
+            ids.len(),
+            started.elapsed()
+        );
+        assert!(failures.is_empty());
+        let snapshot = crate::source::scan().unwrap();
+        println!("source snapshot chats={}", snapshot.chats.len());
     }
 
     #[test]

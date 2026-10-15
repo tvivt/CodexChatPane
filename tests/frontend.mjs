@@ -1606,6 +1606,16 @@ await vm.runInContext(`(async () => {
     assert.equal(metricsScope(undefined),null);
     assert.equal(metricsScope(data,'latest').outputTokens,100,'individual turn remains available');
     const html = chatMetricsMarkup(data);
+    const unorderedTurns = [
+      {...data.turns[0],turnId:'older',startedAt:1000},
+      {...data.turns[0],turnId:'newest',startedAt:3000},
+      {...data.turns[0],turnId:'middle',startedAt:2000},
+      {...data.turns[0],turnId:'unknown',startedAt:null},
+    ];
+    const orderedHtml = chatMetricsMarkup({...data,turns:unorderedTurns});
+    assert.deepEqual([...orderedHtml.matchAll(/<option value="([^"]+)"/g)].map(match => match[1]), ['all','newest','middle','older','unknown']);
+    assert.deepEqual([...orderedHtml.matchAll(/data-scope="([^"]+)"/g)].map(match => match[1]), ['newest','middle','older','unknown']);
+    assert.deepEqual(unorderedTurns.map(turn => turn.turnId), ['older','newest','middle','unknown'], 'display sorting does not mutate the source turns');
     assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;') && chatMetricsMarkup(data,'latest').includes('&lt;img src=x onerror=alert(1)&gt;'),'log content is escaped');
     assert.ok(html.includes('工具统计（全会话）') && html.includes('子智能体（各自全会话）'),'tools and subagents declare their own scope');
     assert.ok(chatMetricsMarkup(data,'latest').includes('缺少输出起点') && html.includes('data-metrics-action="agent"'));

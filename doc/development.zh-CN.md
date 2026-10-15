@@ -53,7 +53,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 
 最终输出为 `.runtime/bin/CodexChatPane.exe`，Cargo 中间输出保留在 `.runtime/app-target/`，依赖缓存位于 `.runtime/cargo-home/`。相同 EXE 不重复复制；更新正在运行的 EXE 前需先退出应用。EXE 不包含 WebView2 Runtime 安装器，目标机器需要已有 WebView2 Runtime。
 
-开发仓库的脚本不自动执行上面的完整验证命令；发布前单独运行需要的检查。该仓库构建脚本的独立回归检查为 `powershell -NoProfile -File tests/build-app.ps1`，使用临时目录与模拟 npm/Cargo 验证缓存失效和失败恢复，不会重装项目依赖。公开 release 仓库保留在线构建脚本，执行验证后输出 `release/CodexChatPane.exe`，供 GitHub Actions 使用。
+开发仓库的脚本不自动执行上面的完整验证命令；发布前单独运行需要的检查。该仓库构建脚本的独立回归检查为 `powershell -NoProfile -File tests/build-app.ps1`，使用临时目录与模拟 npm/Cargo 验证缓存失效和失败恢复，不会重装项目依赖。公开 release 仓库保留在线构建脚本，执行验证后输出 `release/CodexChatPane-v<version>.exe`，供 GitHub Actions 使用。
 
 ## 4. GitHub Actions
 

@@ -1,13 +1,20 @@
+use crate::rollout_log;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    fs,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::SystemTime,
+};
+
+#[cfg(test)]
+use std::{
+    fs::File,
+    io::{Seek, SeekFrom},
 };
 
 const PAGE_BYTES: u64 = 512 * 1024;
@@ -44,6 +51,7 @@ struct RolloutSegment {
     end: u64,
     len: u64,
     modified: Option<SystemTime>,
+    source: rollout_log::Stamp,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -99,6 +107,7 @@ struct RolloutDescriptor {
     rollout_id: String,
     len: u64,
     modified: Option<SystemTime>,
+    source: rollout_log::Stamp,
 }
 
 pub fn read(id: &str, before: Option<PreviewCursor>) -> Result<PreviewPage, String> {
@@ -240,16 +249,29 @@ fn rollout_chain(home: &Path, id: &str, current_path: &Path) -> Result<RolloutCh
             end: end.min(current.len),
             len: current.len,
             modified: current.modified,
+            source: current.source.clone(),
         });
         let Some(base) = current.meta.history_base.clone() else {
             break;
         };
+        if !descriptors
+            .iter()
+            .any(|candidate| candidate.rollout_id == base.thread_id)
+        {
+            descriptors.extend(rollout_descriptors(
+                &home.join("sessions"),
+                &base.thread_id,
+            )?);
+            descriptors.extend(rollout_descriptors(
+                &home.join("archived_sessions"),
+                &base.thread_id,
+            )?);
+        }
         let parent = descriptors
             .iter()
             .filter(|candidate| candidate.path != current.path)
             .find(|candidate| {
-                candidate.meta.id == id
-                    && candidate.rollout_id == base.thread_id
+                candidate.rollout_id == base.thread_id
                     && candidate.len >= base.end_byte_offset
                     && history_boundary_matches(candidate, &base)
             })
@@ -267,16 +289,18 @@ pub(crate) fn metrics_segments(
     id: &str,
     path: &Path,
 ) -> Result<Vec<(PathBuf, u64)>, String> {
-    let path = if path.is_file() {
-        path.to_path_buf()
-    } else {
-        let mut candidates = rollout_descriptors(&home.join("sessions"), id)?;
-        candidates.extend(rollout_descriptors(&home.join("archived_sessions"), id)?);
-        candidates
-            .into_iter()
-            .max_by_key(|entry| entry.modified)
-            .ok_or_else(|| "无法定位对话日志".to_string())?
-            .path
+    let path = match rollout_log::open(path) {
+        Ok(_) => rollout_log::logical_path(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut candidates = rollout_descriptors(&home.join("sessions"), id)?;
+            candidates.extend(rollout_descriptors(&home.join("archived_sessions"), id)?);
+            candidates
+                .into_iter()
+                .max_by_key(|entry| entry.modified)
+                .ok_or_else(|| "无法定位对话日志".to_string())?
+                .path
+        }
+        Err(error) => return Err(error.to_string()),
     };
     Ok(rollout_chain(home, id, &path)?
         .segments
@@ -286,13 +310,16 @@ pub(crate) fn metrics_segments(
 }
 
 fn rollout_descriptor(path: &Path) -> Result<RolloutDescriptor, String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut log = rollout_log::open(path).map_err(|error| error.to_string())?;
+    let len = log.len().map_err(|error| error.to_string())?;
+    let source = log.stamp.clone();
     let mut line = String::new();
-    BufReader::new(file)
+    BufReader::new(log.reader_at(0).map_err(|error| error.to_string())?)
         .read_line(&mut line)
         .map_err(|error| error.to_string())?;
     let record: RolloutMetaRecord = serde_json::from_str(&line)
         .map_err(|error| format!("无法解析预览 rollout 元数据：{error}"))?;
+    let path = rollout_log::logical_path(path);
     let rollout_id = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -300,13 +327,13 @@ fn rollout_descriptor(path: &Path) -> Result<RolloutDescriptor, String> {
         .filter(|id| !id.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| record.payload.id.clone());
-    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
     Ok(RolloutDescriptor {
-        path: path.to_path_buf(),
+        path,
         meta: record.payload,
         rollout_id,
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
+        len,
+        modified: source.modified,
+        source,
     })
 }
 
@@ -321,14 +348,18 @@ fn rollout_descriptors(root: &Path, id: &str) -> Result<Vec<RolloutDescriptor>, 
             let path = entry.map_err(|error| error.to_string())?.path();
             if path.is_dir() {
                 directories.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
+            } else if rollout_log::is_log(&path)
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.contains(id))
             {
+                if descriptors
+                    .iter()
+                    .any(|entry: &RolloutDescriptor| entry.path == rollout_log::logical_path(&path))
+                {
+                    continue;
+                }
                 if let Ok(descriptor) = rollout_descriptor(&path) {
                     descriptors.push(descriptor);
                 }
@@ -345,25 +376,19 @@ fn history_boundary_matches(candidate: &RolloutDescriptor, base: &HistoryBase) -
     if base.end_byte_offset == 0 || base.end_byte_offset > candidate.len {
         return false;
     }
-    let Ok(mut file) = File::open(&candidate.path) else {
+    let Ok(log) = rollout_log::open(&candidate.path) else {
         return false;
     };
-    if file
-        .seek(SeekFrom::Start(base.end_byte_offset - 1))
-        .ok()
-        .and_then(|_| {
-            let mut byte = [0u8; 1];
-            file.read_exact(&mut byte).ok().map(|_| byte[0])
-        })
-        != Some(b'\n')
-    {
+    let Ok(reader) = log.reader_at(base.end_byte_offset - 1) else {
         return false;
-    }
-    if file.seek(SeekFrom::Start(base.end_byte_offset)).is_err() {
+    };
+    let mut file = BufReader::new(reader);
+    let mut byte = [0u8; 1];
+    if file.read_exact(&mut byte).is_err() || byte[0] != b'\n' {
         return false;
     }
     let mut line = String::new();
-    if BufReader::new(file).read_line(&mut line).is_err() {
+    if file.read_line(&mut line).is_err() {
         return false;
     }
     serde_json::from_str::<Value>(&line)
@@ -452,13 +477,16 @@ fn read_chain_window(
 }
 
 fn read_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|error| error.to_string())?;
-    file.seek(SeekFrom::Start(start))
+    let file = rollout_log::open(path)
+        .and_then(|log| log.reader_at(start))
         .map_err(|error| error.to_string())?;
     let mut bytes = Vec::with_capacity((end - start) as usize);
     file.take(end - start)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 != end - start {
+        return Err("预览日志在读取期间被截断，请重试".into());
+    }
     Ok(bytes)
 }
 
@@ -868,6 +896,79 @@ mod tests {
         assert!(older.items.iter().any(|item| item.text == "old"));
         assert!(older.items.iter().any(|item| item.text == "middle"));
         assert!(older.before.is_none());
+        for path in [&root_path, &parent_path, &child_path] {
+            crate::rollout_log::compress_fixture(path);
+        }
+        // A chain/page cursor located before compression remains a logical byte cursor.
+        assert_eq!(
+            read_chain_page(
+                &chain,
+                chain.end_cursor(),
+                child_path
+                    .with_extension("fixture-original")
+                    .metadata()
+                    .unwrap()
+                    .len()
+            )
+            .unwrap(),
+            latest
+        );
+        let compressed = rollout_chain(directory.path(), id, &child_path).unwrap();
+        assert_ne!(chain, compressed);
+        assert_eq!(
+            read_chain_page(&compressed, latest.before.unwrap(), PAGE_BYTES).unwrap(),
+            older
+        );
+    }
+
+    #[test]
+    fn preview_follows_compressed_history_from_another_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let parent = sessions.join("rollout-parent.jsonl");
+        let child = sessions.join("rollout-child.jsonl");
+        let base = format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"parent"}}),
+            json!({"ordinal":1,"type":"event_msg","payload":{"type":"user_message","message":"inherited"}})
+        );
+        fs::write(
+            &parent,
+            format!(
+                "{base}{}\n",
+                json!({"ordinal":2,"type":"event_msg","payload":{"type":"task_complete"}})
+            ),
+        )
+        .unwrap();
+        fs::write(&child, format!("{}\n{}\n", json!({"type":"session_meta","payload":{"id":"child","history_base":{"thread_id":"parent","end_byte_offset":base.len(),"end_ordinal_exclusive":2}}}), json!({"ordinal":2,"type":"event_msg","payload":{"type":"user_message","message":"own"}}))).unwrap();
+        crate::rollout_log::compress_fixture(&parent);
+        crate::rollout_log::compress_fixture(&child);
+        let chain = rollout_chain(dir.path(), "child", &child).unwrap();
+        assert_eq!(chain.segments.len(), 2);
+        let page = read_chain_page(&chain, chain.end_cursor(), u64::MAX).unwrap();
+        assert!(page.items.iter().any(|item| item.text == "inherited"));
+        assert!(page.items.iter().any(|item| item.text == "own"));
+    }
+
+    #[test]
+    #[ignore = "requires read-only access to local compressed Codex histories"]
+    fn local_compressed_preview() {
+        for id in [
+            "01a0ff60-165e-7ff1-89c5-4d58b94ce669",
+            "01a02fa9-33af-7bb2-a8b4-a35196a4c534",
+            "01a04e37-f08c-7b73-9c9a-4ea0689a8f1e",
+            "01a01dd5-dcd9-7de0-a49d-f3c98f13a908",
+            "01a05176-d7cf-7a52-8f5d-bbf1ae68c2bc",
+        ] {
+            let page = read(id, None).unwrap();
+            assert!(!page.items.is_empty());
+            if let Some(before) = page.before {
+                let older = read(id, Some(before)).unwrap();
+                assert!(older.before != page.before);
+            }
+            println!("preview {id} items={}", page.items.len());
+        }
     }
 
     #[test]

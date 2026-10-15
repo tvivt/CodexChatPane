@@ -53,7 +53,7 @@ The local script uses content fingerprints to decide whether to run `npm ci` and
 
 The final output is `.runtime/bin/CodexChatPane.exe`; Cargo artifacts stay in `.runtime/app-target/` and dependencies in `.runtime/cargo-home/`. Identical executables are not copied again; exit the running app before replacing a changed executable. The executable does not include a WebView2 Runtime installer, so the target machine needs WebView2 Runtime installed.
 
-The development checkout's script does not run the full validation commands above; run the appropriate checks separately before release. In that checkout, run `powershell -NoProfile -File tests/build-app.ps1` for the isolated build-script regression check. It uses temporary files and fake npm/Cargo commands to verify cache invalidation and failure recovery without reinstalling project dependencies. The public release checkout retains its online build script, which runs validation and outputs `release/CodexChatPane.exe` for GitHub Actions.
+The development checkout's script does not run the full validation commands above; run the appropriate checks separately before release. In that checkout, run `powershell -NoProfile -File tests/build-app.ps1` for the isolated build-script regression check. It uses temporary files and fake npm/Cargo commands to verify cache invalidation and failure recovery without reinstalling project dependencies. The public release checkout retains its online build script, which runs validation and outputs `release/CodexChatPane-v<version>.exe` for GitHub Actions.
 
 ## 4. GitHub Actions
 

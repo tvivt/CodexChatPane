@@ -48,7 +48,7 @@ npm run dev
 
 ## 获取 Windows 可执行文件
 
-推送 `v*` 标签会构建并发布 GitHub Release，附带可直接运行的 `CodexChatPane.exe`。手动运行 `Windows portable build` 可下载 `CodexChatPane-windows-portable` 构建产物。当前构建未签名，Windows 可能显示 SmartScreen 提示；程序依赖系统已安装 WebView2 Runtime。
+推送 `v*` 标签会构建并发布 GitHub Release，附带可直接运行的 `CodexChatPane-v<version>.exe`。手动运行 `Windows portable build` 可下载 `CodexChatPane-windows-portable` 构建产物。当前构建未签名，Windows 可能显示 SmartScreen 提示；程序依赖系统已安装 WebView2 Runtime。
 
 从源码在 Windows 本地构建，在仓库根目录运行：
 
@@ -56,7 +56,7 @@ npm run dev
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 ```
 
-开发仓库使用增量构建脚本，生成 `.runtime\bin\CodexChatPane.exe`；公开 release 仓库的脚本执行验证后生成 `release\CodexChatPane.exe`。环境要求和验证步骤见 [开发与验证](doc/development.zh-CN.md)。
+开发仓库使用增量构建脚本，生成 `.runtime\bin\CodexChatPane.exe`；公开 release 仓库的脚本执行验证后生成 `release\CodexChatPane-v<version>.exe`。环境要求和验证步骤见 [开发与验证](doc/development.zh-CN.md)。
 
 ## 文档
 

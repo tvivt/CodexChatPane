@@ -323,13 +323,11 @@ fn scan_path_with_previous(
                 .collect()
         })
         .unwrap_or_default();
-    let history = previous.and_then(|_| {
-        Connection::open_with_flags(
-            home.join("thread_history_1.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()
-    });
+    let history = Connection::open_with_flags(
+        home.join("thread_history_1.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok();
     let has_error = history.as_ref().is_some_and(|connection| {
         connection
             .query_row(
@@ -344,12 +342,31 @@ fn scan_path_with_previous(
             if previous_paths.get(thread.id.as_str()) == Some(&thread.rollout_path.as_path()) {
                 continue;
             }
-            if let Some(activity) = history.as_ref().and_then(|connection| {
-                read_thread_activity_for(connection, &thread.id, app_server_started_at, has_error)
-                    .ok()
-                    .flatten()
-            }) {
+            let projected = history.as_ref().and_then(|connection| {
+                read_thread_activity_for(
+                    connection,
+                    &thread.id,
+                    &thread.rollout_path,
+                    app_server_started_at,
+                    has_error,
+                )
+                .ok()
+                .flatten()
+            });
+            let closed = projected.as_ref().is_some_and(|activity| {
+                matches!(
+                    activity.execution_status.as_deref(),
+                    Some("completed" | "failed" | "interrupted")
+                )
+            });
+            if let Some(activity) = projected {
                 thread_activity.insert(thread.id.clone(), activity);
+            }
+            // Closed compressed logs already have a projection; avoid decoding the whole archive at startup.
+            if closed
+                && crate::rollout_log::open(&thread.rollout_path).is_ok_and(|log| log.compressed)
+            {
+                continue;
             }
             let Ok(rollout) = read_rollout_snapshot(&thread.rollout_path, app_server_started_at)
             else {
@@ -610,10 +627,22 @@ fn refresh_activities_at(
     let mut history_ids: HashSet<String> = history_ids.iter().cloned().collect();
     let summaries = if history_changed {
         let summaries = read_history_summaries(&home.join("thread_history_1.sqlite"))?;
+        let owners: HashMap<_, _> = snapshot
+            .chats
+            .iter()
+            .map(|chat| {
+                (
+                    crate::rollout_log::fragment_id(&chat.rollout_path).unwrap_or(&chat.id),
+                    &chat.id,
+                )
+            })
+            .collect();
         for (id, summary) in &summaries {
             if snapshot.history_summaries.get(id) != Some(summary) {
-                ids.insert(id.clone());
-                history_ids.insert(id.clone());
+                if let Some(owner) = owners.get(id.as_str()) {
+                    ids.insert((*owner).clone());
+                    history_ids.insert((*owner).clone());
+                }
             }
         }
         Some(summaries)
@@ -667,7 +696,8 @@ fn refresh_activities_at(
         );
         if history_ids.contains(id) {
             if let Some(connection) = history.as_ref() {
-                if let Some(activity) = read_thread_activity_for(connection, id, cutoff, has_error)?
+                if let Some(activity) =
+                    read_thread_activity_for(connection, id, &chat.rollout_path, cutoff, has_error)?
                 {
                     activities.insert(id.clone(), activity);
                 }
@@ -752,9 +782,11 @@ fn refresh_activities_at(
 fn read_thread_activity_for(
     connection: &Connection,
     id: &str,
+    rollout_path: &Path,
     cutoff: Option<i64>,
     has_error: bool,
 ) -> Result<Option<ThreadActivity>, String> {
+    let id = crate::rollout_log::fragment_id(rollout_path).unwrap_or(id);
     let error_column = if has_error {
         "turns.error_json"
     } else {
@@ -1429,6 +1461,38 @@ mod tests {
             stopped.chats[0].execution_started_at.is_none(),
             "process exit invalidates cached activity even when its rollout is missing"
         );
+        history.execute_batch("ALTER TABLE unavailable_items RENAME TO thread_items; INSERT INTO thread_turns VALUES('fragment','fragment-turn',10,'completed',50,80,30000,'u3',NULL);").unwrap();
+        let path = home.join("rollout-late_fragment.jsonl");
+        fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"fragment-turn\",\"started_at\":30,\"completed_at\":40,\"duration_ms\":10000}}\n").unwrap();
+        crate::rollout_log::compress_fixture(&path);
+        snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == "late")
+            .unwrap()
+            .rollout_path = path.clone();
+        let changed =
+            refresh_activities_at(&mut snapshot, &[], &[], true, home, Some(100)).unwrap();
+        assert_eq!(changed.chats.len(), 1);
+        assert_eq!(changed.chats[0].id, "late");
+        assert_eq!(changed.chats[0].turn_id.as_deref(), Some("fragment-turn"));
+        assert_eq!(changed.chats[0].execution_ms, Some(30000));
+        catalog
+            .execute(
+                "UPDATE threads SET rollout_path=?1 WHERE id='late'",
+                [path.to_str().unwrap()],
+            )
+            .unwrap();
+        let fresh = scan_path(&database, home).unwrap();
+        assert_eq!(
+            fresh
+                .chats
+                .iter()
+                .find(|chat| chat.id == "late")
+                .unwrap()
+                .execution_ms,
+            Some(30000)
+        );
     }
 
     #[test]
@@ -1498,9 +1562,10 @@ mod tests {
         assert_eq!(activity["stopped"].execution_ms, None);
         let connection = Connection::open(&database).unwrap();
         for id in ["active", "idle", "stale", "stopped"] {
-            let targeted = read_thread_activity_for(&connection, id, Some(100), false)
-                .unwrap()
-                .unwrap();
+            let targeted =
+                read_thread_activity_for(&connection, id, Path::new(""), Some(100), false)
+                    .unwrap()
+                    .unwrap();
             assert_eq!(targeted.working, activity[id].working);
             assert_eq!(targeted.execution_status, activity[id].execution_status);
             assert_eq!(targeted.execution_ms, activity[id].execution_ms);
@@ -1509,6 +1574,18 @@ mod tests {
                 activity[id].last_user_message_at
             );
         }
+        connection.execute_batch("INSERT INTO thread_turns VALUES('fragment', 'newest', 10, 'completed', 200, 240, 40000, 'u5');").unwrap();
+        let newest = read_thread_activity_for(
+            &connection,
+            "idle",
+            Path::new("rollout-idle_fragment.jsonl.zst"),
+            Some(100),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(newest.turn_id.as_deref(), Some("newest"));
+        assert_eq!(newest.execution_ms, Some(40000));
     }
 
     #[test]

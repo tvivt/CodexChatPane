@@ -48,7 +48,7 @@ The development server listens on `127.0.0.1:1420`. On first launch, the app rea
 
 ## Get the Windows executable
 
-Pushing a `v*` tag builds and publishes a GitHub Release with `CodexChatPane.exe`. A manual run of `Windows portable build` provides the `CodexChatPane-windows-portable` artifact. The executable is unsigned, so Windows may show a SmartScreen prompt. The target machine needs WebView2 Runtime installed.
+Pushing a `v*` tag builds and publishes a GitHub Release with `CodexChatPane-v<version>.exe`. A manual run of `Windows portable build` provides the `CodexChatPane-windows-portable` artifact. The executable is unsigned, so Windows may show a SmartScreen prompt. The target machine needs WebView2 Runtime installed.
 
 To build from source on Windows, run this from the repository root:
 
@@ -56,7 +56,7 @@ To build from source on Windows, run this from the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 ```
 
-The development checkout uses an incremental local script and produces `.runtime/bin/CodexChatPane.exe`. The public release checkout's script runs validation and produces `release/CodexChatPane.exe`. See [Development and validation](doc/development.md) for environment requirements and validation steps.
+The development checkout uses an incremental local script and produces `.runtime/bin/CodexChatPane.exe`. The public release checkout's script runs validation and produces `release/CodexChatPane-v<version>.exe`. See [Development and validation](doc/development.md) for environment requirements and validation steps.
 
 ## Documentation
 

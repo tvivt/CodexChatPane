@@ -2,6 +2,7 @@ mod codex_app_mcp;
 mod diagnostics;
 mod metrics;
 mod preview;
+mod rollout_log;
 mod source;
 mod source_watch;
 mod window_attach;
