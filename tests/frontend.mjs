@@ -112,7 +112,7 @@ const legacyStorage = new Map([
 for (const [key,value] of legacyStorage) savedLocal.set(key,value);
 let maximized = false;
 let windowSize = {width:720,height:900};
-const reportedGeometry = {outer:null};
+const reportedGeometry = {outer:null,scale:1,monitors:[{position:{x:0,y:0},size:{width:1920,height:1080},scaleFactor:1}]};
 let windowPosition = {x:0,y:0};
 const nativeWindow = {
   minimize: async () => windowCalls.push('minimize'),
@@ -125,17 +125,24 @@ const nativeWindow = {
   outerPosition: async () => windowPosition,
   outerSize: async () => reportedGeometry.outer || windowSize,
   innerSize: async () => windowSize,
-  scaleFactor: async () => 1,
-  setSize: async size => { windowSize = {width:size.width,height:size.height}; windowCalls.push(`size:${size.width}`); },
-  setPosition: async position => { windowPosition = {x:position.x,y:position.y}; windowCalls.push(`position:${position.x},${position.y}`); },
+  scaleFactor: async () => reportedGeometry.scale,
+  setSize: async size => { windowSize = {width:size.width*reportedGeometry.scale,height:size.height*reportedGeometry.scale}; windowCalls.push(`size:${size.width}`); },
+  setPosition: async position => {
+    assert.ok(position instanceof PhysicalPosition, 'restored position uses physical desktop coordinates');
+    const monitor = reportedGeometry.monitors.find(m => position.x >= m.position.x && position.x < m.position.x+m.size.width && position.y >= m.position.y && position.y < m.position.y+m.size.height);
+    const scale = monitor?.scaleFactor || reportedGeometry.scale;
+    windowSize = {width:windowSize.width/reportedGeometry.scale*scale,height:windowSize.height/reportedGeometry.scale*scale};
+    reportedGeometry.scale = scale;
+    windowPosition = {x:position.x,y:position.y}; windowCalls.push(`position:${position.x},${position.y}`);
+  },
 };
 class LogicalSize { constructor(width,height) { this.width=width; this.height=height; } }
-class LogicalPosition { constructor(x,y) { this.x=x; this.y=y; } }
+class PhysicalPosition { constructor(x,y) { this.x=x; this.y=y; } }
 const context = vm.createContext({
   crypto,
   URLSearchParams,
   location: { search: '' },
-  window: { innerWidth:800, innerHeight:600, screen:{availWidth:1920,availHeight:1080}, __TAURI__: { window: { getCurrentWindow: () => nativeWindow }, dpi:{LogicalSize,LogicalPosition} } },
+  window: { innerWidth:800, innerHeight:600, screen:{availWidth:1920,availHeight:1080}, __TAURI__: { window: { getCurrentWindow: () => nativeWindow, availableMonitors:async () => reportedGeometry.monitors }, dpi:{LogicalSize,PhysicalPosition} } },
   localStorage: { getItem: key => savedLocal.get(key) || null, setItem: (key,value) => savedLocal.set(key,value) },
   document: {
     documentElement: { dataset: {}, style: { setProperty(name, value) { this[name] = value; } } },
@@ -586,19 +593,52 @@ await vm.runInContext(`(async () => {
   assert.equal(toolConfig().fontPane, 20);
   assert.equal(toolConfig().fontRow, 11.5);
   state.fontTab = 15; state.fontPane = 13; state.fontRow = 11.5;
-  state.singlePaneWidth = 840; state.windowHeight = 700; state.windowX = 120; state.windowY = 80; state.windowMaximized = false; windowRestoreDone = false;
+  state.singlePaneWidth = 840; state.windowHeight = 700; state.windowPhysicalX = 120; state.windowPhysicalY = 80; state.windowMaximized = false; windowRestoreDone = false;
   await restoreWindowGeometry();
   assert.equal(windowRestoreDone, true);
   assert.equal(state.windowHeight, 700);
   state.singlePaneWidth = 840;
-  state.windowHeight = state.windowX = state.windowY = null;
+  state.windowHeight = state.windowPhysicalX = state.windowPhysicalY = null;
   windowRestoreDone = true;
   state.windowMaximized = false;
   reportedGeometry.outer = {width:686,height:700};
-  assert.equal((await logicalWindowGeometry()).width, 840, 'window geometry uses the content size');
+  assert.equal((await windowGeometry()).width, 840, 'window geometry uses the content size');
   rememberWindowGeometry();
   await timeouts.at(-1).callback();
   assert.equal(state.singlePaneWidth, 840, 'window width follows the content size after native frame insets');
+  assert.equal(state.windowPhysicalX, 120, 'first position is saved even without a resize');
+  assert.equal(state.windowPhysicalY, 80);
+  assert.equal(toolConfig().windowPhysicalX, 120);
+  assert.ok(!('windowX' in toolConfig()) && !('windowY' in toolConfig()), 'legacy logical position is not written');
+  reportedGeometry.monitors = [
+    {position:{x:0,y:0},size:{width:3840,height:2160},scaleFactor:2},
+    {position:{x:-3840,y:0},size:{width:3840,height:2160},scaleFactor:2}
+  ];
+  state.windowPhysicalX = -3744; state.windowPhysicalY = 186;
+  await restoreWindowGeometry();
+  assert.ok(windowCalls.includes('position:-3744,186'), 'negative coordinates restore onto the other physical display');
+  assert.equal((await windowGeometry()).x, -3744, 'desktop position is not divided by the display DPI');
+  assert.equal((await windowGeometry()).width, 840, 'logical content size is retained at 200%');
+  state.windowPhysicalX = state.windowPhysicalY = null;
+  rememberWindowGeometry();
+  await timeouts.at(-1).callback();
+  assert.equal(state.windowPhysicalX, -3744, 'saved position remains physical at 200%');
+  reportedGeometry.monitors[1] = {position:{x:3840,y:-300},size:{width:2560,height:1440},scaleFactor:1.25};
+  state.windowPhysicalX = 4000; state.windowPhysicalY = -200;
+  state.singlePaneWidth = 900;
+  await restoreWindowGeometry();
+  assert.ok(windowCalls.includes('position:4000,-200'), 'right display and negative vertical offsets restore across mixed DPI');
+  const mixedDpiGeometry = await windowGeometry();
+  assert.equal(mixedDpiGeometry.width, 900);
+  assert.equal(mixedDpiGeometry.x, 4000);
+  const positionIndex = windowCalls.lastIndexOf('position:4000,-200');
+  assert.ok(positionIndex < windowCalls.lastIndexOf('size:900'), 'move to the target DPI before applying logical size');
+  reportedGeometry.monitors.pop();
+  const beforeOffscreen = windowCalls.filter(call => call.startsWith('position:')).length;
+  await restoreWindowGeometry();
+  assert.equal(windowCalls.filter(call => call.startsWith('position:')).length, beforeOffscreen, 'disconnected monitor does not restore offscreen');
+  reportedGeometry.monitors = [{position:{x:0,y:0},size:{width:1920,height:1080},scaleFactor:1}];
+  reportedGeometry.scale = 1;
   state.singlePaneWidth = 720;
   reportedGeometry.outer = null;
 })()`, context);
@@ -787,7 +827,7 @@ vm.runInContext(`
   const unread = {...dynamicChat,id:'unread',manualOrder:3,working:false,codexUnread:true};
   const waiting = {...working,id:'waiting',waitingForInput:true};
   assert.deepEqual(activityOrder([read,working,unread,waiting]).map(chat=>chat.id),['waiting','unread','working','read'], 'awaiting reply is above completed unread and working');
-  assert.ok(chatWorkCell(waiting,true).includes('待回答'), 'pending questions have a visible status');
+  assert.ok(chatWorkCell(waiting,true).includes('title="待回答" aria-label="待回答">?</span>'), 'pending questions use a question mark and retain the awaiting-reply tooltip and accessible label');
   const pendingDone = nativeChat({...waiting,working:false,executionStatus:'completed',codexUnread:true},0);
   assert.equal(chatRegion(pendingDone),'waiting');
   const answeredDone = nativeChat({...pendingDone,waitingForInput:false},0,pendingDone);

@@ -40,6 +40,10 @@ Creating a conversation in a project uses the project path, not the deprecated `
 
 ## 3. Codex App MCP
 
+Pipe discovery prefers `codex-app-tools-*` and retains `codex-browser-use-*` for older Desktop versions. Current browser pipes no longer register App Tools; calling `tools/list` on them returns `No handler registered for method: tools/list`. Each candidate is still checked for the required tool, using the namespace returned by its catalog. Chat pinning, project pinning, rename, archive/unarchive, and usage queries share this discovery path.
+
+The ignored `codex_app_mcp::tests::live_app_tool_catalog_matches_action_arguments` test checks live tool names, required fields, and argument types without modifying chats. `reads_live_usage_limits_over_mcp` verifies an external end-to-end read using an existing thread ID. Catalog checks do not replace readback verification of actual write operations.
+
 Write operations are off by default and must be explicitly enabled in settings. Each operation:
 
 1. Rediscovers available Codex App MCP tools.

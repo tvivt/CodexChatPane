@@ -81,9 +81,9 @@ struct ToolConfig {
     font_row: f64,
     window_width: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    window_x: Option<f64>,
+    window_physical_x: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    window_y: Option<f64>,
+    window_physical_y: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_height: Option<f64>,
     #[serde(default = "default_show_date_bars")]
@@ -112,8 +112,8 @@ impl Default for ToolConfig {
             font_pane: default_font_pane(),
             font_row: default_font_row(),
             window_width: None,
-            window_x: None,
-            window_y: None,
+            window_physical_x: None,
+            window_physical_y: None,
             window_height: None,
             show_date_bars: true,
             preview_enabled: false,
@@ -143,7 +143,7 @@ fn normalize_tool_config(mut config: ToolConfig) -> Result<ToolConfig, String> {
     if let Some(width) = config.window_width {
         config.window_width = Some(clamp_window_width(width).ok_or("工具配置值无效")?);
     }
-    for coordinate in [&mut config.window_x, &mut config.window_y] {
+    for coordinate in [&mut config.window_physical_x, &mut config.window_physical_y] {
         if let Some(value) = coordinate {
             if !value.is_finite() {
                 return Err("工具配置值无效".into());
@@ -1123,6 +1123,33 @@ mod tests {
         assert!(!toml::to_string(&legacy)
             .unwrap()
             .contains("codexMcpEnabled"));
+    }
+
+    #[test]
+    fn physical_window_position_replaces_legacy_coordinates() {
+        let legacy = toml::from_str::<ToolConfig>("windowX = -1872.0\nwindowY = 93.0\n").unwrap();
+        assert_eq!(legacy.window_physical_x, None);
+        assert_eq!(legacy.window_physical_y, None);
+        let serialized = toml::to_string(&legacy).unwrap();
+        assert!(!serialized.contains("windowX"));
+        assert!(!serialized.contains("windowY"));
+        let config = normalize_tool_config(ToolConfig {
+            window_physical_x: Some(-3743.6),
+            window_physical_y: Some(186.2),
+            ..ToolConfig::default()
+        })
+        .unwrap();
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("windowPhysicalX = -3744.0"));
+        assert!(serialized.contains("windowPhysicalY = 186.0"));
+        let parsed = toml::from_str::<ToolConfig>(&serialized).unwrap();
+        assert_eq!(parsed.window_physical_x, Some(-3744.0));
+        assert_eq!(parsed.window_physical_y, Some(186.0));
+        assert!(normalize_tool_config(ToolConfig {
+            window_physical_x: Some(f64::NAN),
+            ..ToolConfig::default()
+        })
+        .is_err());
     }
 
     #[test]

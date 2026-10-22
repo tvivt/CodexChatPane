@@ -14,6 +14,8 @@ use std::{
 };
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const APP_TOOLS_PIPE_PREFIX: &str = "codex-app-tools-";
+const LEGACY_PIPE_PREFIX: &str = "codex-browser-use-";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(20);
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -217,21 +219,33 @@ fn discover_pipe_paths() -> Vec<String> {
     let Ok(entries) = fs::read_dir(r"\\.\pipe\") else {
         return Vec::new();
     };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("codex-browser-use-")
-                .then(|| parse_pipe_path(&name))
-                .flatten()
+    ordered_pipe_paths(
+        entries
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned()),
+    )
+}
+
+fn ordered_pipe_paths(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut paths: Vec<_> = names
+        .filter(|name| {
+            name.starts_with(APP_TOOLS_PIPE_PREFIX) || name.starts_with(LEGACY_PIPE_PREFIX)
         })
-        .collect()
+        .filter_map(|name| parse_pipe_path(&name))
+        .collect();
+    paths.sort_by_key(|path| {
+        (
+            !path.starts_with(&format!(r"\\.\pipe\{APP_TOOLS_PIPE_PREFIX}")),
+            path.clone(),
+        )
+    });
+    paths
 }
 
 fn parse_pipe_path(command_line: &str) -> Option<String> {
-    let marker = "codex-browser-use-";
-    let start = command_line.rfind(marker)?;
+    let start = [APP_TOOLS_PIPE_PREFIX, LEGACY_PIPE_PREFIX]
+        .iter()
+        .find_map(|marker| command_line.rfind(marker))?;
     let name: String = command_line[start..]
         .chars()
         .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
@@ -753,6 +767,83 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[ignore = "reads the live Codex Desktop tool catalog without changing chats"]
+    fn live_app_tool_catalog_matches_action_arguments() {
+        let (path, _) = super::wait_for_tool("get_usage_limits", super::DISCOVERY_TIMEOUT).unwrap();
+        let mut client = super::RpcClient::connect(&path).unwrap();
+        let catalog = client
+            .request("tools/list", json!({"threadStartKind":"all"}))
+            .unwrap();
+        let tools = catalog["tools"].as_array().unwrap();
+        let mut cases = vec![
+            ("get_usage_limits", json!({})),
+            (
+                "move_project_to_sidebar_section",
+                json!({"projectId":"catalog-only", "sectionId":"pinned"}),
+            ),
+            (
+                "move_project_to_sidebar_section",
+                json!({"projectId":"catalog-only", "sectionId":null}),
+            ),
+        ];
+        for (action, title, enabled) in [
+            ("rename", Some("Catalog validation"), None),
+            ("pin", None, Some(true)),
+            ("pin", None, Some(false)),
+            ("archive", None, Some(true)),
+            ("archive", None, Some(false)),
+        ] {
+            cases.push(action_request("catalog-only", action, title, enabled).unwrap());
+        }
+        for (name, arguments) in cases {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing tool: {name}"));
+            assert!(tool["namespace"]
+                .as_str()
+                .is_some_and(|name| !name.is_empty()));
+            let schema = &tool["inputSchema"];
+            let properties = schema["properties"].as_object().unwrap();
+            for key in arguments.as_object().unwrap().keys() {
+                assert!(
+                    properties.contains_key(key),
+                    "{name} no longer accepts {key}"
+                );
+            }
+            for required in schema["required"].as_array().into_iter().flatten() {
+                assert!(
+                    arguments.get(required.as_str().unwrap()).is_some(),
+                    "{name} now requires {required}"
+                );
+            }
+            for (key, value) in arguments.as_object().unwrap() {
+                let property = &properties[key];
+                let branches = property["anyOf"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_else(|| vec![property.clone()]);
+                let kind = if value.is_null() {
+                    "null"
+                } else if value.is_boolean() {
+                    "boolean"
+                } else {
+                    "string"
+                };
+                assert!(
+                    branches.iter().any(|branch| branch["type"] == kind),
+                    "{name}.{key} changed its type"
+                );
+            }
+            println!(
+                "catalog_ok tool={name} argument_keys={:?}",
+                arguments.as_object().unwrap().keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     #[ignore = "temporarily restores a real archived thread; requires CODEX_PANE_VERIFY_THREAD"]
     fn restores_archived_thread_over_external_mcp() {
         let target = std::env::var("CODEX_PANE_VERIFY_THREAD").unwrap();
@@ -793,6 +884,31 @@ mod tests {
         assert_eq!(
             parse_pipe_path(line).as_deref(),
             Some(r"\\.\pipe\codex-browser-use-1234-abcd")
+        );
+        let current =
+            r#"env={\"CODEX_APP_TOOLS_PIPE_PATH\"=\"\\\\.\\pipe\\codex-app-tools-1234-abcd\"}"#;
+        assert_eq!(
+            parse_pipe_path(current).as_deref(),
+            Some(r"\\.\pipe\codex-app-tools-1234-abcd")
+        );
+        assert_eq!(
+            super::ordered_pipe_paths(
+                [
+                    "codex-browser-use-z".into(),
+                    "codex-computer-use-other".into(),
+                    "codex-app-tools-b".into(),
+                    "not-codex-app-tools-other".into(),
+                    "codex-app-tools-a".into(),
+                    "codex-browser-use-a".into(),
+                ]
+                .into_iter()
+            ),
+            vec![
+                r"\\.\pipe\codex-app-tools-a",
+                r"\\.\pipe\codex-app-tools-b",
+                r"\\.\pipe\codex-browser-use-a",
+                r"\\.\pipe\codex-browser-use-z",
+            ]
         );
         let tools =
             json!({"tools": [{"name": "set_thread_title", "namespace": "codex-app-tools"}]});

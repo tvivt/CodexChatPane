@@ -78,8 +78,8 @@ const state = {
   fontPane: 13,
   fontRow: 11.5,
   singlePaneWidth: 720,
-  windowX: null,
-  windowY: null,
+  windowPhysicalX: null,
+  windowPhysicalY: null,
   windowHeight: null,
   recycleHeight: 148,
   chatTimelineHeight: 210,
@@ -251,7 +251,7 @@ function applyFontSize() {
   root.setProperty('--font-row', `${state.fontRow}px`);
 }
 state.singlePaneWidth = clampWindowWidth(state.singlePaneWidth);
-const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowX:finiteNumber(state.windowX),windowY:finiteNumber(state.windowY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),previewEnabled:Boolean(state.previewEnabled),logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',remoteDebuggingPort:state.remoteDebuggingPort,codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
+const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowPhysicalX:finiteNumber(state.windowPhysicalX),windowPhysicalY:finiteNumber(state.windowPhysicalY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),previewEnabled:Boolean(state.previewEnabled),logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',remoteDebuggingPort:state.remoteDebuggingPort,codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
 const configWindowMode = config => ['normal','codex','global'].includes(config.windowMode) ? config.windowMode : typeof config.windowPinned === 'boolean' ? (config.windowPinned ? 'global' : 'normal') : state.windowMode;
 const saveToolConfig = () => nativeInvoke?.('save_tool_config',{config:toolConfig()}).catch(error => showToast(t('无法保存工具配置'),String(error),'error'));
 function readFontConfig(config, key, field) {
@@ -270,8 +270,8 @@ async function loadToolConfig() {
       readFontConfig(config, 'fontPane', 'fontPane');
       readFontConfig(config, 'fontRow', 'fontRow');
       if (Number.isFinite(config.windowWidth)) state.singlePaneWidth = clampWindowWidth(config.windowWidth);
-      if (Number.isFinite(config.windowX)) state.windowX = config.windowX;
-      if (Number.isFinite(config.windowY)) state.windowY = config.windowY;
+      if (Number.isFinite(config.windowPhysicalX)) state.windowPhysicalX = config.windowPhysicalX;
+      if (Number.isFinite(config.windowPhysicalY)) state.windowPhysicalY = config.windowPhysicalY;
       if (Number.isFinite(config.windowHeight)) state.windowHeight = clampWindowHeight(config.windowHeight);
       if (typeof config.showDateBars === 'boolean') state.showDateBars = config.showDateBars;
       if (typeof config.previewEnabled === 'boolean') state.previewEnabled = config.previewEnabled;
@@ -1352,7 +1352,7 @@ async function syncWindowState() {
   }
 }
 
-async function logicalWindowGeometry() {
+async function windowGeometry() {
   const sizeMethod = nativeWindow?.innerSize || nativeWindow?.outerSize;
   if (!sizeMethod) return null;
   const [size, position, scale] = await Promise.all([
@@ -1363,10 +1363,12 @@ async function logicalWindowGeometry() {
   const factor = Number.isFinite(scale) && scale > 0 ? scale : 1;
   if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height)) return null;
   return {
-    x: finiteNumber(position?.x) == null ? null : position.x / factor,
-    y: finiteNumber(position?.y) == null ? null : position.y / factor,
+    x: finiteNumber(position?.x),
+    y: finiteNumber(position?.y),
     width: size.width / factor,
-    height: size.height / factor
+    height: size.height / factor,
+    physicalWidth: size.width,
+    physicalHeight: size.height
   };
 }
 function validWindowGeometry(geometry) {
@@ -1374,45 +1376,46 @@ function validWindowGeometry(geometry) {
     && geometry.width >= WINDOW_WIDTH_MIN && geometry.width <= WINDOW_WIDTH_MAX
     && geometry.height >= WINDOW_HEIGHT_MIN && geometry.height <= WINDOW_HEIGHT_MAX;
 }
-function visibleWindowGeometry(geometry) {
+async function visibleWindowGeometry(geometry) {
   if (!Number.isFinite(geometry?.x) || !Number.isFinite(geometry?.y)) return true;
-  const screen = window.screen || {};
-  const left = Number.isFinite(screen.availLeft) ? screen.availLeft : 0;
-  const top = Number.isFinite(screen.availTop) ? screen.availTop : 0;
-  const width = Number(screen.availWidth || screen.width || window.innerWidth);
-  const height = Number(screen.availHeight || screen.height || window.innerHeight);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return true;
-  return geometry.x < left + width && geometry.x + geometry.width > left
-    && geometry.y < top + height && geometry.y + geometry.height > top;
+  const monitors = await window.__TAURI__?.window?.availableMonitors?.() || [];
+  return monitors.some(({position, size, scaleFactor}) => {
+    const width = geometry.physicalWidth ?? geometry.width * scaleFactor;
+    const height = geometry.physicalHeight ?? geometry.height * scaleFactor;
+    return geometry.x < position.x + size.width && geometry.x + width > position.x
+      && geometry.y < position.y + size.height && geometry.y + height > position.y;
+  });
 }
 let windowRestoreDone = false;
 async function restoreWindowGeometry() {
   try {
     if (!nativeWindow || state.windowMaximized) return;
-    const current = await logicalWindowGeometry();
+    let current = await windowGeometry();
     if (!current) return;
     const target = {
-      x: finiteNumber(state.windowX),
-      y: finiteNumber(state.windowY),
+      x: finiteNumber(state.windowPhysicalX),
+      y: finiteNumber(state.windowPhysicalY),
       width: clampWindowWidth(state.singlePaneWidth),
       height: finiteNumber(state.windowHeight) == null ? clampWindowHeight(current.height) : clampWindowHeight(state.windowHeight)
     };
     if (!validWindowGeometry(target)) return;
+    const PhysicalPosition = window.__TAURI__?.dpi?.PhysicalPosition;
+    if (PhysicalPosition && nativeWindow.setPosition && Number.isFinite(target.x) && Number.isFinite(target.y)
+      && await visibleWindowGeometry(target)
+      && (Math.abs((current.x ?? target.x) - target.x) > 1 || Math.abs((current.y ?? target.y) - target.y) > 1)) {
+      await nativeWindow.setPosition(new PhysicalPosition(target.x, target.y));
+      current = await windowGeometry() || current;
+    }
     const LogicalSize = window.__TAURI__?.dpi?.LogicalSize;
     if (LogicalSize && nativeWindow.setSize
       && (Math.abs(current.width - target.width) > 1 || Math.abs(current.height - target.height) > 1)) {
       await nativeWindow.setSize(new LogicalSize(target.width, target.height));
     }
-    const LogicalPosition = window.__TAURI__?.dpi?.LogicalPosition;
-    if (LogicalPosition && nativeWindow.setPosition && Number.isFinite(target.x) && Number.isFinite(target.y)
-      && visibleWindowGeometry(target)
-      && (Math.abs((current.x ?? target.x) - target.x) > 1 || Math.abs((current.y ?? target.y) - target.y) > 1)) {
-      await nativeWindow.setPosition(new LogicalPosition(target.x, target.y));
-    }
   } catch (error) {
     showToast(t('无法恢复窗口几何'), String(error), 'error');
   } finally {
     windowRestoreDone = true;
+    rememberWindowGeometry();
   }
 }
 let rememberWindowTimer = 0;
@@ -1420,22 +1423,25 @@ function rememberWindowGeometry() {
   if (!windowRestoreDone) return;
   clearTimeout(rememberWindowTimer);
   rememberWindowTimer = setTimeout(async () => {
-    if (state.windowMaximized) return;
-    const geometry = await logicalWindowGeometry();
-    if (!validWindowGeometry(geometry) || !visibleWindowGeometry(geometry)) return;
-    const width = clampWindowWidth(geometry.width), height = clampWindowHeight(geometry.height);
-    const moved = Number.isFinite(geometry.x) && Number.isFinite(geometry.y)
-      && (Math.abs((state.windowX ?? geometry.x) - geometry.x) >= 1 || Math.abs((state.windowY ?? geometry.y) - geometry.y) >= 1);
-    const resized = Math.abs(width - state.singlePaneWidth) >= 1 || Math.abs(height - (state.windowHeight ?? height)) >= 1;
-    if (!moved && !resized) return;
-    if (Number.isFinite(geometry.x) && Number.isFinite(geometry.y)) {
-      state.windowX = geometry.x;
-      state.windowY = geometry.y;
-    }
-    state.singlePaneWidth = width;
-    state.windowHeight = height;
-    savePreferences();
-    void saveToolConfig();
+    try {
+      if (state.windowMaximized) return;
+      const geometry = await windowGeometry();
+      if (!validWindowGeometry(geometry) || !await visibleWindowGeometry(geometry)) return;
+      const width = clampWindowWidth(geometry.width), height = clampWindowHeight(geometry.height);
+      const moved = Number.isFinite(geometry.x) && Number.isFinite(geometry.y)
+        && (state.windowPhysicalX == null || state.windowPhysicalY == null
+          || Math.abs(state.windowPhysicalX - geometry.x) >= 1 || Math.abs(state.windowPhysicalY - geometry.y) >= 1);
+      const resized = Math.abs(width - state.singlePaneWidth) >= 1 || Math.abs(height - (state.windowHeight ?? height)) >= 1;
+      if (!moved && !resized) return;
+      if (Number.isFinite(geometry.x) && Number.isFinite(geometry.y)) {
+        state.windowPhysicalX = geometry.x;
+        state.windowPhysicalY = geometry.y;
+      }
+      state.singlePaneWidth = width;
+      state.windowHeight = height;
+      savePreferences();
+      void saveToolConfig();
+    } catch (error) { showToast(t('无法保存工具配置'), String(error), 'error'); }
   },120);
 }
 
@@ -1797,7 +1803,7 @@ function chatLeadShowsDuration(chat) {
   return chat.waitingForInput || Boolean(chatDiagnostic(chat)) || chat.working || Boolean(chat.attentionAt);
 }
 function chatWorkStatus(chat) {
-  if (chat.waitingForInput) return ui`<span class="chat-work-status waiting-input" title="${t('待回答')}" aria-label="${t('待回答')}">${t('待回答')}</span>`;
+  if (chat.waitingForInput) return ui`<span class="chat-work-status waiting-input" title="${t('待回答')}" aria-label="${t('待回答')}">?</span>`;
   const issue = chatDiagnostic(chat);
   return issue ? diagnosticIcon('chat-work-status',chat) : chat.working ? workingIndicator('chat-work-status',chat) : chat.attentionAt ? ui`<span class="chat-work-status attention" aria-label="${t('完成待查看')}"></span>` : '';
 }

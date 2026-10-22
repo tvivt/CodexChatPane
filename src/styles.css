@@ -1068,7 +1068,7 @@ body.metrics-window .project-chooser.chat-metrics-dialog { position:fixed; inset
 .chat-work-cell.date-cell, .timeline-row-date { font:inherit; font-size:var(--font-row); line-height:calc(var(--font-row) + 6.5px); }
 .chat-work-day, .timeline-row-date { font-size:calc(var(--font-row) - 0.5px); }
 .chat-work-status { width:14px; height:14px; display:grid; place-items:center; }
-.chat-work-status.waiting-input { width:100%; display:block; overflow:hidden; text-overflow:ellipsis; text-align:center; font-size:10px; white-space:nowrap; }
+.project-state-slot.waiting-input, .chat-work-status.waiting-input { font:700 9px/15px "Cascadia Mono",Consolas,monospace; }
 .chat-work-status.attention { width:7px; height:7px; border-radius:50%; background:var(--danger); }
 .chat-work-day { width:var(--chat-lead,var(--row-status)); overflow:hidden; text-overflow:ellipsis; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }
 .chat-work-time { width:var(--chat-lead,var(--row-status)); font:600 9px/15px "Cascadia Mono",Consolas,monospace; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }
