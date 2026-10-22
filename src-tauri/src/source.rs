@@ -7,6 +7,7 @@ use std::{
 };
 
 mod diagnostics;
+mod questions;
 mod rate_limits;
 mod rollout;
 use diagnostics::Diagnostic;
@@ -85,6 +86,9 @@ pub struct ChatSnapshot {
     pub codex_pinned: bool,
     pub codex_unread: Option<bool>,
     pub working: bool,
+    pub waiting_for_input: bool,
+    #[serde(skip)]
+    questions: questions::Questions,
     pub last_user_message_at: i64,
     pub execution_started_at: Option<i64>,
     pub execution_ms: Option<i64>,
@@ -106,6 +110,7 @@ struct ThreadActivity {
     last_response_at: i64,
     observed: bool,
     waiting_for_tool: bool,
+    questions: questions::Questions,
 }
 
 fn execution_duration(
@@ -136,6 +141,16 @@ impl ThreadActivity {
             self.diagnostic = None;
         }
         if !self.working {
+            if self
+                .diagnostic
+                .as_ref()
+                .is_some_and(|issue| issue.kind == "noResponse")
+            {
+                self.diagnostic = None;
+            }
+            return;
+        }
+        if self.questions.is_pending() {
             if self
                 .diagnostic
                 .as_ref()
@@ -299,6 +314,7 @@ fn scan_path_with_previous(
                     ThreadActivity {
                         turn_id: chat.turn_id.clone(),
                         working: chat.working,
+                        questions: chat.questions.clone(),
                         last_user_message_at: chat.last_user_message_at,
                         execution_started_at: chat.execution_started_at,
                         execution_ms: chat.execution_ms,
@@ -360,6 +376,10 @@ fn scan_path_with_previous(
                 )
             });
             if let Some(activity) = projected {
+                let mut activity = activity;
+                if let Some(previous) = thread_activity.get(&thread.id) {
+                    activity.questions.merge(&previous.questions);
+                }
                 thread_activity.insert(thread.id.clone(), activity);
             }
             // Closed compressed logs already have a projection; avoid decoding the whole archive at startup.
@@ -459,6 +479,10 @@ fn scan_path_with_previous(
             codex_pinned,
             codex_unread,
             working: activity.is_some_and(|activity| activity.working),
+            waiting_for_input: activity.is_some_and(|activity| activity.questions.is_pending()),
+            questions: activity
+                .map(|activity| activity.questions.clone())
+                .unwrap_or_default(),
             last_user_message_at: activity
                 .map(|activity| activity.last_user_message_at)
                 .filter(|value| *value > 0)
@@ -571,7 +595,9 @@ fn merge_rollout_activity(
     id: &str,
     mut activity: ThreadActivity,
 ) {
-    if let Some(current) = activities.get(id) {
+    if let Some(current) = activities.get_mut(id) {
+        current.questions.merge(&activity.questions);
+        activity.questions.merge(&current.questions);
         if current.turn_id.is_some() && current.turn_id == activity.turn_id {
             // Older task_complete records do not carry failure details.
             if current.execution_status.as_deref() == Some("failed")
@@ -625,6 +651,16 @@ fn refresh_activities_at(
 ) -> Result<ActivityUpdate, String> {
     let mut ids: HashSet<String> = ids.iter().cloned().collect();
     let mut history_ids: HashSet<String> = history_ids.iter().cloned().collect();
+    let mut questions_only = HashSet::new();
+    if history_changed {
+        // Async answers can arrive after turn completion without changing its status.
+        for chat in snapshot.chats.iter().filter(|chat| chat.waiting_for_input) {
+            if ids.insert(chat.id.clone()) {
+                questions_only.insert(chat.id.clone());
+            }
+            history_ids.insert(chat.id.clone());
+        }
+    }
     let summaries = if history_changed {
         let summaries = read_history_summaries(&home.join("thread_history_1.sqlite"))?;
         let owners: HashMap<_, _> = snapshot
@@ -642,6 +678,7 @@ fn refresh_activities_at(
                 if let Some(owner) = owners.get(id.as_str()) {
                     ids.insert((*owner).clone());
                     history_ids.insert((*owner).clone());
+                    questions_only.remove(*owner);
                 }
             }
         }
@@ -685,6 +722,7 @@ fn refresh_activities_at(
             ThreadActivity {
                 turn_id: chat.turn_id.clone(),
                 working: chat.working,
+                questions: chat.questions.clone(),
                 last_user_message_at: chat.last_user_message_at,
                 execution_started_at: chat.execution_started_at,
                 execution_ms: chat.execution_ms,
@@ -699,13 +737,18 @@ fn refresh_activities_at(
                 if let Some(activity) =
                     read_thread_activity_for(connection, id, &chat.rollout_path, cutoff, has_error)?
                 {
+                    let mut activity = activity;
+                    activity.questions.merge(&chat.questions);
                     activities.insert(id.clone(), activity);
                 }
             }
         }
-        if let Ok(activity) = read_rollout_snapshot(&chat.rollout_path, cutoff) {
-            if let Some(activity) = activity {
-                merge_rollout_activity(&mut activities, id, activity);
+        // An answer-only history notification must not decode unrelated compressed archives.
+        if !questions_only.contains(id) {
+            if let Ok(activity) = read_rollout_snapshot(&chat.rollout_path, cutoff) {
+                if let Some(activity) = activity {
+                    merge_rollout_activity(&mut activities, id, activity);
+                }
             }
         }
     }
@@ -748,6 +791,8 @@ fn refresh_activities_at(
             );
             chat.turn_id = activity.turn_id;
             chat.working = activity.working;
+            chat.waiting_for_input = activity.questions.is_pending();
+            chat.questions = activity.questions;
             chat.last_user_message_at = if activity.last_user_message_at > 0 {
                 activity.last_user_message_at
             } else {
@@ -805,11 +850,16 @@ fn read_thread_activity_for(
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
     let mut rows = statement.query([id]).map_err(|error| error.to_string())?;
-    rows.next()
+    let mut activity = rows
+        .next()
         .map_err(|error| error.to_string())?
         .map(|row| activity_from_row(row, cutoff).map(|(_, activity)| activity))
         .transpose()
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if let Some(activity) = activity.as_mut() {
+        activity.questions = questions::Questions::read(connection, id)?;
+    }
+    Ok(activity)
 }
 
 fn read_thread_activity(
@@ -1676,9 +1726,15 @@ mod tests {
                 );
             }
             println!(
-                "scan_ms={} chats={} states={counts:?} diagnostics={diagnostics:?}",
+                "scan_ms={} chats={} states={counts:?} diagnostics={diagnostics:?} waiting={:?}",
                 started.elapsed().as_millis(),
-                snapshot.chats.len()
+                snapshot.chats.len(),
+                snapshot
+                    .chats
+                    .iter()
+                    .filter(|chat| chat.waiting_for_input)
+                    .map(|chat| &chat.id)
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -1779,6 +1835,107 @@ mod tests {
         assert_eq!(activity.last_user_message_at, 140000);
         assert_eq!(activity.execution_started_at, Some(140000));
         assert_eq!(activity.activity_at, 140000);
+    }
+
+    #[test]
+    fn pending_questions_survive_completed_compressed_history_and_clear_on_answer() {
+        let directory = tempdir().unwrap();
+        let home = directory.path();
+        fs::write(
+            home.join(".codex-global-state.json"),
+            r#"{"local-projects":{}}"#,
+        )
+        .unwrap();
+        let database = home.join("state_5.sqlite");
+        let catalog = Connection::open(&database).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,name TEXT,created_at INTEGER,updated_at INTEGER,archived INTEGER,rollout_path TEXT,source TEXT,thread_source TEXT,cwd TEXT,project_id TEXT);").unwrap();
+        let path = home.join("rollout-parent_fragment.jsonl");
+        fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"latest\",\"started_at\":10,\"completed_at\":20}}\n").unwrap();
+        crate::rollout_log::compress_fixture(&path);
+        catalog
+            .execute(
+                "INSERT INTO threads VALUES('parent','test',NULL,1,2,0,?1,'vscode','user','',NULL)",
+                [path.to_str().unwrap()],
+            )
+            .unwrap();
+        let history = Connection::open(home.join("thread_history_1.sqlite")).unwrap();
+        history.execute_batch("CREATE TABLE thread_turns(thread_id TEXT,turn_id TEXT,rollout_ordinal INTEGER,status TEXT,started_at INTEGER,completed_at INTEGER,duration_ms INTEGER,first_user_item_id TEXT); CREATE TABLE thread_items(thread_id TEXT,turn_id TEXT,item_type TEXT,created_at_ms INTEGER,rollout_ordinal INTEGER,item_json TEXT); INSERT INTO thread_turns VALUES('fragment','latest',10,'completed',10,20,10000,'user');").unwrap();
+        let question = serde_json::json!({"type":"agentMessage","id":"call-q","delivery":"async","questions":[{"title":"question"}]}).to_string();
+        history
+            .execute(
+                "INSERT INTO thread_items VALUES('fragment','older','agentMessage',1000,1,?1)",
+                [&question],
+            )
+            .unwrap();
+        let mut snapshot = scan_path(&database, home).unwrap();
+        assert!(snapshot.chats[0].waiting_for_input);
+        assert!(!snapshot.chats[0].working);
+        assert_eq!(
+            snapshot.chats[0].execution_status.as_deref(),
+            Some("completed")
+        );
+        let cached = scan_path_with_previous(&database, home, Some(&snapshot)).unwrap();
+        assert!(cached.chats[0].waiting_for_input);
+        let answer = serde_json::json!({"type":"userMessage","content":[{"type":"text","text":"<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"call-q\\\",0]\",\"answer\":\"yes\"}]\n</send_user_message_question_reply>"}]}).to_string();
+        history
+            .execute(
+                "INSERT INTO thread_items VALUES('fragment','latest','userMessage',21000,11,?1)",
+                [&answer],
+            )
+            .unwrap();
+        let update = refresh_activities_at(&mut snapshot, &[], &[], true, home, Some(100)).unwrap();
+        assert_eq!(
+            update.chats.len(),
+            1,
+            "answers refresh even when the turn status is unchanged"
+        );
+        assert!(!update.chats[0].waiting_for_input);
+        assert_eq!(
+            update.chats[0].execution_status.as_deref(),
+            Some("completed")
+        );
+        assert!(!scan_path(&database, home).unwrap().chats[0].waiting_for_input);
+        let next = serde_json::json!({"type":"agentMessage","id":"next-question","questions":[{"title":"Continue?"}]}).to_string();
+        history
+            .execute(
+                "INSERT INTO thread_items VALUES('fragment','latest','agentMessage',22000,12,?1)",
+                [&next],
+            )
+            .unwrap();
+        let ids = vec!["parent".to_string()];
+        assert!(
+            refresh_activities_at(&mut snapshot, &ids, &ids, false, home, Some(100))
+                .unwrap()
+                .chats[0]
+                .waiting_for_input
+        );
+        let ordinary = serde_json::json!({"type":"userMessage","content":[{"type":"text","text":"先这样吧，明天我再试登录"}]}).to_string();
+        history
+            .execute(
+                "INSERT INTO thread_items VALUES('fragment','latest','userMessage',23000,13,?1)",
+                [&ordinary],
+            )
+            .unwrap();
+        let cleared =
+            refresh_activities_at(&mut snapshot, &[], &[], true, home, Some(100)).unwrap();
+        assert!(!cleared.chats[0].waiting_for_input);
+        assert_eq!(
+            cleared.chats[0].execution_status.as_deref(),
+            Some("completed")
+        );
+        assert!(
+            !refresh_activities_at(&mut snapshot, &ids, &[], false, home, Some(100))
+                .unwrap()
+                .chats[0]
+                .waiting_for_input
+        );
+        assert!(
+            !scan_path_with_previous(&database, home, Some(&snapshot))
+                .unwrap()
+                .chats[0]
+                .waiting_for_input
+        );
+        assert!(!scan_path(&database, home).unwrap().chats[0].waiting_for_input);
     }
 
     #[test]

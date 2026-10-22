@@ -18,6 +18,7 @@ export function setLanguage(value) {
 
 const english = {
   '工具': 'Tool', '模型': 'Model', '状态': 'Status', '已完成': 'Completed', '进行中': 'In progress', '已中断': 'Interrupted', '等待中': 'Pending', '已关闭': 'Closed',
+  '待回答': 'Awaiting reply', ' 个对话待回答': ' chats awaiting reply',
   '对话详情': 'Conversation details', '点击查看对话详情；尚未读取统计': 'Click for conversation details; metrics have not been loaded',
   '最近完成轮': 'Latest completed turn', '首 token 均值：': 'Mean first token: ', '原生首 token：': 'Native first token: ', '估算生成速度，含推理：': 'Estimated generation speed, including reasoning: ',
   'token 覆盖率：': 'Token coverage: ', '次请求': 'requests', '缓存命中率：': 'Cache hit rate: ',

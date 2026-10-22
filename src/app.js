@@ -335,7 +335,7 @@ function nativeProject(project, index, previous) {
   };
 }
 
-const chatRegion = chat => chat.working ? 'working' : chat.codexUnread === true ? 'unread' : 'read';
+const chatRegion = chat => chat.waitingForInput ? 'waiting' : chat.working ? 'working' : chat.codexUnread === true ? 'unread' : 'read';
 function nativeChat(chat, index, previous) {
   previous ||= folderPreferences.chats?.[chat.id];
   const timelineAt = chat.activityAt || chat.lastUserMessageAt || chat.updatedAt || chat.createdAt;
@@ -353,7 +353,8 @@ function nativeChat(chat, index, previous) {
   const diagnostic = chat.diagnostic || (failed ? {kind: "other", severity: "error", message: t("Codex 返回失败，但未记录错误原因"), at: activityAt, source: "thread-history"} : null);
   const localDiagnostic = !sourceChanged ? previous?.localDiagnostic || null : null;
   const working = Boolean(chat.working);
-  const region = working ? 'working' : codexUnread === true ? 'unread' : 'read';
+  const waitingForInput = Boolean(chat.waitingForInput);
+  const region = chatRegion({working, codexUnread, waitingForInput});
   return {
     id: chat.id,
     projectId: chat.projectId,
@@ -363,6 +364,7 @@ function nativeChat(chat, index, previous) {
     starred: Boolean(previous?.starred),
     codexUnread,
     working,
+    waitingForInput,
     lastUserMessageAt: chat.lastUserMessageAt || chat.updatedAt || chat.createdAt,
     attentionAt: completed && codexUnread === true ? activityAt : 0,
     completedAt: completed ? activityAt : previous?.completedAt || 0,
@@ -594,6 +596,7 @@ const projectFolders = project => Array.isArray(project?.folders) && project.fol
 const esc = value => String(value).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]);
 function projectRegion(project) {
   const rows = chats.filter(chat => chat.projectId === project.id && !effectiveReasons(chat).length);
+  if (rows.some(chat => chat.waitingForInput)) return 'waiting';
   if (rows.some(chat => chatRegion(chat) === 'unread')) return 'unread';
   if (rows.some(chat => chat.working)) return 'working';
   return 'read';
@@ -620,7 +623,7 @@ function sortProjects(rows) {
     const direction = sort === 'desc' ? -1 : 1;
     return [...ranked].sort((a, b) => direction * projectLabel(a).localeCompare(projectLabel(b), language()) || a.id.localeCompare(b.id));
   }
-  const rank = project => project.synthetic ? -1 : ({unread:0,working:1,read:2})[project.region || 'read'];
+  const rank = project => project.synthetic ? -1 : ({waiting:0,unread:1,working:2,read:3})[project.region || 'read'];
   return [...ranked].sort((a, b) => rank(a) - rank(b) || regionTimeCompare(a, b) || a.id.localeCompare(b.id));
 }
 function pinFirst(rows, isPinned) {
@@ -656,16 +659,17 @@ function projectStateIcon(project) {
 function projectRow(project, depth, inactive = false, showFolderInTip = false, showTotal = true, dynamicScope = '', sourceFolder = '') {
   const projectChats = chats.filter(chat => chat.projectId === project.id);
   const activity = activitySummary(projectChats);
-  const unread = projectChats.filter(chat => chat.codexUnread === true && !chat.working).length;
-  const working = projectChats.filter(chat => chat.working).length;
+  const waiting = activity.waiting;
+  const unread = projectChats.filter(chat => chatRegion(chat) === 'unread').length;
+  const working = activity.working;
   const projectIcon = projectStateIcon(project, inactive);
   const rowTitle = [project.name, showFolderInTip ? ui`文件夹：${projectFolders(project).join(', ') || t("根目录")}` : "", activity.title].filter(Boolean).join(" · ");
   const selected = state.selectedProjectIds.size ? state.selectedProjectIds.has(project.id) : !state.selectedProjectFolder && state.projectId === project.id;
-  const stateSlot = unread && working ? ui`<span class="row-status project-state-slot stacked"><span class="project-unread-dot"></span>${workingGlyph('project-working-dot')}</span>` : unread ? ui`<span class="row-status project-state-slot"><span class="project-unread-dot"></span></span>` : working ? ui`<span class="row-status project-state-slot">${workingGlyph('project-working-dot')}</span>` : '<span class="row-status project-state-slot"></span>';
+  const stateSlot = waiting ? ui`<span class="row-status project-state-slot waiting-input" title="${t('待回答')}" aria-label="${t('待回答')}">?</span>` : unread && working ? ui`<span class="row-status project-state-slot stacked"><span class="project-unread-dot"></span>${workingGlyph('project-working-dot')}</span>` : unread ? ui`<span class="row-status project-state-slot"><span class="project-unread-dot"></span></span>` : working ? ui`<span class="row-status project-state-slot">${workingGlyph('project-working-dot')}</span>` : '<span class="row-status project-state-slot"></span>';
   const total = showTotal ? projectChats.filter(chat => !effectiveReasons(chat).length).length : null;
   const check = !dynamicScope && state.selectedProjectIds.size ? rowCheck('project', project.id) : '';
   return ui`<div class="tree-row project-row ${project.synthetic ? "special-project" : ""} ${activity.className} ${selected ? "selected" : ""} ${check ? "has-check" : ""}" style="--depth:${depth}" data-project="${project.id}" data-project-folder="${esc(sourceFolder)}" ${dynamicScope ? ui`data-dynamic-item="${esc(project.id)}"` : ''} draggable="${!project.synthetic}" tabindex="0" title="${esc(rowTitle)}" aria-selected="${selected}">
-    ${check ? statusLead(check) : stateSlot}${projectTimeBar(projectChats)}${projectIcon}<span class="row-label"><span class="row-name" title="${esc(projectLabel(project))}">${esc(projectLabel(project))}</span>${total == null ? '' : ui`<span class="count">${total}</span>`}${unread ? ui`<span class="project-count-badge unread"><span></span>${unread}</span>` : ''}${working ? ui`<span class="project-count-badge working">${workingGlyph('badge-working-dot')}${working}</span>` : ''}</span><span class="row-end">${project.synthetic ? '' : projectStarButton(project) + projectPinButton(project)}</span>
+    ${check ? statusLead(check) : stateSlot}${projectTimeBar(projectChats)}${projectIcon}<span class="row-label"><span class="row-name" title="${esc(projectLabel(project))}">${esc(projectLabel(project))}</span>${total == null ? '' : ui`<span class="count">${total}</span>`}${waiting ? ui`<span class="project-count-badge waiting-input" title="${t('待回答')}">?${waiting}</span>` : ''}${unread ? ui`<span class="project-count-badge unread"><span></span>${unread}</span>` : ''}${working ? ui`<span class="project-count-badge working">${workingGlyph('badge-working-dot')}${working}</span>` : ''}</span><span class="row-end">${project.synthetic ? '' : projectStarButton(project) + projectPinButton(project)}</span>
   </div>`;
 }
 
@@ -1634,7 +1638,7 @@ function projectPinButton(project) {
 }
 const chatPriority = chat => chat.codexPinned ? 0 : 1;
 const regionTimeCompare = (a, b) => (b.regionEnteredAt || 0) - (a.regionEnteredAt || 0);
-const chatRegionRank = chat => ({unread:0,working:1,read:2})[chatRegion(chat)];
+const chatRegionRank = chat => ({waiting:0,unread:1,working:2,read:3})[chatRegion(chat)];
 const receivedOrderAt = chat => chat.regionEnteredAt || 0;
 const statusTimeCompare = (a,b) => chatRegionRank(a) - chatRegionRank(b) || regionTimeCompare(a, b) || a.id.localeCompare(b.id);
 const regionOrder = rows => [...rows].sort(statusTimeCompare);
@@ -1644,8 +1648,9 @@ const projectTimeBar = rows => chatStatusBar(rows.reduce((latest, chat) => !late
 const statusLead = inner => ui`<span class="row-status">${inner || ''}</span>`;
 
 function activitySummary(rows) {
-  const working = rows.filter(chat => chat.working).length;
-  const attention = rows.filter(chat => chat.attentionAt).length;
+  const waiting = rows.filter(chat => chat.waitingForInput).length;
+  const working = rows.filter(chat => chat.working && !chat.waitingForInput).length;
+  const attention = rows.filter(chat => chat.attentionAt && !chat.waitingForInput).length;
   const errors = rows.filter(chat => chat.error).length;
   const error = rows.filter(chat => chat.error && !chat.errorSeen).length;
   const acknowledgedError = rows.some(chat => chat.error && chat.errorSeen);
@@ -1654,26 +1659,28 @@ function activitySummary(rows) {
   const heat = !completedAt ? "old" : age <= 21600000 ? "recent" : age <= 172800000 ? "aging" : "old";
   const heatLabel = { recent: t("最近完成"), aging: t("较早完成"), old: completedAt ? t("很早完成") : t("无近期完成") }[heat];
   return {
+    waiting,
     working,
     attention,
     errors,
     className: ui`${working ? "has-working" : ""} ${attention ? "needs-attention" : ""} activity-${heat}`,
-    title: [error ? ui`${error} 个错误待查看` : "", acknowledgedError ? t("错误已查看") : "", working ? ui`${working} 个对话工作中` : "", attention ? ui`${attention} 个已完成对话待查看` : "", heatLabel].filter(Boolean).join(" · ")
+    title: [waiting ? ui`${waiting} 个对话待回答` : "", error ? ui`${error} 个错误待查看` : "", acknowledgedError ? t("错误已查看") : "", working ? ui`${working} 个对话工作中` : "", attention ? ui`${attention} 个已完成对话待查看` : "", heatLabel].filter(Boolean).join(" · ")
   };
 }
 
 function activityCounts(activity) {
-  return [activity.attention ? ui`<span class="attention-count" title="${activity.attention} 个已完成对话待查看">${activity.attention}</span>` : "", activity.working ? ui`<span class="working-count" title="${activity.working} 个对话工作中">${activity.working}</span>` : ""].filter(Boolean).join(" | ");
+  return [activity.waiting ? ui`<span class="waiting-count" title="${activity.waiting} 个对话待回答">${activity.waiting}</span>` : "", activity.attention ? ui`<span class="attention-count" title="${activity.attention} 个已完成对话待查看">${activity.attention}</span>` : "", activity.working ? ui`<span class="working-count" title="${activity.working} 个对话工作中">${activity.working}</span>` : ""].filter(Boolean).join(" | ");
 }
 
 function folderActivityCounts(activity, total) {
-  return [activity.attention ? ui`<span class="attention-count" title="${activity.attention} 个已完成对话待查看">${activity.attention}</span>` : "", activity.working ? ui`<span class="working-count" title="${activity.working} 个对话工作中">${activity.working}</span>` : "", total == null ? "" : String(total)].filter(Boolean).join(" | ");
+  return [activity.waiting ? ui`<span class="waiting-count" title="${activity.waiting} 个对话待回答">${activity.waiting}</span>` : "", activity.attention ? ui`<span class="attention-count" title="${activity.attention} 个已完成对话待查看">${activity.attention}</span>` : "", activity.working ? ui`<span class="working-count" title="${activity.working} 个对话工作中">${activity.working}</span>` : "", total == null ? "" : String(total)].filter(Boolean).join(" | ");
 }
 
 function projectActivityCounts(rows) {
   return folderActivityCounts({
-    attention: rows.filter(project => chats.some(chat => chat.projectId === project.id && chat.attentionAt)).length,
-    working: rows.filter(project => chats.some(chat => chat.projectId === project.id && chat.working)).length,
+    waiting: rows.filter(project => chats.some(chat => chat.projectId === project.id && chat.waitingForInput)).length,
+    attention: rows.filter(project => chats.some(chat => chat.projectId === project.id && chat.attentionAt && !chat.waitingForInput)).length,
+    working: rows.filter(project => chats.some(chat => chat.projectId === project.id && chat.working && !chat.waitingForInput)).length,
     errors: rows.filter(project => chats.some(chat => chat.projectId === project.id && chat.error)).length
   }, rows.length);
 }
@@ -1779,9 +1786,10 @@ function workCellDateLabel(at) {
   return zh || date.getFullYear() === now.getFullYear() ? monthDay : `${date.getFullYear()}-${monthDay}`;
 }
 function chatLeadShowsDuration(chat) {
-  return Boolean(chatDiagnostic(chat)) || chat.working || Boolean(chat.attentionAt);
+  return chat.waitingForInput || Boolean(chatDiagnostic(chat)) || chat.working || Boolean(chat.attentionAt);
 }
 function chatWorkStatus(chat) {
+  if (chat.waitingForInput) return ui`<span class="chat-work-status waiting-input" title="${t('待回答')}" aria-label="${t('待回答')}">${t('待回答')}</span>`;
   const issue = chatDiagnostic(chat);
   return issue ? diagnosticIcon('chat-work-status',chat) : chat.working ? workingIndicator('chat-work-status',chat) : chat.attentionAt ? ui`<span class="chat-work-status attention" aria-label="${t('完成待查看')}"></span>` : '';
 }
@@ -1950,7 +1958,7 @@ function chatRow(chat, timeline = false, showProject = timeline, compact = false
   const typeBtn = timeline ? '' : chatTypeButton(chat);
   const preview = timeline ? '' : chatPreviewIcon(chat);
   const lead = timeline ? '' : (check ? statusLead(check) : chatWorkCell(chat, true));
-  return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : oldDate ? "timeline-row with-date" : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
+  return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : oldDate ? "timeline-row with-date" : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt && !chat.waitingForInput ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
     ${lead}${chatStatusBar(chat)}${timeline ? ui`${!compact && !dynamicScope && oldDate ? timelineDate(chat.timelineAt) : ''}${chatWorkCell(chat)}` : typeBtn}
     ${globalTimeline ? globalContent : ui`<div class="chat-main"><div class="chat-title-line"><div class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</div></div>${timeline && compact || !meta ? "" : ui`<div class="chat-meta">${meta}</div>`}</div>`}
     ${dynamicScope ? ui`<div class="chat-actions">${codexActionButtons(chat)}</div>` : actions}${preview}
@@ -2169,7 +2177,7 @@ function globalChatRow(chat, scope = '', group = '', linkProject = false, showTy
   const projectName = projectLabel(project);
   const projectCell = (linkProject || scope) ? ui`<button type="button" class="global-chat-project project-link" data-action="select-project" data-id="${esc(project.id)}" title="${esc(projectName)}" aria-label="${esc(projectName)}">${esc(projectName)}</button>` : ui`<span class="global-chat-project" title="${esc(projectName)}">${esc(projectName)}</span>`;
   const preview = chatPreviewIcon(chat);
-  return ui`<div class="chat-row global-chat-row ${showType ? '' : 'without-type'} ${chat.attentionAt ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
+  return ui`<div class="chat-row global-chat-row ${showType ? '' : 'without-type'} ${chat.attentionAt && !chat.waitingForInput ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
     ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}${showType ? chatTypeButton(chat) : ''}<span class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</span><div class="chat-actions">${codexActionButtons(chat)}</div>${preview}
   </div>`;
 }

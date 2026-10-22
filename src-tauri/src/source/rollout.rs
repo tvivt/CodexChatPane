@@ -1,5 +1,5 @@
 use super::diagnostics::Diagnostic;
-use super::{seconds_or_millis, ThreadActivity};
+use super::{questions::Questions, seconds_or_millis, ThreadActivity};
 use crate::rollout_log;
 use serde::Deserialize;
 use serde_json::Value;
@@ -11,7 +11,7 @@ use std::{
     time::SystemTime,
 };
 
-// Content is reduced to presence flags; no model/user text is retained or sent to the UI.
+// Message text is inspected only while parsing; none is retained or sent to the status UI.
 #[derive(Deserialize)]
 struct Record {
     #[serde(rename = "type", default)]
@@ -27,35 +27,39 @@ struct Payload {
     role: Option<String>,
     turn_id: Option<String>,
     call_id: Option<String>,
+    name: Option<String>,
+    arguments: Option<String>,
+    item: Option<Value>,
     started_at: Option<i64>,
     completed_at: Option<i64>,
     duration_ms: Option<i64>,
     status: Option<String>,
     error: Option<Value>,
-    #[serde(default, deserialize_with = "content_present")]
-    content: bool,
+    #[serde(default)]
+    content: Value,
     #[serde(default, deserialize_with = "content_present")]
     summary: bool,
     #[serde(default, deserialize_with = "content_present")]
     encrypted_content: bool,
-    #[serde(default, deserialize_with = "content_present")]
-    message: bool,
+    #[serde(default)]
+    message: Value,
     #[serde(default, deserialize_with = "content_present")]
     text: bool,
 }
 
 fn content_present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
-    fn present(value: &Value) -> bool {
-        match value {
-            Value::String(text) => !text.trim().is_empty(),
-            Value::Array(items) => items.iter().any(present),
-            Value::Object(fields) => ["text", "content", "summary", "encrypted_content"]
-                .iter()
-                .any(|key| fields.get(*key).is_some_and(present)),
-            _ => false,
-        }
+    Value::deserialize(deserializer).map(|value| content_has_text(&value))
+}
+
+fn content_has_text(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => items.iter().any(content_has_text),
+        Value::Object(fields) => ["text", "content", "summary", "encrypted_content"]
+            .iter()
+            .any(|key| fields.get(*key).is_some_and(content_has_text)),
+        _ => false,
     }
-    Value::deserialize(deserializer).map(|value| present(&value))
 }
 
 #[derive(Default)]
@@ -69,6 +73,8 @@ struct Cursor {
     has_start: bool,
     pending_tools: HashSet<String>,
     pending_message: bool,
+    questions: Questions,
+    synchronous_questions: HashSet<String>,
 }
 
 impl Cursor {
@@ -78,6 +84,46 @@ impl Cursor {
             .timestamp
             .as_deref()
             .and_then(super::diagnostics::timestamp);
+        if record.kind == "event_msg" && payload.kind == "item_completed" {
+            if let Some(item) = &payload.item {
+                self.questions.item(item, at);
+            }
+        }
+        if record.kind == "event_msg" && payload.kind == "user_message" {
+            if let Some(message) = payload.message.as_str() {
+                self.questions
+                    .user_message(&serde_json::json!([{"text":message}]), at);
+            }
+        }
+        if record.kind == "response_item" {
+            if payload.kind == "message" && payload.role.as_deref() == Some("user") {
+                self.questions.user_message(&payload.content, at);
+            }
+            if payload.kind == "function_call"
+                && matches!(
+                    payload.name.as_deref(),
+                    Some("request_user_input" | "request_user_input_async")
+                )
+            {
+                if let (Some(call), Some(arguments)) = (&payload.call_id, &payload.arguments) {
+                    if let Ok(value) = serde_json::from_str::<Value>(arguments) {
+                        if let Some(questions) = value["questions"].as_array() {
+                            self.questions.add(call, questions.len(), at);
+                            if payload.name.as_deref() == Some("request_user_input") {
+                                self.synchronous_questions.insert(call.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            if payload.kind == "function_call_output" {
+                if let Some(call) = &payload.call_id {
+                    if self.synchronous_questions.remove(call) {
+                        self.questions.resolve_call(call);
+                    }
+                }
+            }
+        }
         if record.kind == "compacted" {
             if let (Some(activity), Some(at)) = (self.activity.as_mut(), at) {
                 if activity.working {
@@ -155,9 +201,11 @@ impl Cursor {
         let model_activity = record.kind == "response_item"
             && (payload.kind == "message"
                 && payload.role.as_deref() == Some("assistant")
-                && payload.content
+                && content_has_text(&payload.content)
                 || payload.kind == "reasoning"
-                    && (payload.content || payload.summary || payload.encrypted_content)
+                    && (content_has_text(&payload.content)
+                        || payload.summary
+                        || payload.encrypted_content)
                 || matches!(
                     payload.kind.as_str(),
                     "function_call"
@@ -171,7 +219,7 @@ impl Cursor {
                     payload.kind.as_str(),
                     "agent_message" | "agent_reasoning" | "agent_reasoning_raw_content"
                 )
-                && (payload.message || payload.text);
+                && (content_has_text(&payload.message) || payload.text);
         if model_activity {
             if let (Some(activity), Some(at)) = (self.activity.as_mut(), at) {
                 if activity.working
@@ -225,6 +273,11 @@ impl Cursor {
         }
         if !working && self.has_start && self.turn_id.is_some() && payload.turn_id != self.turn_id {
             return; // A delayed terminal event must not stop a newer turn.
+        }
+        if !working {
+            for call in self.synchronous_questions.drain() {
+                self.questions.resolve_call(&call);
+            }
         }
         let last_user_message_at = if !working {
             self.activity
@@ -400,6 +453,7 @@ pub(super) fn read_rollout_snapshot(
     cursor.source = Some(source);
     let mut activity = cursor.activity.clone();
     if let Some(activity) = activity.as_mut() {
+        activity.questions = cursor.questions.clone();
         activity.observed = true;
         if activity.working
             && !cutoff.is_some_and(|cutoff| {
@@ -418,6 +472,117 @@ pub(super) fn read_rollout_snapshot(
 mod tests {
     use super::*;
     use std::{fs::File, io::Write};
+
+    #[test]
+    fn question_events_follow_answers_across_turns_and_compression() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("questions.jsonl");
+        let mut events = vec![
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"first","started_at":120}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"q","arguments":"{\"questions\":[{\"title\":\"a\"},{\"title\":\"b\"}]}"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"q","questions":[{"title":"a"},{"title":"b"}]}}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"q","output":"{\"accepted\":true}"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"first","started_at":120,"completed_at":130}}),
+        ];
+        let write = |events: &[Value]| {
+            std::fs::write(
+                &path,
+                events
+                    .iter()
+                    .map(|event| format!("{event}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap()
+        };
+        write(&events);
+        let completed = read_rollout_snapshot(&path, Some(100)).unwrap().unwrap();
+        assert!(
+            completed.questions.is_pending(),
+            "accepted is not an answer and completion does not close async questions"
+        );
+        assert!(!completed.working);
+        events.push(serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"second","started_at":140}}));
+        for index in 0..2 {
+            let body = serde_json::json!([{"questionItemId":serde_json::json!(["request_user_input_async","q",index]).to_string(),"answer":"yes"}]);
+            events.push(serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("<send_user_message_question_reply>\n{body}\n</send_user_message_question_reply>")}]}}));
+            write(&events);
+            let active = read_rollout_snapshot(&path, Some(100)).unwrap().unwrap();
+            assert!(active.working);
+            assert_eq!(active.questions.is_pending(), index == 0);
+        }
+        crate::rollout_log::compress_fixture(&path);
+        assert!(!read_rollout_snapshot(&path, Some(100))
+            .unwrap()
+            .unwrap()
+            .questions
+            .is_pending());
+        let mut cursor = Cursor::default();
+        for payload in [
+            serde_json::json!({"type":"function_call","name":"request_user_input","call_id":"sync","arguments":"{\"questions\":[{}]}"}),
+            serde_json::json!({"type":"function_call_output","call_id":"sync","output":"{\"answers\":{}}"}),
+        ] {
+            cursor.apply(
+                serde_json::from_value(
+                    serde_json::json!({"type":"response_item","payload":payload}),
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                cursor.questions.is_pending(),
+                !cursor.synchronous_questions.is_empty()
+            );
+        }
+        assert!(!cursor.questions.is_pending());
+    }
+
+    #[test]
+    fn ordinary_input_in_both_log_shapes_clears_questions_after_compression() {
+        for (kind, message) in [
+            (
+                "event_msg",
+                serde_json::json!({"type":"user_message","message":"先这样吧，明天我再试登录"}),
+            ),
+            (
+                "response_item",
+                serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":"先这样吧，明天我再试登录"}]}),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("questions.jsonl");
+            let mut events = vec![
+                serde_json::json!({"type":"event_msg","timestamp":"1970-01-01T00:02:00Z","payload":{"type":"task_started","turn_id":"turn"}}),
+                serde_json::json!({"type":"response_item","timestamp":"1970-01-01T00:02:01Z","payload":{"type":"function_call","name":"request_user_input_async","call_id":"old","arguments":"{\"questions\":[{}]}"}}),
+            ];
+            std::fs::write(
+                &path,
+                events
+                    .iter()
+                    .map(|event| format!("{event}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let stale = read_rollout_snapshot(&path, Some(100)).unwrap().unwrap();
+            assert!(stale.questions.is_pending());
+            events.push(serde_json::json!({"type":kind,"timestamp":"1970-01-01T00:02:02Z","payload":message}));
+            let mut file = File::options().append(true).open(&path).unwrap();
+            writeln!(file, "{}", events.last().unwrap()).unwrap();
+            drop(file);
+            let mut current = read_rollout_snapshot(&path, Some(100)).unwrap().unwrap();
+            current.questions.merge(&stale.questions);
+            assert!(!current.questions.is_pending());
+            assert!(
+                current.working,
+                "ordinary input does not invent an execution state"
+            );
+            crate::rollout_log::compress_fixture(&path);
+            let mut replay = read_rollout_snapshot(&path, Some(100)).unwrap().unwrap();
+            replay.questions.merge(&stale.questions);
+            assert!(
+                !replay.questions.is_pending(),
+                "compression replay cannot restore the old pending question"
+            );
+        }
+    }
 
     fn read_rollout_activity(
         path: &Path,

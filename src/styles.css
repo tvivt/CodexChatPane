@@ -451,6 +451,9 @@ svg.icon { width: 15px; height: 15px; display: block; fill: none; stroke: curren
 .flag-dormant { color: var(--local); opacity: .72; }
 .attention-count { margin-left: 4px; color: #3b82f6; font: inherit; }
 .working-count { margin-left: 4px; color: var(--working); font: inherit; }
+.waiting-input, .waiting-count { color:var(--warning); font-weight:700; }
+.waiting-count { margin-left:4px; font-size:inherit; }
+.project-count-badge.waiting-input { background:color-mix(in srgb,var(--warning) 14%,transparent); }
 .error-count { margin-left: 4px; color: var(--local); font: inherit; }
 .time-today { --time-color: var(--danger); }
 .time-yesterday { --time-color: var(--reason); }
@@ -1065,6 +1068,7 @@ body.metrics-window .project-chooser.chat-metrics-dialog { position:fixed; inset
 .chat-work-cell.date-cell, .timeline-row-date { font:inherit; font-size:var(--font-row); line-height:calc(var(--font-row) + 6.5px); }
 .chat-work-day, .timeline-row-date { font-size:calc(var(--font-row) - 0.5px); }
 .chat-work-status { width:14px; height:14px; display:grid; place-items:center; }
+.chat-work-status.waiting-input { width:100%; display:block; overflow:hidden; text-overflow:ellipsis; text-align:center; font-size:10px; white-space:nowrap; }
 .chat-work-status.attention { width:7px; height:7px; border-radius:50%; background:var(--danger); }
 .chat-work-day { width:var(--chat-lead,var(--row-status)); overflow:hidden; text-overflow:ellipsis; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }
 .chat-work-time { width:var(--chat-lead,var(--row-status)); font:600 9px/15px "Cascadia Mono",Consolas,monospace; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }
