@@ -373,6 +373,7 @@ function nativeChat(chat, index, previous) {
     executionMs: chat.executionMs,
     executionStatus: chat.executionStatus,
     turnId: chat.turnId,
+    metricsRevision: chat.metricsRevision,
     activityAt,
     localAlias: false,
     reasons: previous?.reasons?.filter(reason => reason !== "已归档") || [],
@@ -465,7 +466,7 @@ async function loadNativeSnapshot(catalogOnly = nativeLoaded || isPreviewWindow)
       }
       nativeLoaded = true;
     }
-    void refreshCompletedChatMetrics();
+    void refreshSelectedChatMetrics();
     render();
     syncLiveTimers();
     if (snapshot.error) showToast(snapshot.state, snapshot.error, "error");
@@ -564,7 +565,7 @@ async function flushSourceRefresh() {
         changed = true;
       }
     }
-    void refreshCompletedChatMetrics();
+    void refreshSelectedChatMetrics();
     if (changed) {
       for (const raw of update.chats || []) {
         const project = projects.find(project => project.id === raw.projectId);
@@ -804,7 +805,7 @@ function rememberChatMetrics(data) {
 }
 const metricsPending = new Map();
 let metricsSelectionRequest = 0;
-let metricsCompletionKey = '';
+let metricsRefreshKey = '';
 let metricsDetailRequest = 0;
 let metricsView = null;
 const metricValue = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -815,52 +816,61 @@ const metricsCompact = metrics => `${metricSeconds(metrics?.ttftMs)}·${metricVa
 const metricStatus = value => t(({completed:'已完成',inProgress:'进行中',running:'进行中',interrupted:'已中断',failed:'失败',pending:'等待中',closed:'已关闭'})[value] || value || '未知');
 function metricsTooltip(metrics, data) {
   if (!data) return t('点击查看对话详情；尚未读取统计');
-  return [t('最近完成轮'), t('原生首 token：') + metricSeconds(metrics?.ttftMs, 3),
+  const turn = data.turns?.find(turn => turn.metrics === metrics);
+  return [t('当前轮次最新有效请求') + (turn ? ' · ' + metricStatus(turn.status) : ''), t(metrics?.ttftEstimated ? '估算首 token：' : '原生首 token：') + metricSeconds(metrics?.ttftMs, 3),
     t('估算生成速度，含推理：') + (metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'),
     t('token 覆盖率：') + metricPercent(metrics?.coverage) + `；${metricNumber(metrics?.validRequestCount)}/${metricNumber(metrics?.requestCount)} ` + t('次请求'),
     t('缓存命中率：') + metricPercent(metrics?.cacheHitRate, 2),
     t('工具等待不计入生成速度；子智能体单独统计。'),
+    metrics?.ttftEstimated ? t('首 token 缺少原生值，以轮次开始至首条正文输出起点估算。') : '',
+    turn?.requests?.[0]?.responseId ? t('响应 ID：') + turn.requests[0].responseId : '',
+    !metricValue(metrics?.ttftMs) ? t('日志缺少这次请求的可靠首 token 计时。') : '',
+    turn?.status === 'inProgress' ? t('仅采用最近一次有效、已结算请求；不完整记录暂不计入。') : '',
     data.complete ? '' : t('记录不完整'), t('点击查看对话详情')].filter(Boolean).join('\n');
 }
-async function readChatMetrics(threadId) {
+const metricsPendingKey = (threadId, latestOnly) => `${threadId}:${latestOnly ? 'latest' : 'all'}`;
+async function readChatMetrics(threadId, latestOnly = false) {
   if (!nativeInvoke) throw new Error(t('桌面运行时不可用'));
-  if (metricsPending.has(threadId)) return metricsPending.get(threadId);
-  const pending = nativeInvoke('get_chat_metrics', {threadId});
-  metricsPending.set(threadId, pending);
+  const key = metricsPendingKey(threadId, latestOnly);
+  if (metricsPending.has(key)) return metricsPending.get(key);
+  const pending = nativeInvoke('get_chat_metrics', {threadId,latestOnly});
+  metricsPending.set(key, pending);
   try {
     const data = await pending;
     if (data?.threadId !== threadId) throw new Error(t('统计返回的对话 ID 不匹配'));
     return data;
-  } finally { if (metricsPending.get(threadId) === pending) metricsPending.delete(threadId); }
+  } finally { if (metricsPending.get(key) === pending) metricsPending.delete(key); }
 }
-function completedMetricsKey(chat) {
-  return chat && !chat.working && chat.executionStatus === 'completed'
-    ? `${chat.id}:${chat.turnId || ''}:${chat.completedAt || chat.activityAt || 0}` : '';
+function chatMetricsKey(chat) {
+  return chat && (chat.turnId || chat.executionStatus)
+    ? `${chat.id}:${chat.turnId || ''}:${chat.executionStatus || ''}:${chat.metricsRevision || ''}:${chat.working ? '' : chat.activityAt || chat.completedAt || 0}` : '';
 }
-function refreshCompletedChatMetrics() {
+function refreshSelectedChatMetrics() {
   if (isAuxiliaryWindow || document.hidden || !nativeInvoke) return;
   const chat = chats.find(chat => chat.id === state.selectedChatId);
-  const key = completedMetricsKey(chat);
-  if (key && key !== metricsCompletionKey) return loadSelectedChatMetrics(chat.id, true);
+  const key = chatMetricsKey(chat);
+  if (key && key !== metricsRefreshKey) return loadSelectedChatMetrics(chat.id, true);
 }
 async function loadSelectedChatMetrics(threadId, refresh = false) {
   const request = ++metricsSelectionRequest;
-  metricsCompletionKey = completedMetricsKey(chats.find(chat => chat.id === threadId));
+  metricsRefreshKey = chatMetricsKey(chats.find(chat => chat.id === threadId));
   if (!refresh) chatMetrics.delete(threadId);
   updateStatusChat();
   if (!nativeInvoke) return;
   try {
-    // A request started before completion may contain the preceding turn's snapshot.
-    if (refresh && metricsPending.has(threadId)) {
-      await metricsPending.get(threadId).catch(() => {});
+    // An in-flight read may predate the new turn or its latest settled request.
+    const key = metricsPendingKey(threadId, true);
+    if (refresh && metricsPending.has(key)) {
+      await metricsPending.get(key).catch(() => {});
       if (request !== metricsSelectionRequest || state.selectedChatId !== threadId) return;
     }
-    const data = await readChatMetrics(threadId);
+    const data = await readChatMetrics(threadId, true);
     if (request !== metricsSelectionRequest || state.selectedChatId !== threadId) return;
     rememberChatMetrics(data);
     updateStatusChat();
   } catch (error) {
     if (request === metricsSelectionRequest && state.selectedChatId === threadId) {
+      metricsRefreshKey = '';
       updateStatusChat();
       showToast(t('无法读取对话统计'), String(error), 'error');
     }
@@ -891,15 +901,15 @@ function metricsHeader(canGoBack = false) {
 function chatMetricsMarkup(data, scope = '', canGoBack = false) {
   const turns = [...(data.turns || [])].sort((a,b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   const metrics = metricsScope(data, scope), selectedTurnId = scope === 'all' ? '' : scope || data.latestTurnId;
-  const scopeLabel = scope === 'all' ? t('全会话（已完成轮次）') : scope ? t('所选轮次') : t('最近完成轮');
+  const scopeLabel = scope === 'all' ? t('全会话（已完成轮次）') : scope ? t('所选轮次') : t('最新轮次');
   const unCached = metricValue(metrics?.inputTokens) && metricValue(metrics?.cachedInputTokens) && metrics.inputTokens >= metrics.cachedInputTokens ? metrics.inputTokens - metrics.cachedInputTokens : null;
-  const fields = [['原生首 token',metricSeconds(metrics?.ttftMs,3)],['估算生成速度',metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'],['缓存命中率',metricPercent(metrics?.cacheHitRate,2)],
+  const fields = [[metrics?.ttftEstimated ? '估算首 token' : '原生首 token',metricSeconds(metrics?.ttftMs,3)],['估算生成速度',metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'],['缓存命中率',metricPercent(metrics?.cacheHitRate,2)],
     ['输入 token',metricNumber(metrics?.inputTokens)],['缓存输入',metricNumber(metrics?.cachedInputTokens)],['未缓存输入',metricNumber(unCached)],['输出 token',metricNumber(metrics?.outputTokens)],['其中推理',metricNumber(metrics?.reasoningOutputTokens)],['总 token',metricNumber(metrics?.totalTokens)],
     ['有效请求 / 全部请求',`${metricNumber(metrics?.validRequestCount)} / ${metricNumber(metrics?.requestCount)}`],['token 覆盖率',metricPercent(metrics?.coverage)],['生成样本耗时',metricSeconds(metrics?.generationMs)],['总轮次耗时',metricSeconds(metrics?.durationMs)],['工具阻塞',metricSeconds(metrics?.toolWaitMs)],
     ['完成轮次 / 全部轮次',`${metricNumber(metrics?.completedTurnCount)} / ${metricNumber(metrics?.turnCount)}`]];
   if (scope === 'all') fields.push(['首 token 中位数',metricSeconds(metrics?.ttftMedianMs,3)],['首 token 样本数',metricNumber(metrics?.ttftSampleCount)]);
   const turnRows = turns.map(turn => `<tr class="${turn.turnId === selectedTurnId ? 'metrics-selected' : ''}">${metricCells([
-    `<button class="metrics-link" data-metrics-action="scope" data-scope="${esc(turn.turnId)}">${esc(metricsTime(turn.startedAt))}</button>`, esc([turn.model, turn.effort].filter(Boolean).join(' / ') || '—'), esc(metricStatus(turn.status)),
+    `<button class="metrics-link" data-metrics-action="scope" data-scope="${esc(turn.turnId)}">${esc(metricsTime(turn.startedAt))}</button>`, esc(([turn.model, turn.effort].filter(Boolean).join(' / ') || '—') + (['priority','fast'].includes(turn.serviceTier) ? ' · Fast' : '')), esc(metricStatus(turn.status)),
     metricSeconds(turn.metrics?.ttftMs), metricValue(turn.metrics?.tokenSpeed) ? turn.metrics.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(turn.metrics?.coverage), metricPercent(turn.metrics?.cacheHitRate), metricNumber(turn.metrics?.outputTokens), metricSeconds(turn.metrics?.durationMs), metricSeconds(turn.metrics?.toolWaitMs)
   ])}</tr>`);
   const toolRows = (data.tools || []).map(tool => `<tr>${metricCells([esc(tool.name),metricNumber(tool.count),metricNumber(tool.failures),metricSeconds(tool.runtimeMs),metricSeconds(tool.waitMs)])}</tr>`);
@@ -907,7 +917,7 @@ function chatMetricsMarkup(data, scope = '', canGoBack = false) {
     `<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(agent.path || agent.threadId)}">${esc(agent.name || agent.path || agent.threadId)}</button>`, esc(agent.model || '—'), esc(metricStatus(agent.status)), metricNumber(agent.summary?.outputTokens), metricValue(agent.summary?.tokenSpeed) ? agent.summary.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(agent.summary?.coverage), metricPercent(agent.summary?.cacheHitRate), agent.error ? esc(agent.error) : '—'
   ])}</tr>`);
   const currentTurn = data.turns?.find(turn => turn.turnId === selectedTurnId);
-  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title || data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd || '—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ') || '—')} · ${t(data.archived ? '已归档' : '未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p><div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${turns.map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有完成轮次'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞'],turnRows)}${currentTurn ? metricsTurnDetails(currentTurn) : ''}<h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','读取错误'],agentRows)}</div>`;
+  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title || data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd || '—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ') || '—')} · ${t(data.archived ? '已归档' : '未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p><div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${turns.map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有轮次记录'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞'],turnRows)}${currentTurn ? metricsTurnDetails(currentTurn) : ''}<h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','读取错误'],agentRows)}</div>`;
 }
 function renderChatMetricsDialog() {
   const dialog = document.getElementById('chat-metrics-dialog');
@@ -935,9 +945,7 @@ async function openChatMetrics(threadId, child = false) {
     const data = await readChatMetrics(threadId);
     if (request !== metricsDetailRequest || metricsView?.threadId !== threadId) return;
     metricsView.data = data;
-    rememberChatMetrics(data);
     renderChatMetricsDialog();
-    updateStatusChat();
   } catch(error) {
     if (request !== metricsDetailRequest || metricsView?.threadId !== threadId) return;
     metricsView.error = t('无法读取对话统计') + ': ' + String(error);
@@ -983,7 +991,7 @@ function statusChatMarkup() {
   const chat = chats.find(item => item.id === state.selectedChatId);
   if (!chat) return '';
   const duration = executionLabel(chat);
-  const data = chatMetrics.get(chat.id), metrics = metricsScope(data);
+  const data = chatMetrics.get(chat.id), metrics = metricsScope(data, chat.turnId || '');
   return ui`<span class="status-sent">${statusLocalTime(chat.lastUserMessageAt)}${duration ? ui`[<span class="status-duration">${duration}</span>]` : ''}</span><button class="status-metrics" data-metrics-action="open" data-id="${esc(chat.id)}" title="${esc(metricsTooltip(metrics, data))}" aria-label="${t('对话详情')}">${metricsCompact(metrics)}</button>`;
 }
 function syncMarkup() {

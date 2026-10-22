@@ -78,6 +78,7 @@ pub struct ChatSnapshot {
     pub id: String,
     pub rollout_path: PathBuf,
     pub turn_id: Option<String>,
+    pub metrics_revision: Option<String>,
     pub project_id: String,
     pub title: String,
     pub created_at: i64,
@@ -100,6 +101,7 @@ pub struct ChatSnapshot {
 #[derive(Clone, Debug, Default)]
 struct ThreadActivity {
     turn_id: Option<String>,
+    metrics_revision: Option<String>,
     working: bool,
     last_user_message_at: i64,
     execution_started_at: Option<i64>,
@@ -313,6 +315,7 @@ fn scan_path_with_previous(
                     chat.id.clone(),
                     ThreadActivity {
                         turn_id: chat.turn_id.clone(),
+                        metrics_revision: chat.metrics_revision.clone(),
                         working: chat.working,
                         questions: chat.questions.clone(),
                         last_user_message_at: chat.last_user_message_at,
@@ -379,6 +382,9 @@ fn scan_path_with_previous(
                 let mut activity = activity;
                 if let Some(previous) = thread_activity.get(&thread.id) {
                     activity.questions.merge(&previous.questions);
+                    if activity.turn_id == previous.turn_id {
+                        activity.metrics_revision = previous.metrics_revision.clone();
+                    }
                 }
                 thread_activity.insert(thread.id.clone(), activity);
             }
@@ -468,6 +474,7 @@ fn scan_path_with_previous(
             id: thread.id,
             rollout_path: thread.rollout_path,
             turn_id: activity.and_then(|activity| activity.turn_id.clone()),
+            metrics_revision: activity.and_then(|activity| activity.metrics_revision.clone()),
             project_id,
             title: thread
                 .name
@@ -599,6 +606,9 @@ fn merge_rollout_activity(
         current.questions.merge(&activity.questions);
         activity.questions.merge(&current.questions);
         if current.turn_id.is_some() && current.turn_id == activity.turn_id {
+            activity.metrics_revision = activity
+                .metrics_revision
+                .or_else(|| current.metrics_revision.clone());
             // Older task_complete records do not carry failure details.
             if current.execution_status.as_deref() == Some("failed")
                 && activity.execution_status.as_deref() == Some("completed")
@@ -721,6 +731,7 @@ fn refresh_activities_at(
             id.clone(),
             ThreadActivity {
                 turn_id: chat.turn_id.clone(),
+                metrics_revision: chat.metrics_revision.clone(),
                 working: chat.working,
                 questions: chat.questions.clone(),
                 last_user_message_at: chat.last_user_message_at,
@@ -739,6 +750,9 @@ fn refresh_activities_at(
                 {
                     let mut activity = activity;
                     activity.questions.merge(&chat.questions);
+                    if activity.turn_id == chat.turn_id {
+                        activity.metrics_revision = chat.metrics_revision.clone();
+                    }
                     activities.insert(id.clone(), activity);
                 }
             }
@@ -790,6 +804,7 @@ fn refresh_activities_at(
                 now,
             );
             chat.turn_id = activity.turn_id;
+            chat.metrics_revision = activity.metrics_revision;
             chat.working = activity.working;
             chat.waiting_for_input = activity.questions.is_pending();
             chat.questions = activity.questions;

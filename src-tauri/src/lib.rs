@@ -482,13 +482,22 @@ async fn get_chat_preview(
 }
 
 #[tauri::command]
-async fn get_chat_metrics(thread_id: String) -> Result<metrics::ChatMetrics, String> {
+async fn get_chat_metrics(
+    thread_id: String,
+    latest_only: Option<bool>,
+) -> Result<metrics::ChatMetrics, String> {
     if !is_thread_id(&thread_id) {
         return Err("Chat ID 格式无效".into());
     }
-    tauri::async_runtime::spawn_blocking(move || metrics::read(&thread_id))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        if latest_only.unwrap_or(false) {
+            metrics::read_latest(&thread_id)
+        } else {
+            metrics::read(&thread_id)
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

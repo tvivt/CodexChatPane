@@ -8,6 +8,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod latest;
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
@@ -26,6 +28,7 @@ pub struct Summary {
     pub ttft_ms: Option<f64>,
     pub ttft_median_ms: Option<f64>,
     pub ttft_sample_count: usize,
+    pub ttft_estimated: bool,
     pub duration_ms: Option<u64>,
     pub tool_wait_ms: u64,
     pub turn_count: usize,
@@ -67,6 +70,7 @@ pub struct Turn {
     pub turn_id: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub service_tier: Option<String>,
     pub status: String,
     pub started_at: Option<i64>,
     pub completed_at: Option<i64>,
@@ -129,7 +133,7 @@ struct Usage {
     total_tokens: Option<u64>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Candidate {
     starts: Vec<i64>,
     reasoning_start: bool,
@@ -138,6 +142,7 @@ struct Candidate {
     broken: bool,
 }
 
+#[derive(Clone)]
 struct TurnState {
     turn: Turn,
     candidate: Candidate,
@@ -145,6 +150,8 @@ struct TurnState {
     own: bool,
     fallback: Option<Usage>,
     native_ttft: Option<f64>,
+    ttft_started_at: Option<i64>,
+    first_text_at: Option<i64>,
     duration: Option<u64>,
 }
 impl TurnState {
@@ -154,6 +161,7 @@ impl TurnState {
                 turn_id: id.into(),
                 model: None,
                 effort: None,
+                service_tier: None,
                 status: "inProgress".into(),
                 started_at: None,
                 completed_at: None,
@@ -166,11 +174,14 @@ impl TurnState {
             own: false,
             fallback: None,
             native_ttft: None,
+            ttft_started_at: None,
+            first_text_at: None,
             duration: None,
         }
     }
 }
 
+#[derive(Clone)]
 struct Call {
     turn: String,
     name: String,
@@ -179,10 +190,12 @@ struct Call {
     failure: bool,
     runtime: u64,
 }
+#[derive(Clone)]
 struct Parser {
     id: String,
     active_thread: String,
     active_turn: Option<String>,
+    service_tier: Option<String>,
     turns: BTreeMap<String, TurnState>,
     order: Vec<String>,
     usages: HashMap<String, (Usage, String, usize)>,
@@ -200,6 +213,7 @@ impl Parser {
             id: id.into(),
             active_thread: id.into(),
             active_turn: None,
+            service_tier: None,
             turns: BTreeMap::new(),
             order: vec![],
             usages: HashMap::new(),
@@ -220,10 +234,11 @@ impl Parser {
     fn turn(&mut self, id: &str) -> &mut TurnState {
         if !self.turns.contains_key(id) {
             self.order.push(id.into());
+            let mut state = TurnState::new(id);
+            state.turn.service_tier = self.service_tier.clone();
+            self.turns.insert(id.into(), state);
         }
-        self.turns
-            .entry(id.into())
-            .or_insert_with(|| TurnState::new(id))
+        self.turns.get_mut(id).unwrap()
     }
     fn bad_line(&mut self) {
         self.warning("日志包含坏行或未完成尾行");
@@ -236,6 +251,9 @@ impl Parser {
         let kind = text(&record["type"]);
         let at = timestamp(&record["timestamp"]);
         if kind == "session_meta" {
+            if text(&p["id"]) != self.active_thread {
+                self.service_tier = None;
+            }
             self.active_thread = text(&p["id"]).into();
             self.active_turn = None;
             return;
@@ -252,6 +270,12 @@ impl Parser {
             return;
         }
         let event = text(&p["type"]);
+        if kind == "event_msg" && event == "thread_settings_applied" {
+            self.service_tier = p["thread_settings"]["service_tier"]
+                .as_str()
+                .map(str::to_owned);
+            return;
+        }
         let turn_id = p["turn_id"]
             .as_str()
             .map(str::to_owned)
@@ -280,7 +304,9 @@ impl Parser {
                 state.turn.effort = p["effort"].as_str().map(str::to_owned);
             }
             ("event_msg", "task_started") => {
-                self.turn(&id).turn.started_at = time_field(p, "started_at").or(at);
+                let state = self.turn(&id);
+                state.turn.started_at = time_field(p, "started_at").or(at);
+                state.ttft_started_at = at.or(state.turn.started_at);
             }
             ("event_msg", "task_complete") => {
                 let state = self.turn(&id);
@@ -291,8 +317,11 @@ impl Parser {
                 state.duration = p["duration_ms"].as_u64();
             }
             ("event_msg", "turn_aborted") => {
-                self.turn(&id).turn.status = "interrupted".into();
-                self.turn(&id).turn.completed_at = at;
+                let state = self.turn(&id);
+                state.turn.status = "interrupted".into();
+                state.turn.completed_at = time_field(p, "completed_at").or(at);
+                state.duration = p["duration_ms"].as_u64();
+                state.native_ttft = p["time_to_first_token_ms"].as_f64().filter(|n| *n >= 0.0);
             }
             ("event_msg", "item_completed") => self.item(&id, p, at),
             ("event_msg", "token_count") => {
@@ -377,6 +406,13 @@ impl Parser {
         }
         let start = p["started_at_ms"].as_i64();
         let end = p["completed_at_ms"].as_i64();
+        if kind == "AgentMessage" {
+            if let Some(start) = start.filter(|start| end.is_some_and(|end| end > *start)) {
+                let state = self.turn(turn);
+                state.first_text_at =
+                    Some(state.first_text_at.map_or(start, |first| first.min(start)));
+            }
+        }
         if matches!(kind, "Reasoning" | "AgentMessage") {
             let candidate = &mut self.turn(turn).candidate;
             if let Some(end) = end {
@@ -580,9 +616,7 @@ impl Parser {
                 if request.included {
                     let start = request.start_ms.unwrap();
                     let end = request.end_ms.unwrap();
-                    if state.turn.status != "completed" {
-                        exclude(request, "轮次未完成");
-                    } else if intervals.iter().any(|&(s, e)| start < e && end > s)
+                    if intervals.iter().any(|&(s, e)| start < e && end > s)
                         || missing
                             .get(&id)
                             .is_some_and(|items| items.iter().any(|s| end > *s))
@@ -597,9 +631,22 @@ impl Parser {
                 }
             }
             let mut metrics = summarize(&state.turn.requests);
-            metrics.ttft_ms = state.native_ttft;
-            metrics.ttft_median_ms = state.native_ttft;
-            metrics.ttft_sample_count = usize::from(state.native_ttft.is_some());
+            // Tool-first turns lack a reliable first-token boundary before the first text.
+            let estimated_ttft = state
+                .ttft_started_at
+                .zip(state.first_text_at)
+                .filter(|(start, first)| {
+                    first >= start
+                        && !intervals.iter().any(|&(tool, _)| tool < *first)
+                        && !missing
+                            .get(&id)
+                            .is_some_and(|tools| tools.iter().any(|tool| *tool < *first))
+                })
+                .map(|(start, first)| (first - start) as f64);
+            metrics.ttft_ms = state.native_ttft.or(estimated_ttft);
+            metrics.ttft_estimated = state.native_ttft.is_none() && metrics.ttft_ms.is_some();
+            metrics.ttft_median_ms = metrics.ttft_ms;
+            metrics.ttft_sample_count = usize::from(metrics.ttft_ms.is_some());
             metrics.duration_ms =
                 state
                     .duration
@@ -797,6 +844,7 @@ fn aggregate(turns: &[Turn]) -> Summary {
         .collect();
     ttfts.sort_by(f64::total_cmp);
     summary.ttft_sample_count = ttfts.len();
+    summary.ttft_estimated = completed.iter().any(|turn| turn.metrics.ttft_estimated);
     if !ttfts.is_empty() {
         summary.ttft_ms = Some(ttfts.iter().sum::<f64>() / ttfts.len() as f64);
         summary.ttft_median_ms =
@@ -809,7 +857,11 @@ pub fn read(thread_id: &str) -> Result<ChatMetrics, String> {
     let home = crate::source::codex_home()?;
     read_at(&home, thread_id, true)
 }
-fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, String> {
+pub fn read_latest(thread_id: &str) -> Result<ChatMetrics, String> {
+    latest::read(&crate::source::codex_home()?, thread_id)
+}
+
+fn catalog(home: &Path, thread_id: &str) -> Result<(String, ChatMetrics), String> {
     let db = Connection::open_with_flags(
         home.join("state_5.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -818,11 +870,37 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
     let (path,title,cwd,model,archived,created,updated): (String,String,Option<String>,Option<String>,bool,Option<i64>,Option<i64>) = db.query_row(
         "SELECT rollout_path,title,cwd,model,archived,created_at,updated_at FROM threads WHERE id=?1", [thread_id],
         |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).map_err(|e|e.to_string())?;
-    let segments = crate::preview::metrics_segments(home, thread_id, Path::new(&path))?;
     let as_of = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
+    Ok((
+        path,
+        ChatMetrics {
+            thread_id: thread_id.into(),
+            title,
+            cwd,
+            model,
+            effort: None,
+            archived,
+            created_at: created.map(|n| n.saturating_mul(1000)),
+            updated_at: updated.map(|n| n.saturating_mul(1000)),
+            as_of,
+            complete: true,
+            warnings: vec![],
+            parent_thread_id: None,
+            latest_turn_id: None,
+            summary: Summary::default(),
+            turns: vec![],
+            tools: vec![],
+            subagents: vec![],
+        },
+    ))
+}
+
+fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, String> {
+    let (path, mut data) = catalog(home, thread_id)?;
+    let segments = crate::preview::metrics_segments(home, thread_id, Path::new(&path))?;
     let mut parser = Parser::new(thread_id);
     let mut last_fallback = None;
     let mut subagent = false;
@@ -897,8 +975,7 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
     }
     let latest_turn_id = turns
         .iter()
-        .rev()
-        .find(|turn| turn.status == "completed")
+        .max_by_key(|turn| turn.started_at.unwrap_or(0))
         .map(|turn| turn.turn_id.clone());
     let effort = turns.last().and_then(|turn| turn.effort.clone());
     if children {
@@ -930,25 +1007,16 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
     } else {
         subagents.clear();
     }
-    Ok(ChatMetrics {
-        thread_id: thread_id.into(),
-        title,
-        cwd,
-        model,
-        effort,
-        archived,
-        created_at: created.map(|n| n.saturating_mul(1000)),
-        updated_at: updated.map(|n| n.saturating_mul(1000)),
-        as_of,
-        complete,
-        warnings,
-        parent_thread_id,
-        latest_turn_id,
-        summary,
-        turns,
-        tools,
-        subagents,
-    })
+    data.effort = effort;
+    data.complete = complete;
+    data.warnings = warnings;
+    data.parent_thread_id = parent_thread_id;
+    data.latest_turn_id = latest_turn_id;
+    data.summary = summary;
+    data.turns = turns;
+    data.tools = tools;
+    data.subagents = subagents;
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -974,6 +1042,57 @@ mod tests {
         event(
             parser,
             json!({"type":"task_complete","turn_id":"turn","duration_ms":65000,"time_to_first_token_ms":1800}),
+        );
+    }
+
+    #[test]
+    fn service_tier_is_captured_per_turn_without_relabeling_history() {
+        let mut parser = Parser::new("main");
+        let start = |parser: &mut Parser, id: &str| {
+            event(parser, json!({"type":"task_started","turn_id":id}))
+        };
+        let settings = |parser: &mut Parser, id: &str, value: Value| {
+            event(
+                parser,
+                json!({"type":"thread_settings_applied","thread_id":id,"thread_settings":value}),
+            )
+        };
+        start(&mut parser, "unknown");
+        settings(&mut parser, "main", json!({"service_tier":"priority"}));
+        start(&mut parser, "fast");
+        settings(&mut parser, "main", json!({"service_tier":"default"}));
+        parser.apply(json!({"type":"turn_context","payload":{"turn_id":"fast","model":"model"}}));
+        start(&mut parser, "standard");
+        settings(&mut parser, "child", json!({"service_tier":"priority"}));
+        start(&mut parser, "still-standard");
+        settings(&mut parser, "main", json!({}));
+        start(&mut parser, "missing");
+        settings(&mut parser, "main", json!({"service_tier":"fast"}));
+        start(&mut parser, "fast-alias");
+        parser.apply(json!({"type":"session_meta","payload":{"id":"main"}}));
+        start(&mut parser, "same-thread-continuation");
+        parser.apply(json!({"type":"session_meta","payload":{"id":"parent"}}));
+        settings(&mut parser, "parent", json!({"service_tier":"priority"}));
+        start(&mut parser, "inherited");
+        settings(&mut parser, "main", json!({"service_tier":null}));
+        start(&mut parser, "fork-unknown");
+        let (turns, _, _, _, _) = parser.finish();
+        let tiers: HashMap<_, _> = turns
+            .iter()
+            .map(|turn| (turn.turn_id.as_str(), turn.service_tier.as_deref()))
+            .collect();
+        assert_eq!(tiers["unknown"], None);
+        assert_eq!(tiers["fast"], Some("priority"));
+        assert_eq!(tiers["standard"], Some("default"));
+        assert_eq!(tiers["still-standard"], Some("default"));
+        assert_eq!(tiers["missing"], None);
+        assert_eq!(tiers["fast-alias"], Some("fast"));
+        assert_eq!(tiers["same-thread-continuation"], Some("fast"));
+        assert_eq!(tiers["fork-unknown"], None);
+        assert!(!tiers.contains_key("inherited"));
+        assert_eq!(
+            serde_json::to_value(&turns[1]).unwrap()["serviceTier"],
+            "priority"
         );
     }
 
@@ -1012,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn excludes_missing_reasoning_bad_segments_wait_overlap_and_noncompleted_turns() {
+    fn excludes_missing_reasoning_bad_segments_and_tool_wait() {
         let mut parser = Parser::new("main");
         parser.active_turn = Some("turn".into());
         output(&mut parser, "AgentMessage", "a", 1000, 2000);
@@ -1052,15 +1171,97 @@ mod tests {
             ]
         );
         assert_eq!(interval_sum(vec![(10, 20), (15, 30), (40, 50)]), 30);
-        let mut parser = Parser::new("main");
-        parser.active_turn = Some("turn".into());
-        output(&mut parser, "AgentMessage", "live", 1000, 2000);
-        usage(&mut parser, "live", 100, 0, "1970-01-01T00:00:02.010Z");
-        let (turns, _, _, _, _) = parser.finish();
+    }
+
+    #[test]
+    fn settled_requests_count_in_current_and_interrupted_turns() {
+        for status in ["inProgress", "interrupted", "completed"] {
+            let mut parser = Parser::new("main");
+            parser.apply(json!({"type":"event_msg","timestamp":"1970-01-01T00:00:01.100Z","payload":{"type":"task_started","turn_id":"turn","started_at":1}}));
+            output(&mut parser, "Reasoning", "reasoning", 1500, 3000);
+            output(&mut parser, "AgentMessage", "text", 3000, 4000);
+            usage(&mut parser, "settled", 101, 20, "1970-01-01T00:00:04.010Z");
+            // The next request has output but no usage settlement yet.
+            output(&mut parser, "Reasoning", "unfinished", 4500, 5000);
+            if status == "interrupted" {
+                parser.apply(json!({"type":"event_msg","timestamp":"1970-01-01T00:00:06Z","payload":{"type":"turn_aborted","turn_id":"turn","duration_ms":4900}}));
+            } else if status == "completed" {
+                complete(&mut parser);
+            }
+            let (turns, _, _, _, _) = parser.finish();
+            assert_eq!(turns[0].metrics.request_count, 1);
+            assert_eq!(turns[0].metrics.token_speed, Some(40.0));
+            assert_eq!(
+                turns[0].metrics.ttft_ms,
+                Some(if status == "completed" {
+                    1800.0
+                } else {
+                    1900.0
+                })
+            );
+            assert_eq!(turns[0].metrics.ttft_estimated, status != "completed");
+            assert_eq!(turns[0].status, status);
+        }
+    }
+
+    #[test]
+    fn first_token_estimate_avoids_tool_wait_and_native_values_take_precedence() {
+        for native in [false, true] {
+            let mut parser = Parser::new("main");
+            parser.apply(json!({"type":"event_msg","timestamp":"1970-01-01T00:00:01Z","payload":{"type":"task_started","turn_id":"turn"}}));
+            parser.apply(json!({"type":"response_item","timestamp":"1970-01-01T00:00:02Z","payload":{"type":"function_call","call_id":"tool","name":"tool"}}));
+            usage(&mut parser, "tool-call", 10, 0, "1970-01-01T00:00:02.010Z");
+            parser.apply(json!({"type":"response_item","timestamp":"1970-01-01T00:00:12Z","payload":{"type":"function_call_output","call_id":"tool"}}));
+            output(&mut parser, "AgentMessage", "after-tool", 13000, 14000);
+            usage(
+                &mut parser,
+                "after-tool",
+                101,
+                0,
+                "1970-01-01T00:00:14.010Z",
+            );
+            if native {
+                complete(&mut parser);
+            }
+            let (turns, _, _, _, _) = parser.finish();
+            assert_eq!(turns[0].metrics.token_speed, Some(100.0));
+            assert_eq!(turns[0].metrics.tool_wait_ms, 10000);
+            assert_eq!(turns[0].metrics.ttft_ms, native.then_some(1800.0));
+            assert!(!turns[0].metrics.ttft_estimated);
+        }
+    }
+
+    #[test]
+    #[ignore = "reads local metrics; requires CODEX_PANE_VERIFY_METRICS_THREAD"]
+    fn local_current_and_interrupted_metrics() {
+        let id = std::env::var("CODEX_PANE_VERIFY_METRICS_THREAD").unwrap();
+        let result = read_at(&crate::source::codex_home().unwrap(), &id, false).unwrap();
         assert_eq!(
-            turns[0].requests[0].excluded_reason.as_deref(),
-            Some("轮次未完成")
+            result.latest_turn_id,
+            result
+                .turns
+                .iter()
+                .max_by_key(|turn| turn.started_at.unwrap_or(0))
+                .map(|turn| turn.turn_id.clone())
         );
+        for turn in result.turns.iter().filter(|turn| {
+            turn.status == "interrupted" || Some(&turn.turn_id) == result.latest_turn_id.as_ref()
+        }) {
+            println!(
+                "turn={} status={} metrics={}",
+                turn.turn_id,
+                turn.status,
+                serde_json::to_string(&turn.metrics).unwrap()
+            );
+            if turn.turn_id == "01a163a9-fd76-7a32-a0a0-2f5c49528a28" {
+                assert_eq!(turn.metrics.request_count, 32);
+                assert_eq!(turn.metrics.valid_request_count, 26);
+                assert_eq!(turn.metrics.valid_output_tokens, 37344);
+                assert_eq!(turn.metrics.generation_ms, 1860619);
+                assert_eq!(turn.metrics.ttft_ms, Some(3456.0));
+                assert!(turn.metrics.ttft_estimated);
+            }
+        }
     }
 
     #[test]

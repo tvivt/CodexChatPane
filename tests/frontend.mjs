@@ -1619,12 +1619,20 @@ await vm.runInContext(`(async () => {
     assert.equal(metricsCompact({ttftMs:0,tokenSpeed:0,cacheHitRate:0}),'0.0s·0t/s·0%','zero is present; null is missing');
     assert.equal(metricsCompact({ttftMs:NaN,tokenSpeed:Infinity,cacheHitRate:null}),'—·—·—');
     const data = fixture('first');
-    assert.equal(metricsScope(data).outputTokens,100,'default scope is latest completed turn');
+    assert.equal(metricsScope(data).outputTokens,100,'default scope is latest turn');
     assert.equal(metricsScope(data,'all').outputTokens,999,'conversation total remains available explicitly');
     assert.equal(metricsScope({...data,latestTurnId:'missing'}),null,'no completed turn must not fall back to totals');
     assert.equal(metricsScope(undefined),null);
     assert.equal(metricsScope(data,'latest').outputTokens,100,'individual turn remains available');
     const html = chatMetricsMarkup(data);
+    const modeMarkup = serviceTier => chatMetricsMarkup({...data,turns:[{...data.turns[0],model:'test-model',effort:'high',serviceTier}]});
+    for (const tier of ['priority','fast']) {
+      assert.ok(modeMarkup(tier).includes('<td>test-model / high · Fast</td>'),'Fast is shown next to the model for the recorded turn');
+    }
+    for (const tier of ['default',null,undefined,'unrecognized']) {
+      assert.ok(modeMarkup(tier).includes('<td>test-model / high</td>'),'ordinary and unknown tiers add no visible label');
+      assert.ok(!modeMarkup(tier).includes(' · Fast'),'missing or unrecognized configuration cannot imply Fast');
+    }
     const unorderedTurns = [
       {...data.turns[0],turnId:'older',startedAt:1000},
       {...data.turns[0],turnId:'newest',startedAt:3000},
@@ -1650,49 +1658,69 @@ await vm.runInContext(`(async () => {
     const first = loadSelectedChatMetrics('first');
     state.selectedChatId = 'second';
     const second = loadSelectedChatMetrics('second');
+    assert.ok(calls.every(call => call.args.latestOnly === true), 'status reads request the lightweight latest-request scope');
     pending.get('second')(fixture('second')); await second;
     pending.get('first')(fixture('first')); await first;
     assert.ok(chatMetrics.has('second') && !chatMetrics.has('first'),'late result cannot replace or cache old selection');
     hoveredChatId = 'first';
     assert.ok(statusChatMarkup().includes('data-id="second"'),'hover does not change the selected metrics scope');
     assert.ok(statusChatMarkup().includes('1.8s·62t/s·93%'),'statusbar uses latest completed turn rather than totals');
-    assert.ok(statusChatMarkup().includes('最近完成轮') && !statusChatMarkup().includes('首 token 均值'));
+    assert.ok(statusChatMarkup().includes('当前轮次最新有效请求') && !statusChatMarkup().includes('首 token 均值'));
     await handlers.get('pointerover')[0]({target:{closest:() => ({dataset:{chat:'first'}})}});
     assert.equal(calls.length,2,'hover does not fetch metrics');
     const refreshed = loadSelectedChatMetrics('second');
     assert.equal(calls.length,3,'selecting again refreshes instead of keeping stale cached data');
     pending.get('second')(fixture('second')); await refreshed;
-    const withTurn = (id, turnId, speed = 90) => ({...fixture(id),latestTurnId:turnId,turns:[{...fixture(id).turns[0],turnId,metrics:{...summary,tokenSpeed:speed,cacheHitRate:0.5,ttftMs:2200}}]});
+    const withTurn = (id, turnId, speed = 90, status = 'completed') => ({...fixture(id),latestTurnId:turnId,turns:[{...fixture(id).turns[0],turnId,status,metrics:{...summary,tokenSpeed:speed,cacheHitRate:0.5,ttftMs:2200,ttftEstimated:status !== 'completed'}}]});
     chats[1] = {...chats[1],working:true,executionStatus:'inProgress',turnId:'next'};
-    await refreshCompletedChatMetrics();
-    assert.equal(calls.length,3,'working turns do not reread metrics');
+    const running = refreshSelectedChatMetrics();
+    assert.equal(calls.length,4,'a new current turn replaces the preceding completed scope');
+    assert.ok(!statusChatMarkup().includes('1.8s·62t/s·93%'),'a new turn never displays the preceding turn metrics');
+    pending.get('second')(withTurn('second','next',60,'inProgress')); await running;
+    assert.ok(statusChatMarkup().includes('进行中') && statusChatMarkup().includes('估算首 token：'));
+    assert.ok(statusChatMarkup().includes('仅采用最近一次有效、已结算请求'));
+    chats[1] = {...chats[1],metricsRevision:'response-1'};
+    const settled = refreshSelectedChatMetrics();
+    assert.equal(calls.length,5,'a settled request refreshes the current turn');
+    pending.get('second')(withTurn('second','next',90,'inProgress')); await settled;
+    assert.ok(statusChatMarkup().includes('2.2s·90t/s·50%'));
+    assert.ok(statusChatMarkup().includes('90.0t/s') && statusChatMarkup().includes('50.00%'));
+    chats[1] = {...chats[1],activityAt:10000};
+    await refreshSelectedChatMetrics();
+    assert.equal(calls.length,5,'tool activity and clock ticks do not reparse metrics without settlement');
+    chats[1] = {...chats[1],working:false,executionStatus:'interrupted'};
+    const interrupted = refreshSelectedChatMetrics();
+    pending.get('second')(withTurn('second','next',95,'interrupted')); await interrupted;
+    assert.equal(calls.length,6);
+    assert.ok(statusChatMarkup().includes('已中断') && statusChatMarkup().includes('95t/s'));
+    chats[1] = {...chats[1],turnId:'completed-turn',activityAt:20000};
     chats[1] = {...chats[1],working:false,executionStatus:'completed',completedAt:2};
-    const completed = refreshCompletedChatMetrics();
-    assert.equal(calls.length,4,'a completed turn automatically requests fresh metrics');
-    assert.equal(chatMetrics.get('second').latestTurnId,'latest','automatic refresh retains the previous display while loading');
-    await refreshCompletedChatMetrics();
-    assert.equal(calls.length,4,'duplicate completion notifications do not start more reads');
-    pending.get('second')(withTurn('second','next')); await completed;
+    const completed = refreshSelectedChatMetrics();
+    assert.equal(calls.length,7,'a completed turn automatically requests fresh metrics');
+    assert.equal(chatMetrics.get('second').latestTurnId,'next','automatic refresh retains the cache while loading');
+    await refreshSelectedChatMetrics();
+    assert.equal(calls.length,7,'duplicate completion notifications do not start more reads');
+    pending.get('second')(withTurn('second','completed-turn')); await completed;
     assert.ok(statusChatMarkup().includes('2.2s·90t/s·50%'),'completion updates the statusbar');
     assert.ok(statusChatMarkup().includes('90.0t/s') && statusChatMarkup().includes('50.00%'),'completion updates the tips from the same latest-turn data');
     const selecting = loadSelectedChatMetrics('second');
     chats[1] = {...chats[1],turnId:'after-pending',completedAt:3};
-    const afterPending = refreshCompletedChatMetrics();
-    assert.equal(calls.length,5,'completion waits for a request that began before the turn finished');
-    pending.get('second')(withTurn('second','next')); await selecting;
-    assert.equal(calls.length,6,'completion performs a new read after the obsolete request finishes');
+    const afterPending = refreshSelectedChatMetrics();
+    assert.equal(calls.length,8,'completion waits for a request that began before the turn finished');
+    pending.get('second')(withTurn('second','completed-turn')); await selecting;
+    assert.equal(calls.length,9,'completion performs a new read after the obsolete request finishes');
     assert.ok(!chatMetrics.has('second'),'obsolete results cannot populate the refreshed selection');
     pending.get('second')(withTurn('second','after-pending',95)); await afterPending;
     assert.equal(chatMetrics.get('second').latestTurnId,'after-pending');
-    const savedRefresh = refreshCompletedChatMetrics, savedRender = render, savedTimers = syncLiveTimers;
+    const savedRefresh = refreshSelectedChatMetrics, savedRender = render, savedTimers = syncLiveTimers;
     const savedQuota = refreshLiveRateLimits, savedProjects = projects, savedState = {...state};
     const savedLoaded = nativeLoaded, savedSignature = nativeSourceSignature;
     const savedActivityIds = [...pendingActivityIds], savedHistoryIds = [...pendingHistoryIds];
     const savedPending = [pendingFullRefresh,pendingCatalogRefresh,pendingHistoryRefresh];
-    let automatic, raw = {id:'second',title:'second',projectId:'',working:false,executionStatus:'completed',turnId:'activity-turn',activityAt:4000,lastUserMessageAt:3000};
+      let automatic, raw = {id:'second',title:'second',projectId:'',working:false,executionStatus:'completed',turnId:'activity-turn',metricsRevision:'settlement-one',activityAt:4000,lastUserMessageAt:3000};
     try {
       render = () => {}; syncLiveTimers = () => {}; refreshLiveRateLimits = async () => {};
-      refreshCompletedChatMetrics = () => (automatic = savedRefresh());
+      refreshSelectedChatMetrics = () => (automatic = savedRefresh());
       nativeLoaded = true;
       pendingActivityIds.clear(); pendingHistoryIds.clear();
       pendingFullRefresh = pendingCatalogRefresh = pendingHistoryRefresh = false;
@@ -1706,6 +1734,7 @@ await vm.runInContext(`(async () => {
       queueSourceRefresh({threads:['second']});
       await flushSourceRefresh();
       assert.equal(chats.find(chat => chat.id === 'second').turnId,'activity-turn','activity merging preserves the backend turn ID');
+      assert.equal(chats.find(chat => chat.id === 'second').metricsRevision,'settlement-one','activity merging preserves the settlement revision');
       assert.equal(metricCalls.length,1,'incremental activity completion triggers a metrics read');
       pending.get('second')(withTurn('second','activity-turn')); await automatic;
       queueSourceRefresh({threads:['second']}); await flushSourceRefresh();
@@ -1725,12 +1754,31 @@ await vm.runInContext(`(async () => {
       assert.equal(metricCalls.length,3,'resume catches completion while the window was hidden');
       pending.get('second')(withTurn('second','hidden-turn')); await automatic;
       assert.equal(chatMetrics.get('second').latestTurnId,'hidden-turn');
+      raw = {...raw,turnId:'live-activity',working:true,executionStatus:'inProgress',metricsRevision:'request-one'};
+      queueSourceRefresh({threads:['second']}); await flushSourceRefresh();
+      assert.equal(metricCalls.length,4,'current-turn activity updates the selected scope');
+      pending.get('second')(withTurn('second','live-activity',60,'inProgress')); await automatic;
+      raw = {...raw,activityAt:7000};
+      queueSourceRefresh({threads:['second']}); await flushSourceRefresh();
+      assert.equal(metricCalls.length,4,'tool notifications without a new settlement do not reread metrics');
+      raw = {...raw,metricsRevision:'request-two'};
+      queueSourceRefresh({threads:['second']}); await flushSourceRefresh();
+      const earlierSettlement = automatic;
+      assert.equal(metricCalls.length,5,'a new settled request triggers a read through the activity path');
+      raw = {...raw,metricsRevision:'request-three'};
+      queueSourceRefresh({threads:['second']}); await flushSourceRefresh();
+      assert.equal(metricCalls.length,5,'a later settlement coalesces behind an in-flight read');
+      pending.get('second')(withTurn('second','live-activity',80,'inProgress')); await earlierSettlement;
+      assert.equal(metricCalls.length,6,'the newest settlement gets a fresh read after the older read');
+      assert.equal(metricsScope(chatMetrics.get('second')).tokenSpeed,60,'obsolete settlement results do not replace the last valid snapshot');
+      pending.get('second')(withTurn('second','live-activity',100,'inProgress')); await automatic;
+      assert.ok(statusChatMarkup().includes('100t/s') && statusChatMarkup().includes('100.0t/s'),'status and tips update together after settlement');
       isAuxiliaryWindow = true;
       chats[0] = {...chats[0],executionStatus:'completed',turnId:'auxiliary-turn',completedAt:7000};
       await savedRefresh();
-      assert.equal(metricCalls.length,3,'auxiliary windows do not refresh the main statusbar');
+      assert.equal(metricCalls.length,6,'auxiliary windows do not refresh the main statusbar');
     } finally {
-      refreshCompletedChatMetrics = savedRefresh; render = savedRender; syncLiveTimers = savedTimers;
+      refreshSelectedChatMetrics = savedRefresh; render = savedRender; syncLiveTimers = savedTimers;
       refreshLiveRateLimits = savedQuota; projects = savedProjects; Object.assign(state,savedState);
       nativeLoaded = savedLoaded; nativeSourceSignature = savedSignature;
       pendingActivityIds.clear(); savedActivityIds.forEach(id => pendingActivityIds.add(id));
@@ -1749,8 +1797,13 @@ await vm.runInContext(`(async () => {
     await windowAction('minimize');
     await windowAction('toggleMaximize');
     assert.equal(windowCalls.slice(controlsBefore).join(','),'minimize,toggleMaximize','details controls act on their window without tray operations');
-    nativeInvoke = async (command,args) => fixture(args.threadId);
+    nativeInvoke = async (command,args) => {
+      assert.equal(args.latestOnly,false,'details explicitly request the complete conversation');
+      return fixture(args.threadId);
+    };
+    const statusBeforeDetails = chatMetrics.get('second');
     await openChatMetrics('first');
+    assert.equal(chatMetrics.get('second'),statusBeforeDetails,'full detail results do not replace status snapshots');
     metricsView.scope = 'all';
     await openChatMetrics('child',true);
     assert.equal(metricsView.threadId,'child');
@@ -1766,6 +1819,13 @@ await vm.runInContext(`(async () => {
     assert.ok(!chatMetrics.has('cached-0') && chatMetrics.has('cached-29'),'oldest unselected data is evicted');
     assert.equal(metricsView.data.threadId,'first','open details retain their data independently of the cache');
     assert.ok(chatMetricsMarkup(data).includes(' · 已完成</option>'),'scope choices use localized statuses');
+    const scopedReads = [];
+    nativeInvoke = (command,args) => new Promise(resolve => scopedReads.push({args,resolve}));
+    const statusRead = readChatMetrics('scoped',true), detailRead = readChatMetrics('scoped');
+    assert.equal(scopedReads.length,2,'status and detail reads never share an in-flight result');
+    assert.deepEqual(scopedReads.map(read => read.args.latestOnly),[true,false]);
+    scopedReads.forEach(read => read.resolve(fixture('scoped')));
+    await Promise.all([statusRead,detailRead]);
     nativeInvoke = (command,args) => new Promise(resolve => pending.set(args.threadId,resolve));
     const afterClose = openChatMetrics('late'); closeChatMetrics();
     pending.get('late')(fixture('late')); await afterClose;
@@ -1778,7 +1838,7 @@ await vm.runInContext(`(async () => {
     chats = savedChats; state.selectedChatId = savedSelected; hoveredChatId = savedHover;
     nativeInvoke = savedInvoke; document.getElementById = savedGet;
     isMetricsWindow = savedMetricsWindow; isAuxiliaryWindow = savedAuxiliaryWindow;
-    chatMetrics.clear(); metricsPending.clear(); metricsCompletionKey = ''; metricsView = null; setLanguage('zh');
+    chatMetrics.clear(); metricsPending.clear(); metricsRefreshKey = ''; metricsView = null; setLanguage('zh');
   }
 })()`,context);
 console.log('Frontend checks passed: source refresh, previews, folders, config, metrics windows, quota tips, scope, async selection, subagent navigation, locale and resizing.');

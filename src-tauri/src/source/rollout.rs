@@ -27,6 +27,7 @@ struct Payload {
     role: Option<String>,
     turn_id: Option<String>,
     call_id: Option<String>,
+    response_id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,
     item: Option<Value>,
@@ -75,6 +76,7 @@ struct Cursor {
     pending_message: bool,
     questions: Questions,
     synchronous_questions: HashSet<String>,
+    metrics_revision: Option<String>,
 }
 
 impl Cursor {
@@ -84,6 +86,19 @@ impl Cursor {
             .timestamp
             .as_deref()
             .and_then(super::diagnostics::timestamp);
+        if record.kind == "token_usage_record" {
+            if self.activity.is_some()
+                && payload
+                    .turn_id
+                    .as_ref()
+                    .is_none_or(|turn| self.turn_id.as_ref().is_none_or(|current| current == turn))
+            {
+                if let Some(response) = payload.response_id.filter(|id| !id.is_empty()) {
+                    self.metrics_revision = Some(response);
+                }
+            }
+            return;
+        }
         if record.kind == "event_msg" && payload.kind == "item_completed" {
             if let Some(item) = &payload.item {
                 self.questions.item(item, at);
@@ -289,6 +304,9 @@ impl Cursor {
                 .filter(|activity| activity.working && activity.turn_id.is_none())
                 .map_or(started_at, |activity| activity.last_user_message_at)
         };
+        if working {
+            self.metrics_revision = None;
+        }
         self.has_start |= working;
         self.pending_message = false;
         self.pending_tools.clear();
@@ -454,6 +472,7 @@ pub(super) fn read_rollout_snapshot(
     let mut activity = cursor.activity.clone();
     if let Some(activity) = activity.as_mut() {
         activity.questions = cursor.questions.clone();
+        activity.metrics_revision = cursor.metrics_revision.clone();
         activity.observed = true;
         if activity.working
             && !cutoff.is_some_and(|cutoff| {
@@ -582,6 +601,31 @@ mod tests {
                 "compression replay cannot restore the old pending question"
             );
         }
+    }
+
+    #[test]
+    fn metrics_revision_follows_settlements_and_survives_compression() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metrics.jsonl");
+        std::fs::write(&path, concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"main\",\"started_at\":120}}\n",
+            "{\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"main\",\"response_id\":\"response-one\"}}\n",
+            "{\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"other\",\"response_id\":\"foreign-response\"}}\n"
+        )).unwrap();
+        let read = || read_rollout_snapshot(&path, Some(100)).unwrap().unwrap();
+        assert_eq!(read().metrics_revision.as_deref(), Some("response-one"));
+        let mut file = File::options().append(true).open(&path).unwrap();
+        write!(file, "{{\"type\":\"token_usage_record\",\"payload\":{{\"turn_id\":\"main\",\"response_id\":\"response-two\"}}}}").unwrap();
+        assert_eq!(read().metrics_revision.as_deref(), Some("response-one"));
+        writeln!(file).unwrap();
+        assert_eq!(read().metrics_revision.as_deref(), Some("response-two"));
+        writeln!(file, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"turn_aborted\",\"turn_id\":\"main\",\"completed_at\":130}}}}").unwrap();
+        drop(file);
+        assert_eq!(read().metrics_revision.as_deref(), Some("response-two"));
+        crate::rollout_log::compress_fixture(&path);
+        assert_eq!(read().metrics_revision.as_deref(), Some("response-two"));
+        std::fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"next\",\"started_at\":140}}\n").unwrap();
+        assert!(read().metrics_revision.is_none());
     }
 
     fn read_rollout_activity(
