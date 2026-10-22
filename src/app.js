@@ -370,6 +370,7 @@ function nativeChat(chat, index, previous) {
     executionStartedAt: chat.executionStartedAt,
     executionMs: chat.executionMs,
     executionStatus: chat.executionStatus,
+    turnId: chat.turnId,
     activityAt,
     localAlias: false,
     reasons: previous?.reasons?.filter(reason => reason !== "已归档") || [],
@@ -462,6 +463,7 @@ async function loadNativeSnapshot(catalogOnly = nativeLoaded || isPreviewWindow)
       }
       nativeLoaded = true;
     }
+    void refreshCompletedChatMetrics();
     render();
     syncLiveTimers();
     if (snapshot.error) showToast(snapshot.state, snapshot.error, "error");
@@ -560,6 +562,7 @@ async function flushSourceRefresh() {
         changed = true;
       }
     }
+    void refreshCompletedChatMetrics();
     if (changed) {
       for (const raw of update.chats || []) {
         const project = projects.find(project => project.id === raw.projectId);
@@ -797,6 +800,7 @@ function rememberChatMetrics(data) {
 }
 const metricsPending = new Map();
 let metricsSelectionRequest = 0;
+let metricsCompletionKey = '';
 let metricsDetailRequest = 0;
 let metricsView = null;
 const metricValue = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -825,12 +829,28 @@ async function readChatMetrics(threadId) {
     return data;
   } finally { if (metricsPending.get(threadId) === pending) metricsPending.delete(threadId); }
 }
-async function loadSelectedChatMetrics(threadId) {
+function completedMetricsKey(chat) {
+  return chat && !chat.working && chat.executionStatus === 'completed'
+    ? `${chat.id}:${chat.turnId || ''}:${chat.completedAt || chat.activityAt || 0}` : '';
+}
+function refreshCompletedChatMetrics() {
+  if (isAuxiliaryWindow || document.hidden || !nativeInvoke) return;
+  const chat = chats.find(chat => chat.id === state.selectedChatId);
+  const key = completedMetricsKey(chat);
+  if (key && key !== metricsCompletionKey) return loadSelectedChatMetrics(chat.id, true);
+}
+async function loadSelectedChatMetrics(threadId, refresh = false) {
   const request = ++metricsSelectionRequest;
-  chatMetrics.delete(threadId);
+  metricsCompletionKey = completedMetricsKey(chats.find(chat => chat.id === threadId));
+  if (!refresh) chatMetrics.delete(threadId);
   updateStatusChat();
   if (!nativeInvoke) return;
   try {
+    // A request started before completion may contain the preceding turn's snapshot.
+    if (refresh && metricsPending.has(threadId)) {
+      await metricsPending.get(threadId).catch(() => {});
+      if (request !== metricsSelectionRequest || state.selectedChatId !== threadId) return;
+    }
     const data = await readChatMetrics(threadId);
     if (request !== metricsSelectionRequest || state.selectedChatId !== threadId) return;
     rememberChatMetrics(data);
@@ -4238,7 +4258,7 @@ document.addEventListener('visibilitychange', () => {
   syncLiveTimers();
   if (!document.hidden && nativeInvoke) {
     chats.filter(chat => chat.working && (!isPreviewWindow || chat.id === previewChatId)).forEach(chat => pendingActivityIds.add(chat.id));
-    queueSourceRefresh();
+    queueSourceRefresh(!isAuxiliaryWindow && chats.some(chat => chat.id === state.selectedChatId) ? {threads:[state.selectedChatId]} : {});
     void refreshLiveRateLimits();
     if (previewChatId) refreshConversationPreview();
   }

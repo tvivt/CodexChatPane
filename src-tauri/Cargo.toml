@@ -1,6 +1,6 @@
 [package]
 name = "CodexChatPane"
-version = "0.3.1"
+version = "0.3.2"
 description = "Codex project and chat side panel"
 authors = ["CodexChatPane contributors"]
 edition = "2021"
