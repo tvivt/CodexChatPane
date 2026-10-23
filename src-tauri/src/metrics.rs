@@ -47,6 +47,9 @@ pub struct Request {
     pub end_ms: Option<i64>,
     pub included: bool,
     pub excluded_reason: Option<String>,
+    pub settled_at: Option<i64>,
+    pub cache_write_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
     #[serde(skip)]
     total_tokens: Option<u64>,
 }
@@ -77,6 +80,7 @@ pub struct Turn {
     pub metrics: Summary,
     pub requests: Vec<Request>,
     pub activities: Vec<Activity>,
+    pub consumption: Option<crate::usage::costs::Totals>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -99,6 +103,7 @@ pub struct Subagent {
     pub status: String,
     pub summary: Option<Summary>,
     pub error: Option<String>,
+    pub consumption: Option<crate::usage::costs::Consumption>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,8 +125,11 @@ pub struct ChatMetrics {
     pub turns: Vec<Turn>,
     pub tools: Vec<Tool>,
     pub subagents: Vec<Subagent>,
+    pub consumption: Option<crate::usage::costs::Consumption>,
     #[serde(skip)]
-    parent_thread_id: Option<String>,
+    pub(crate) parent_thread_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) usage_batches: Vec<(Option<String>, Option<String>, Vec<Request>)>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -168,6 +176,7 @@ impl TurnState {
                 metrics: Summary::default(),
                 requests: vec![],
                 activities: vec![],
+                consumption: None,
             },
             candidate: Candidate::default(),
             boundary: None,
@@ -448,6 +457,7 @@ impl Parser {
                         status: "unknown".into(),
                         summary: None,
                         error: None,
+                        consumption: None,
                     });
                 entry.status = text(&item["kind"]).into();
             }
@@ -574,6 +584,11 @@ impl Parser {
             end_ms: end,
             included: reason.is_none(),
             excluded_reason: reason.map(str::to_owned),
+            settled_at: at,
+            cache_write_tokens: p["usage"]["cache_write_tokens"]
+                .as_u64()
+                .or_else(|| p["usage"]["input_tokens_details"]["cache_write_tokens"].as_u64()),
+            cost_usd: None,
         };
         let index = state.turn.requests.len();
         state.turn.requests.push(request);
@@ -861,6 +876,10 @@ pub fn read_latest(thread_id: &str) -> Result<ChatMetrics, String> {
     latest::read(&crate::source::codex_home()?, thread_id)
 }
 
+pub(crate) fn read_own(home: &Path, thread_id: &str) -> Result<ChatMetrics, String> {
+    read_at_mode(home, thread_id, false, true)
+}
+
 fn catalog(home: &Path, thread_id: &str) -> Result<(String, ChatMetrics), String> {
     let db = Connection::open_with_flags(
         home.join("state_5.sqlite"),
@@ -889,16 +908,27 @@ fn catalog(home: &Path, thread_id: &str) -> Result<(String, ChatMetrics), String
             complete: true,
             warnings: vec![],
             parent_thread_id: None,
+            usage_batches: vec![],
             latest_turn_id: None,
             summary: Summary::default(),
             turns: vec![],
             tools: vec![],
             subagents: vec![],
+            consumption: None,
         },
     ))
 }
 
 fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, String> {
+    read_at_mode(home, thread_id, children, false)
+}
+
+fn read_at_mode(
+    home: &Path,
+    thread_id: &str,
+    children: bool,
+    usage_only: bool,
+) -> Result<ChatMetrics, String> {
     let (path, mut data) = catalog(home, thread_id)?;
     let segments = crate::preview::metrics_segments(home, thread_id, Path::new(&path))?;
     let mut parser = Parser::new(thread_id);
@@ -923,6 +953,24 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
             }
             match serde_json::from_str::<Value>(&line) {
                 Ok(record) => {
+                    if usage_only
+                        && !matches!(
+                            record["type"].as_str(),
+                            Some("session_meta" | "turn_context" | "token_usage_record")
+                        )
+                        && !(record["type"] == "event_msg"
+                            && matches!(
+                                record["payload"]["type"].as_str(),
+                                Some(
+                                    "task_started"
+                                        | "task_complete"
+                                        | "turn_aborted"
+                                        | "thread_settings_applied"
+                                )
+                            ))
+                    {
+                        continue;
+                    }
                     if record["type"] == "session_meta" && record["payload"]["id"] != thread_id {
                         inherited_history = true;
                     }
@@ -990,6 +1038,7 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
                         return false;
                     }
                     agent.model = result.model;
+                    agent.consumption = result.consumption;
                     agent.summary = Some(result.summary);
                     agent.status = result
                         .turns
@@ -1016,6 +1065,9 @@ fn read_at(home: &Path, thread_id: &str, children: bool) -> Result<ChatMetrics, 
     data.turns = turns;
     data.tools = tools;
     data.subagents = subagents;
+    if !usage_only {
+        crate::usage::costs::attach_metrics(&mut data);
+    }
     Ok(data)
 }
 
@@ -1418,6 +1470,14 @@ mod tests {
         assert_eq!(before.summary.output_tokens, Some(100));
         assert_eq!(before.summary.request_count, 1);
         assert_eq!(
+            serde_json::to_value(&before.consumption).unwrap()["totals"]["output"],
+            100
+        );
+        assert_eq!(
+            serde_json::to_value(&before.subagents[0].consumption).unwrap()["totals"]["output"],
+            75
+        );
+        assert_eq!(
             before.subagents[0].summary.as_ref().unwrap().output_tokens,
             Some(75)
         );
@@ -1425,6 +1485,10 @@ mod tests {
             crate::rollout_log::compress_fixture(path);
         }
         let after = read_at(home, "main", true).unwrap();
+        assert_eq!(
+            serde_json::to_value(&before.consumption).unwrap(),
+            serde_json::to_value(&after.consumption).unwrap()
+        );
         assert_eq!(
             serde_json::to_value(&after.summary).unwrap(),
             serde_json::to_value(&before.summary).unwrap()

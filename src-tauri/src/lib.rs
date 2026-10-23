@@ -5,6 +5,7 @@ mod preview;
 mod rollout_log;
 mod source;
 mod source_watch;
+mod usage;
 mod window_attach;
 
 use serde::{Deserialize, Serialize};
@@ -297,6 +298,7 @@ async fn get_chat_activity(
 
 #[tauri::command]
 async fn get_live_rate_limits(
+    app: tauri::AppHandle,
     snapshot: tauri::State<'_, SnapshotState>,
     logger: tauri::State<'_, diagnostics::Logger>,
 ) -> Result<source::RateLimits, String> {
@@ -305,8 +307,19 @@ async fn get_live_rate_limits(
         .try_lock()
         .ok()
         .and_then(|snapshot| snapshot.as_ref()?.chats.first().map(|chat| chat.id.clone()));
+    let quota_logger = logger.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        source::read_live_rate_limits(thread_id.as_deref())
+        let limits = source::read_live_rate_limits(thread_id.as_deref())?;
+        let home = source::codex_home()?;
+        let previous = usage::context::identity(&home).ok();
+        usage::context::confirm(&home, limits.account_id.as_deref())?;
+        if let Err(error) = usage::ledger::record(&home, &limits) {
+            quota_logger.warn(format!("quota history write failed error={error}"));
+        }
+        if usage::context::identity(&home).ok() != previous {
+            let _ = app.emit("usage-context-changed", ());
+        }
+        Ok(limits)
     })
     .await
     .map_err(|error| error.to_string())
@@ -452,6 +465,145 @@ async fn open_chat_metrics_window(app: tauri::AppHandle, thread_id: String) -> R
 }
 
 #[tauri::command]
+async fn open_usage_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("usage-history") {
+        window.show().map_err(|e| e.to_string())?;
+        window.unminimize().map_err(|e| e.to_string())?;
+        return window.set_focus().map_err(|e| e.to_string());
+    }
+    let mut builder = WebviewWindowBuilder::new(
+        &app,
+        "usage-history",
+        WebviewUrl::App("index.html?usage=1".into()),
+    )
+    .title("CodexChatPane · 额度与消耗")
+    .inner_size(1160.0, 820.0)
+    .min_inner_size(720.0, 440.0)
+    .resizable(true)
+    .decorations(false)
+    .drag_and_drop(false)
+    .center()
+    .focused(true)
+    .data_directory(app_data_dir()?);
+    if let Some(args) = debug_browser_args(app.state::<RemoteDebuggingPort>().0) {
+        builder = builder.additional_browser_args(&args);
+    }
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_quota_history() -> Result<usage::ledger::History, String> {
+    tauri::async_runtime::spawn_blocking(|| usage::ledger::history(&source::codex_home()?))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn dismiss_quota_notice(event_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        usage::ledger::acknowledge(&source::codex_home()?, &event_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_usage_consumption(
+    app: tauri::AppHandle,
+    query: usage::costs::Query,
+    refresh: Option<bool>,
+) -> Result<usage::costs::Report, String> {
+    query.validate()?;
+    let snapshot = app
+        .state::<SnapshotState>()
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = source::codex_home()?;
+        let identity = usage::context::identity(&home)?;
+        if refresh.unwrap_or(false) {
+            usage::costs::index(&home, snapshot.as_ref(), &query, |done, total| {
+                let _ = app.emit_to(
+                    "usage-history",
+                    "usage-index-progress",
+                    serde_json::json!({"done":done,"total":total}),
+                );
+            })?;
+        }
+        let report = usage::costs::report(&home, query)?;
+        if usage::context::identity(&home)? != identity {
+            return Err("账号或日志来源已切换，请重新读取".into());
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn update_current_usage(
+    app: tauri::AppHandle,
+    thread_ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    if thread_ids
+        .as_ref()
+        .is_some_and(|ids| ids.iter().any(|id| !is_thread_id(id)))
+    {
+        return Err("Chat ID 格式无效".into());
+    }
+    let snapshot = app
+        .state::<SnapshotState>()
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = source::codex_home()?;
+        let identity = usage::context::identity(&home)?;
+        let history = usage::ledger::history(&home)?;
+        let from = history
+            .cycles
+            .iter()
+            .filter(|c| c.minutes == 10080 && c.ended_at.is_none())
+            .map(|c| c.started_at.unwrap_or(c.observed_start))
+            .min()
+            .ok_or("尚无当前额度周期")?;
+        static WARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let warmed = WARMED.get_or_init(Default::default);
+        let thread_ids = if warmed
+            .lock()
+            .map_err(|e| e.to_string())?
+            .contains(&identity)
+        {
+            thread_ids
+        } else {
+            None
+        };
+        usage::costs::index(
+            &home,
+            snapshot.as_ref(),
+            &usage::costs::Query {
+                from: Some(from),
+                thread_ids,
+                ..Default::default()
+            },
+            |_, _| {},
+        )?;
+        if usage::context::identity(&home)? != identity {
+            return Err("账号或日志来源已切换，忽略旧任务".into());
+        }
+        warmed.lock().map_err(|e| e.to_string())?.insert(identity);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn get_chat_preview(
     thread_id: String,
     before: Option<preview::PreviewCursor>,
@@ -490,11 +642,25 @@ async fn get_chat_metrics(
         return Err("Chat ID 格式无效".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        if latest_only.unwrap_or(false) {
+        let home = source::codex_home()?;
+        let identity = usage::context::identity(&home).ok();
+        let mut data = if latest_only.unwrap_or(false) {
             metrics::read_latest(&thread_id)
         } else {
             metrics::read(&thread_id)
+        }?;
+        if data.usage_batches.is_empty() {
+            data.usage_batches = data
+                .turns
+                .iter()
+                .map(|t| (t.model.clone(), t.service_tier.clone(), t.requests.clone()))
+                .collect();
         }
+        // Statistics remain available when quota identity or its optional disk cache is unavailable.
+        if identity.is_some() && identity == usage::context::identity(&home).ok() {
+            let _ = usage::costs::reuse(&home, &data);
+        }
+        Ok(data)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -983,7 +1149,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if matches!(window.label(), "conversation-preview" | "chat-metrics") {
+                if matches!(
+                    window.label(),
+                    "conversation-preview" | "chat-metrics" | "usage-history"
+                ) {
                     return;
                 }
                 api.prevent_close();
@@ -995,6 +1164,11 @@ pub fn run() {
             get_catalog_snapshot,
             get_chat_activity,
             get_live_rate_limits,
+            open_usage_window,
+            get_quota_history,
+            dismiss_quota_notice,
+            get_usage_consumption,
+            update_current_usage,
             get_tool_config,
             save_tool_config,
             open_chat,

@@ -1,16 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import './usage.mjs';
+import './usage-preload.mjs';
 
 const tauriConf = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
 const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
 assert.equal(tauriConf.app.windows.length, 0, 'Rust creates windows so they can share the CODEX_HOME data directory');
 assert.ok(rust.includes('source::codex_home()?.join(".codex-chat-pane")'), 'app data lives under CODEX_HOME/.codex-chat-pane');
-assert.equal((rust.match(/\.data_directory\(/g) || []).length, 3, 'main, preview and metrics windows share the app data directory');
+assert.equal((rust.match(/\.data_directory\(/g) || []).length, 4, 'main, preview, metrics and usage windows share the app data directory');
 assert.match(rust, /#\[tauri::command\]\s+async fn open_conversation_preview_window\(/, 'Windows WebView creation must run in an async command to avoid deadlock');
 assert.match(rust, /#\[tauri::command\]\s+async fn open_chat_metrics_window\(/);
 assert.ok(rust.includes('format!("index.html?metrics={}"'), 'metrics uses a separate window route');
-assert.ok(rust.includes('matches!(window.label(), "conversation-preview" | "chat-metrics")'), 'closing details must not mark the main pane as user-closed');
+assert.match(rust,/matches!\(\s*window.label\(\),\s*"conversation-preview" \| "chat-metrics" \| "usage-history"\s*\)/, 'closing auxiliary windows must not mark the main pane as user-closed');
 assert.ok(JSON.parse(readFileSync(new URL('../src-tauri/capabilities/default.json',import.meta.url),'utf8')).windows.includes('chat-metrics'));
 assert.ok(rust.includes('.drag_and_drop(false)'), 'Windows HTML5 folder drag requires native file-drop intercept off');
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8') + readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
@@ -65,7 +67,7 @@ assert.ok(html.includes('.project-recent-column-resizer.time-column') && html.in
 assert.ok(html.includes('.project-recent-column-resizer::before { content:""; position:absolute; inset:0 3px; background:transparent; opacity:0; }'), '3 Days column lines stay hidden until hovered');
 assert.ok(html.includes('.project-recent-panel.project-column-hidden .global-chat-row.without-type') && html.includes('.project-recent-panel.project-column-hidden .global-chat-project, .project-recent-panel.project-column-hidden .project-recent-column-resizer.project-column { display:none; }'), 'hidden project column reclaims its width and hides its resize handle');
 assert.ok(html.includes('.chat-column-resizer.time-column') && html.includes('.chat-column-resizer.project-column'), 'Chats columns have vertical resize handles');
-const script = ['dynamic.js','i18n.js','app.js'].map(file => readFileSync(new URL('../src/' + file, import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'')).join('\n').replace('const nativeInvoke =', 'let nativeInvoke =').replace('const isPreviewWindow =', 'let isPreviewWindow =').replace('const isMetricsWindow =', 'let isMetricsWindow =').replace('const isAuxiliaryWindow =', 'let isAuxiliaryWindow =');
+const script = ['dynamic.js','i18n.js','usage.js','usage-preload.js','app.js'].map(file => readFileSync(new URL('../src/' + file, import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'')).join('\n').replace('const nativeInvoke =', 'let nativeInvoke =').replace('const isPreviewWindow =', 'let isPreviewWindow =').replace('const isMetricsWindow =', 'let isMetricsWindow =').replace('const isAuxiliaryWindow =', 'let isAuxiliaryWindow =');
 assert.ok(!script.includes("if (nativeInvoke) void nativeInvoke('set_window_mode',{mode:state.windowMode}).catch(() => {});"), 'startup does not race the loaded window mode');
 assert.ok(script.includes("PREVIEW_WINDOW_LABEL = 'conversation-preview'"), 'preview uses a separate webview window');
 assert.ok(script.includes("nativeInvoke('open_conversation_preview_window'"), 'native preview creation shares the CODEX_HOME webview data');
@@ -516,6 +518,56 @@ vm.runInContext(`
   resizePanel('project-recent',190);
   assert.equal(state.projectRecentHeight + state.projectStructureHeight,sectionTotal,'middle header keeps the lower pane fixed');
   assert.equal(state.projectStructureHeight,240);
+  {
+    const saved = {projectsCollapsed:state.projectsCollapsed,projectChatsCollapsed:state.projectChatsCollapsed,projectArchiveOpen:state.projectArchiveOpen,projectRecentHeight:state.projectRecentHeight,projectStructureHeight:state.projectStructureHeight};
+    const folderState = JSON.stringify([[...state.openFolders],[...state.openChatFolders]]);
+    const toggle = kind => dispatch('click',{target:{dataset:{action:'toggle-project-section',kind},closest(selector){return selector==='[data-action]'?this:null;}}});
+    try {
+      state.projectsCollapsed = state.projectChatsCollapsed = false;
+      state.projectArchiveOpen = true;
+      const expanded = renderProjectPane();
+      assert.ok(expanded.includes('data-action="toggle-project-section" data-kind="project"') && expanded.includes('data-action="toggle-project-section" data-kind="chat"'));
+      for (const kind of ['project','chat']) {
+        const header = collapsedFolderSection(kind);
+        assert.equal((header.match(/<button/g)||[]).length,1,'collapsed sections keep one restore button');
+        assert.ok(header.includes('href="#i-chevrons-up"') && !header.includes('>恢复</button>') && !header.includes('class="count"') && !header.includes('data-resize'));
+        const label = '恢复 ' + (kind === 'project' ? 'Projects' : 'Chats');
+        assert.ok(header.includes('title="' + label + '"') && header.includes('aria-label="' + label + '"'));
+      }
+      toggle('project');
+      assert.equal(state.projectsCollapsed,true);
+      let markup = renderProjectPane();
+      assert.ok(markup.includes(collapsedFolderSection('project')) && !markup.includes('class="scroll tree"'));
+      assert.ok(markup.includes('class="scroll project-chat-list"') && markup.includes('project-archive-panel'),'Chats remains expanded independently');
+      toggle('chat');
+      markup = renderProjectPane();
+      assert.ok(markup.includes(collapsedFolderSection('chat')) && !markup.includes('class="scroll project-chat-list"'));
+      assert.ok(!markup.includes('project-archive-panel') && state.projectArchiveOpen,'archive visibility is restored with Chats');
+      const stored = JSON.parse(localStorage.getItem(PREFERENCES_KEY));
+      assert.equal(stored.projectsCollapsed,true);assert.equal(stored.projectChatsCollapsed,true);
+      assert.equal(configurationDocument().layout.projectsCollapsed,true,'collapse flags are part of the existing layout export');
+      assert.ok(validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({projectsCollapsed:true,projectChatsCollapsed:false})}}));
+      assert.throws(()=>validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({projectsCollapsed:'true'})}}));
+      const recent = state.projectRecentHeight;
+      resizePanel('project-recent',recent+40);
+      assert.equal(state.projectRecentHeight,recent,'both collapsed sections have no active height separator');
+      toggle('project');
+      markup = renderProjectPane();
+      assert.ok(markup.includes('class="scroll tree"') && !markup.includes('class="scroll project-chat-list"'));
+      resizePanel('project-recent',recent+20);
+      assert.equal(state.projectRecentHeight,recent+20);
+      assert.equal(state.projectStructureHeight,saved.projectStructureHeight,'resizing with Chats closed preserves the expanded Projects height');
+      toggle('chat');
+      assert.ok(renderProjectPane().includes('project-archive-panel'));
+      assert.equal(state.projectStructureHeight,saved.projectStructureHeight);
+      assert.equal(JSON.stringify([[...state.openFolders],[...state.openChatFolders]]),folderState,'collapse and restore preserve folder expansion');
+      toggle('project');
+      resizePanel('project-recent',recent+30);
+      assert.equal(state.projectStructureHeight,saved.projectStructureHeight,'Projects closed also preserves its expanded height');
+      resizePanel('project-structure',999);
+      assert.equal(state.projectStructureHeight,saved.projectStructureHeight,'a hidden separator cannot overwrite the saved height');
+    } finally { Object.assign(state,saved); }
+  }
 `, context);
 {
   const calls = [], confirmations = [], errors = [];
@@ -692,7 +744,7 @@ vm.runInContext(`
   assert.ok(quotaMarkup(quotaNow).includes('>91%<'));
   assert.ok(quotaMarkup(quotaNow).includes('>W<'));
   assert.ok(quotaMarkup(quotaNow).includes('>83%<'));
-  assert.ok(quotaMarkup(quotaNow).includes('title="2026-09-01 13:23 (-1d1h)"'), 'exact reset and day/hour countdown are both in tips');
+  assert.ok(quotaMarkup(quotaNow).includes('title="2026-09-01 13:23 (-1d1h)'), 'exact reset and day/hour countdown are both in tips');
   assert.equal((quotaMarkup(quotaNow).match(/class="quota-reset-time"/g) || []).length,1, 'only the 5h window shows a reset time');
   assert.ok(quotaMarkup(quotaNow).includes('class="quota-reset-time">13:23<'));
   assert.equal(quotaCountdown(quotaNow+342*60000,quotaNow),'5h42m');
@@ -1665,6 +1717,14 @@ await vm.runInContext(`(async () => {
     assert.equal(metricsScope(undefined),null);
     assert.equal(metricsScope(data,'latest').outputTokens,100,'individual turn remains available');
     const html = chatMetricsMarkup(data);
+    const costTotals = {input:1000,cached:900,output:100,reasoning:20,requests:2,unpricedRequests:0,estimatedRequests:1,costUsd:0.01};
+    const costData = {...data,consumption:{totals:costTotals,priceDate:'2026-10-23'},turns:[{...data.turns[0],consumption:costTotals,requests:[{...data.turns[0].requests[0],costUsd:0.003}]}],subagents:[{...data.subagents[0],consumption:{totals:{...costTotals,costUsd:0.02}}}]};
+    const costHtml = chatMetricsMarkup(costData);
+    assert.ok(costHtml.includes('本对话消耗（全部已结算请求）') && costHtml.includes('≈$0.0100'));
+    assert.ok(costHtml.includes('≈$0.0030') && costHtml.includes('≈$0.0200'),'request and subagent costs are shown separately');
+    assert.equal(metricsCostMoney({requests:2,unpricedRequests:2,costUsd:0}),'—','unknown prices are not shown as free');
+    assert.equal(metricsCostMoney({requests:2,unpricedRequests:1,costUsd:.01}),'≈$0.0100 + 未计价');
+    assert.equal(metricsCostMoney(null),'—');
     const modeMarkup = serviceTier => chatMetricsMarkup({...data,turns:[{...data.turns[0],model:'test-model',effort:'high',serviceTier}]});
     for (const tier of ['priority','fast']) {
       assert.ok(modeMarkup(tier).includes('<td>test-model / high · Fast</td>'),'Fast is shown next to the model for the recorded turn');
@@ -1687,6 +1747,9 @@ await vm.runInContext(`(async () => {
     assert.ok(html.includes('工具统计（全会话）') && html.includes('子智能体（各自全会话）'),'tools and subagents declare their own scope');
     assert.ok(chatMetricsMarkup(data,'latest').includes('缺少输出起点') && html.includes('data-metrics-action="agent"'));
     assert.ok(metricsTooltip(summary,data).includes('61/82') && metricsTooltip(summary,data).includes('86.2%'));
+    const briefTip=metricsTooltip(summary,{...data,complete:false,turns:[{status:'inProgress',metrics:summary,requests:[{responseId:'hidden-response-id'}]}]});
+    assert.equal(briefTip.split(String.fromCharCode(10)).length,6,'metrics tips keep the six requested lines');
+    for(const detail of ['工具等待','响应 ID','hidden-response-id','日志缺少','仅采用','记录不完整']) assert.ok(!briefTip.includes(detail));
     setLanguage('en');
     assert.ok(chatMetricsMarkup(data).includes('Conversation details'));
     assert.ok(chatMetricsMarkup(data,'latest').includes('Missing output start'));
@@ -1718,7 +1781,7 @@ await vm.runInContext(`(async () => {
     assert.ok(!statusChatMarkup().includes('1.8s·62t/s·93%'),'a new turn never displays the preceding turn metrics');
     pending.get('second')(withTurn('second','next',60,'inProgress')); await running;
     assert.ok(statusChatMarkup().includes('进行中') && statusChatMarkup().includes('估算首 token：'));
-    assert.ok(statusChatMarkup().includes('仅采用最近一次有效、已结算请求'));
+    assert.ok(!statusChatMarkup().includes('仅采用最近一次有效、已结算请求'));
     chats[1] = {...chats[1],metricsRevision:'response-1'};
     const settled = refreshSelectedChatMetrics();
     assert.equal(calls.length,5,'a settled request refreshes the current turn');

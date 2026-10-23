@@ -1,6 +1,8 @@
 
 import { createDynamicStore } from './dynamic.js';
 import { t, ui, setLanguage, language, configureLanguagePersistence } from './i18n.js';
+import {createUsageView, resetCardsTip, quotaNoticeMarkup} from './usage.js';
+import {createUsagePreloader} from './usage-preload.js';
 const nativeInvoke = window.__TAURI__?.core?.invoke;
 const nativeWindow = window.__TAURI__?.window?.getCurrentWindow();
 const PreviewWebviewWindow = window.__TAURI__?.webviewWindow?.WebviewWindow;
@@ -10,7 +12,9 @@ const previewThreadId = new URLSearchParams(window.location?.search || '').get('
 const isPreviewWindow = Boolean(previewThreadId);
 const metricsThreadId = new URLSearchParams(window.location?.search || '').get('metrics') || '';
 const isMetricsWindow = Boolean(metricsThreadId);
-const isAuxiliaryWindow = isPreviewWindow || isMetricsWindow;
+const isUsageWindow = new URLSearchParams(window.location?.search || '').get('usage') === '1';
+const isAuxiliaryWindow = isPreviewWindow || isMetricsWindow || isUsageWindow;
+const usagePreloader = createUsagePreloader({invoke:(...args) => nativeInvoke(...args),enabled:() => Boolean(nativeInvoke) && !isAuxiliaryWindow});
 configureLanguagePersistence(!nativeInvoke);
 const dynamicStorage = nativeInvoke ? {getItem: key => localStorage.getItem(key), setItem() {}} : localStorage;
 const dynamic = createDynamicStore(dynamicStorage);
@@ -64,6 +68,8 @@ const state = {
   recentProjectColumnVisible: true,
   chatsLowerPanel: '',
   projectArchiveOpen: false,
+  projectsCollapsed: false,
+  projectChatsCollapsed: false,
   chatTimelineLinked: false,
   globalTimelineLinked: false,
   projectTimelineIncludesArchived: true,
@@ -116,7 +122,7 @@ const state = {
 };
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
-const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
+const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars', 'previewEnabled'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
@@ -405,16 +411,27 @@ function acceptRateLimits(limits) {
   state.rateLimits = limits;
   return true;
 }
-async function refreshLiveRateLimits() {
-  if (!nativeInvoke || liveRateLimitsInFlight || document.hidden) return;
+async function refreshLiveRateLimits(force = false) {
+  if (!nativeInvoke || liveRateLimitsInFlight || document.hidden && !force) return;
   liveRateLimitsInFlight = true;
   try {
-    if (acceptRateLimits(await nativeInvoke('get_live_rate_limits'))) updateQuota();
+    const limits = await nativeInvoke('get_live_rate_limits');
+    usagePreloader.quota(limits);
+    if (acceptRateLimits(limits)) updateQuota();
+    if (!isAuxiliaryWindow) await refreshQuotaNotices();
   } catch (_) {
     // Keep the last value when Codex CLI or the network is unavailable.
   } finally {
     liveRateLimitsInFlight = false;
   }
+}
+async function refreshQuotaNotices() {
+  if (!nativeInvoke || isAuxiliaryWindow) return;
+  const notice = document.getElementById('quota-reset-notice');
+  if (!notice) return;
+  const history = await nativeInvoke('get_quota_history');
+  notice.innerHTML = quotaNoticeMarkup(history.cycles);
+  notice.hidden = !notice.innerHTML;
 }
 async function loadNativeSnapshot(catalogOnly = nativeLoaded || isPreviewWindow) {
   if (!nativeInvoke || nativeScanInFlight) return;
@@ -465,6 +482,7 @@ async function loadNativeSnapshot(catalogOnly = nativeLoaded || isPreviewWindow)
         bootstrapActivityOrder();
       }
       nativeLoaded = true;
+      usagePreloader.catalog(chats);
     }
     void refreshSelectedChatMetrics();
     render();
@@ -565,6 +583,7 @@ async function flushSourceRefresh() {
         changed = true;
       }
     }
+    usagePreloader.catalog(chats);
     void refreshSelectedChatMetrics();
     if (changed) {
       for (const raw of update.chats || []) {
@@ -788,7 +807,8 @@ function quotaMarkup(now = Date.now()) {
     const label = window.window_minutes === 300 ? '5h' : 'W';
     const resetAt = Number.isFinite(window.resets_at) ? window.resets_at * 1000 : NaN;
     const exact = Number.isFinite(resetAt) ? fullLocalTime(resetAt).slice(0,16) : t('未知');
-    const tip = Number.isFinite(resetAt) ? `${exact} (-${quotaCountdown(resetAt,now)})` : exact;
+    const tip = (Number.isFinite(resetAt) ? `${exact} (-${quotaCountdown(resetAt,now)})` : exact)
+      + '\n\n' + resetCardsTip(quota,now) + '\n' + t('点击查看额度与消耗');
     return ui`<span class="quota-window ${expired ? 'quota-expired' : ''}" title="${esc(tip)}"><span>${label}</span><span class="quota-ring ${tone}" style="--remaining:${expired ? 0 : remaining}%" role="img" aria-label="${label}: ${remaining}%"></span><span>${remaining}%</span>${window.window_minutes === 300 ? ui`<span class="quota-reset-time">${quotaResetTime(resetAt,300)}</span>` : ''}</span>`;
   }).join('');
 }
@@ -821,12 +841,7 @@ function metricsTooltip(metrics, data) {
     t('估算生成速度，含推理：') + (metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'),
     t('token 覆盖率：') + metricPercent(metrics?.coverage) + `；${metricNumber(metrics?.validRequestCount)}/${metricNumber(metrics?.requestCount)} ` + t('次请求'),
     t('缓存命中率：') + metricPercent(metrics?.cacheHitRate, 2),
-    t('工具等待不计入生成速度；子智能体单独统计。'),
-    metrics?.ttftEstimated ? t('首 token 缺少原生值，以轮次开始至首条正文输出起点估算。') : '',
-    turn?.requests?.[0]?.responseId ? t('响应 ID：') + turn.requests[0].responseId : '',
-    !metricValue(metrics?.ttftMs) ? t('日志缺少这次请求的可靠首 token 计时。') : '',
-    turn?.status === 'inProgress' ? t('仅采用最近一次有效、已结算请求；不完整记录暂不计入。') : '',
-    data.complete ? '' : t('记录不完整'), t('点击查看对话详情')].filter(Boolean).join('\n');
+    t('点击查看对话详情')].join('\n');
 }
 const metricsPendingKey = (threadId, latestOnly) => `${threadId}:${latestOnly ? 'latest' : 'all'}`;
 async function readChatMetrics(threadId, latestOnly = false) {
@@ -887,13 +902,25 @@ function metricsTable(headers, rows) {
   return `<div class="metrics-table-scroll"><table><thead><tr>${headers.map(label => `<th>${esc(t(label))}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}">${esc(t('没有可用记录'))}</td></tr>`}</tbody></table></div>`;
 }
 function metricCells(values) { return values.map(value => `<td>${value}</td>`).join(''); }
+function metricsCostMoney(value) {
+  const totals = value?.totals || value;
+  if (!totals?.requests || totals.unpricedRequests === totals.requests) return '—';
+  return `≈$${totals.costUsd.toFixed(4)}${totals.unpricedRequests ? ' + ' + t('未计价') : ''}`;
+}
+function metricsConsumptionMarkup(data) {
+  const consumption = data.consumption, totals = consumption?.totals;
+  if (!totals) return '';
+  const fields = [['API 等价金额',metricsCostMoney(totals)],['输入 / 输出 token',`${metricNumber(totals.input)} / ${metricNumber(totals.output)}`],
+    ['缓存输入',metricNumber(totals.cached)],['其中推理',metricNumber(totals.reasoning)],['已结算请求',metricNumber(totals.requests)],['未计价请求',metricNumber(totals.unpricedRequests)]];
+  return ui`<section class="metrics-consumption"><h3>${t('本对话消耗（全部已结算请求）')}</h3><dl class="metrics-overview">${fields.map(([label,value])=>`<div><dt>${esc(t(label))}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl><p class="metrics-note">${t('仅统计本对话自身，子代理在下方分别显示；包含中断和进行中轮次的已结算请求。')}</p><p class="metrics-note">${t('API 等价金额，非订阅扣款')} · ${t('价目表日期')} ${esc(consumption.priceDate)}${totals.estimatedRequests ? ` · ${metricNumber(totals.estimatedRequests)} ${esc(t('次请求按缺失计价配置估算'))}` : ''}</p></section>`;
+}
 function metricsTurnDetails(turn) {
   const requests = (turn.requests || []).map(request => `<tr>${metricCells([
     esc(request.responseId || '—'), metricNumber(request.inputTokens), metricNumber(request.cachedInputTokens), metricNumber(request.outputTokens), metricNumber(request.reasoningTokens),
-    esc(metricsTime(request.startMs)), esc(metricsTime(request.endMs)), esc(t(request.included ? '已纳入' : request.excludedReason || '未纳入'))
+    esc(metricsTime(request.startMs)), esc(metricsTime(request.endMs)), metricValue(request.costUsd) ? `≈$${request.costUsd.toFixed(4)}` : '—', esc(t(request.included ? '已纳入' : request.excludedReason || '未纳入'))
   ])}</tr>`);
   const activities = (turn.activities || []).map(activity => `<details class="metrics-activity"><summary><time>${esc(metricsTime(activity.at ?? activity.startedAt))}</time> ${esc(activity.label || activity.type || '—')} <span>${esc(t(activity.status || ''))}</span></summary><div class="metrics-note">${esc(activity.type || '')} · ${esc(metricsTime(activity.startedAt))} → ${esc(metricsTime(activity.completedAt))}</div>${activity.detail ? `<pre>${esc(typeof activity.detail === 'string' ? activity.detail : JSON.stringify(activity.detail, null, 2))}</pre>` : `<p class="metrics-note">${esc(t('没有可读详情；内容可能缺失或加密'))}</p>`}</details>`).join('');
-  return `<details class="metrics-section"><summary>${esc(t('请求明细'))} (${requests.length})</summary>${metricsTable(['响应 ID','输入 token','缓存输入','输出 token','其中推理','开始时间','结束时间','计时状态'], requests)}</details><details class="metrics-section"><summary>${esc(t('活动记录'))} (${turn.activities?.length || 0})</summary><p class="metrics-note">${esc(t('按日志时间展示；活动可能并行，空档不推断为生成时间。'))}</p>${activities || esc(t('没有可用记录'))}</details>`;
+  return `<details class="metrics-section"><summary>${esc(t('请求明细'))} (${requests.length})</summary>${metricsTable(['响应 ID','输入 token','缓存输入','输出 token','其中推理','开始时间','结束时间','API 等价金额','计时状态'], requests)}</details><details class="metrics-section"><summary>${esc(t('活动记录'))} (${turn.activities?.length || 0})</summary><p class="metrics-note">${esc(t('按日志时间展示；活动可能并行，空档不推断为生成时间。'))}</p>${activities || esc(t('没有可用记录'))}</details>`;
 }
 function metricsHeader(canGoBack = false) {
   return ui`<header${isMetricsWindow ? ' data-window-drag' : ''}>${canGoBack ? ui`<button class="icon-button" data-metrics-action="back" title="${t('返回上层')}" aria-label="${t('返回上层')}">${icon('chevron-left')}</button>` : ''}<span>${t('对话详情')}</span><span class="toolbar-spacer"></span>${isMetricsWindow ? ui`<button class="icon-button" data-window-action="minimize" title="${t('最小化')}" aria-label="${t('最小化')}">${icon('window-minimize')}</button><button class="icon-button" data-window-action="toggleMaximize" title="${t(state.windowMaximized ? '还原' : '最大化')}" aria-label="${t(state.windowMaximized ? '还原' : '最大化')}">${icon(state.windowMaximized ? 'window-restore' : 'window-maximize')}</button>` : ''}<button class="icon-button" data-metrics-action="close" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></header>`;
@@ -908,16 +935,17 @@ function chatMetricsMarkup(data, scope = '', canGoBack = false) {
     ['有效请求 / 全部请求',`${metricNumber(metrics?.validRequestCount)} / ${metricNumber(metrics?.requestCount)}`],['token 覆盖率',metricPercent(metrics?.coverage)],['生成样本耗时',metricSeconds(metrics?.generationMs)],['总轮次耗时',metricSeconds(metrics?.durationMs)],['工具阻塞',metricSeconds(metrics?.toolWaitMs)],
     ['完成轮次 / 全部轮次',`${metricNumber(metrics?.completedTurnCount)} / ${metricNumber(metrics?.turnCount)}`]];
   if (scope === 'all') fields.push(['首 token 中位数',metricSeconds(metrics?.ttftMedianMs,3)],['首 token 样本数',metricNumber(metrics?.ttftSampleCount)]);
+  else fields.push(['本轮 API 等价金额',metricsCostMoney(data.turns?.find(turn=>turn.turnId===selectedTurnId)?.consumption)]);
   const turnRows = turns.map(turn => `<tr class="${turn.turnId === selectedTurnId ? 'metrics-selected' : ''}">${metricCells([
     `<button class="metrics-link" data-metrics-action="scope" data-scope="${esc(turn.turnId)}">${esc(metricsTime(turn.startedAt))}</button>`, esc(([turn.model, turn.effort].filter(Boolean).join(' / ') || '—') + (['priority','fast'].includes(turn.serviceTier) ? ' · Fast' : '')), esc(metricStatus(turn.status)),
-    metricSeconds(turn.metrics?.ttftMs), metricValue(turn.metrics?.tokenSpeed) ? turn.metrics.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(turn.metrics?.coverage), metricPercent(turn.metrics?.cacheHitRate), metricNumber(turn.metrics?.outputTokens), metricSeconds(turn.metrics?.durationMs), metricSeconds(turn.metrics?.toolWaitMs)
+    metricSeconds(turn.metrics?.ttftMs), metricValue(turn.metrics?.tokenSpeed) ? turn.metrics.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(turn.metrics?.coverage), metricPercent(turn.metrics?.cacheHitRate), metricNumber(turn.metrics?.outputTokens), metricSeconds(turn.metrics?.durationMs), metricSeconds(turn.metrics?.toolWaitMs), esc(metricsCostMoney(turn.consumption))
   ])}</tr>`);
   const toolRows = (data.tools || []).map(tool => `<tr>${metricCells([esc(tool.name),metricNumber(tool.count),metricNumber(tool.failures),metricSeconds(tool.runtimeMs),metricSeconds(tool.waitMs)])}</tr>`);
   const agentRows = (data.subagents || []).map(agent => `<tr>${metricCells([
-    `<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(agent.path || agent.threadId)}">${esc(agent.name || agent.path || agent.threadId)}</button>`, esc(agent.model || '—'), esc(metricStatus(agent.status)), metricNumber(agent.summary?.outputTokens), metricValue(agent.summary?.tokenSpeed) ? agent.summary.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(agent.summary?.coverage), metricPercent(agent.summary?.cacheHitRate), agent.error ? esc(agent.error) : '—'
+    `<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(agent.path || agent.threadId)}">${esc(agent.name || agent.path || agent.threadId)}</button>`, esc(agent.model || '—'), esc(metricStatus(agent.status)), metricNumber(agent.summary?.outputTokens), metricValue(agent.summary?.tokenSpeed) ? agent.summary.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(agent.summary?.coverage), metricPercent(agent.summary?.cacheHitRate), esc(metricsCostMoney(agent.consumption)), agent.error ? esc(agent.error) : '—'
   ])}</tr>`);
   const currentTurn = data.turns?.find(turn => turn.turnId === selectedTurnId);
-  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title || data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd || '—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ') || '—')} · ${t(data.archived ? '已归档' : '未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p><div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${turns.map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有轮次记录'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞'],turnRows)}${currentTurn ? metricsTurnDetails(currentTurn) : ''}<h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','读取错误'],agentRows)}</div>`;
+  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title || data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd || '—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ') || '—')} · ${t(data.archived ? '已归档' : '未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p>${metricsConsumptionMarkup(data)}<div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${turns.map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有轮次记录'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞','API 等价金额'],turnRows)}${currentTurn ? metricsTurnDetails(currentTurn) : ''}<h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','API 等价金额','读取错误'],agentRows)}</div>`;
 }
 function renderChatMetricsDialog() {
   const dialog = document.getElementById('chat-metrics-dialog');
@@ -1004,7 +1032,7 @@ function updateSyncStatus() {
   if (element) element.innerHTML = syncMarkup();
 }
 function renderStatusbar() {
-  return ui`<footer class="statusbar"><span class="status-sync">${syncMarkup()}</span><div class="status-chat">${statusChatMarkup()}</div><div class="status-quota">${quotaMarkup()}</div></footer>`;
+  return ui`<footer class="statusbar"><span class="status-sync">${syncMarkup()}</span><div class="status-chat">${statusChatMarkup()}</div><div class="status-quota" role="button" tabindex="0" aria-label="${t('额度与消耗')}">${quotaMarkup()}</div></footer>`;
 }
 function updateStatusChat() {
   const element = document.querySelector('.status-chat');
@@ -1523,14 +1551,22 @@ function projectRecentPanel() {
   return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<span class="toolbar-spacer"></span><button class="icon-button" data-action="open-recent-rules" title="${t('动态规则')}" aria-label="${t('动态规则')}">${icon('activity')}</button><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
 }
 
+function projectSectionButton(kind, collapsed = false) {
+  const label = `${t(collapsed ? '恢复' : '关闭')} ${kind === 'project' ? 'Projects' : 'Chats'}`;
+  return ui`<button class="icon-button ${collapsed ? 'section-restore' : 'section-close'}" data-action="toggle-project-section" data-kind="${kind}" title="${esc(label)}" aria-label="${esc(label)}" aria-expanded="${!collapsed}">${icon(collapsed ? 'chevrons-up' : 'x')}</button>`;
+}
+function collapsedFolderSection(kind) {
+  return ui`<div class="view-block folder-view-block ${kind === 'project' ? 'project-structure' : 'project-chat-structure'} section-collapsed"><div class="folder-view-label"><strong>${kind === 'project' ? 'Projects' : 'Chats'}</strong><span class="toolbar-spacer"></span>${projectSectionButton(kind,true)}</div></div>`;
+}
 function renderProjectPane() {
-  const activeCount = filteredProjectFolderProjects().length;
-  const archivedCount = projectChats().filter(chat => effectiveReasons(chat).length).length;
-  return ui`<aside class="workspace-pane project-pane projects-workspace ${state.projectArchiveOpen ? 'project-archive-open' : ''}" style="--project-recent-height:${state.projectRecentHeight}px;--project-structure-height:${state.projectStructureHeight}px;--project-label-width:${projectLabelWidth()}ch;--project-chat-time-width:${state.projectChatTimeWidth > 0 ? `${state.projectChatTimeWidth}px` : 'calc(var(--chat-lead) + 4px)'}" aria-label="Project 管理">
+  const activeCount = state.projectsCollapsed ? 0 : filteredProjectFolderProjects().length;
+  const archivedCount = state.projectChatsCollapsed ? 0 : projectChats().filter(chat => effectiveReasons(chat).length).length;
+  const archiveOpen = state.projectArchiveOpen && !state.projectChatsCollapsed;
+  return ui`<aside class="workspace-pane project-pane projects-workspace ${archiveOpen ? 'project-archive-open' : ''} ${state.projectsCollapsed ? 'projects-section-collapsed' : ''} ${state.projectChatsCollapsed ? 'chats-section-collapsed' : ''}" style="--project-recent-height:${state.projectRecentHeight}px;--project-structure-height:${state.projectStructureHeight}px;--project-label-width:${projectLabelWidth()}ch;--project-chat-time-width:${state.projectChatTimeWidth > 0 ? `${state.projectChatTimeWidth}px` : 'calc(var(--chat-lead) + 4px)'}" aria-label="Project 管理">
     ${projectRecentPanel()}
-    <div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}">${folderToggleAllButton('project')}<strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button></div><div class="scroll tree">${projectTree()}</div></div>
-    <div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="project-structure" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整 Project 与 Chat 文件夹高度')}">${folderToggleAllButton('chat')}<strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>
-    ${state.projectArchiveOpen ? ui`<div class="view-block project-archive-panel archive-block"><div class="view-head scope-head scope-archive">${icon('archive')}<span>${t('归档对话')}</span><span class="count">${archivedCount}</span><span class="toolbar-spacer"></span><button class="icon-button" data-action="toggle-project-archive" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></div><div class="scroll">${archivedChatList()}</div></div>` : ''}
+    ${state.projectsCollapsed ? collapsedFolderSection('project') : ui`<div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}">${folderToggleAllButton('project')}<strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button>${projectSectionButton('project')}</div><div class="scroll tree">${projectTree()}</div></div>`}
+    ${state.projectChatsCollapsed ? collapsedFolderSection('chat') : ui`<div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="${state.projectsCollapsed ? 'project-recent' : 'project-structure'}" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t(state.projectsCollapsed ? '调整动态栏高度' : '调整 Project 与 Chat 文件夹高度')}">${folderToggleAllButton('chat')}<strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}${projectSectionButton('chat')}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>`}
+    ${archiveOpen ? ui`<div class="view-block project-archive-panel archive-block"><div class="view-head scope-head scope-archive">${icon('archive')}<span>${t('归档对话')}</span><span class="count">${archivedCount}</span><span class="toolbar-spacer"></span><button class="icon-button" data-action="toggle-project-archive" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></div><div class="scroll">${archivedChatList()}</div></div>` : ''}
   </aside>`;
 }
 
@@ -1846,7 +1882,7 @@ function tickExecutionClock() {
   executionClockTimer = setTimeout(tickExecutionClock, 1000 - Date.now() % 1000);
 }
 function syncLiveTimers() {
-  if (isMetricsWindow) return;
+  if (isMetricsWindow || isUsageWindow) return;
   if (isPreviewWindow) {
     clearInterval(previewRefreshTimer);
     previewRefreshTimer = 0;
@@ -2232,6 +2268,10 @@ function render() {
   applyFontSize();
   document.documentElement.lang = language() === 'en' ? 'en' : 'zh-CN';
   document.documentElement.dataset.runtime = 'native';
+  if (isUsageWindow) {
+    document.body.classList.add('usage-window');
+    return;
+  }
   if (isMetricsWindow) {
     document.body.classList.add('metrics-window');
     return;
@@ -3256,6 +3296,17 @@ function updateRowSelection(kind, row, event) {
 }
 
 document.addEventListener("click", async event => {
+  const dismiss = event.target.closest('[data-quota-dismiss]');
+  if (dismiss && nativeInvoke) {
+    try { await nativeInvoke('dismiss_quota_notice',{eventId:dismiss.dataset.quotaDismiss}); await refreshQuotaNotices(); }
+    catch(error) { showToast(t('操作失败'),String(error),'error'); }
+    return;
+  }
+  if (event.target.closest('.status-quota') && nativeInvoke) {
+    try { await nativeInvoke('open_usage_window'); }
+    catch(error) { showToast(t('操作失败'),String(error),'error'); }
+    return;
+  }
   if (isPreviewWindow) previewLog('event-click', {target: previewEventTarget(event.target), button: event.button, detail: event.detail, x: event.clientX, y: event.clientY});
   const metricsAction = event.target.closest('[data-metrics-action]');
   if (metricsAction) {
@@ -3572,6 +3623,13 @@ document.addEventListener("click", async event => {
     }
     if (name === 'toggle-recent-project-column') { state.recentProjectColumnVisible = !state.recentProjectColumnVisible; render(); return; }
     if (name === 'toggle-project-recent-link') { state.projectRecentLinked = !state.projectRecentLinked; savePreferences(); render(); return; }
+    if (name === 'toggle-project-section') {
+      const key = action.dataset.kind === 'project' ? 'projectsCollapsed' : action.dataset.kind === 'chat' ? 'projectChatsCollapsed' : '';
+      if (!key) return;
+      state[key] = !state[key];
+      render();
+      return;
+    }
     if (name === 'clear-selection') {
       state[action.dataset.kind === 'project' ? 'selectedProjectIds' : 'selectedChatIds'].clear();
     }
@@ -3753,6 +3811,11 @@ document.addEventListener("change", async event => {
 });
 
 document.addEventListener("keydown", event => {
+  if (['Enter',' '].includes(event.key) && event.target.closest('.status-quota') && nativeInvoke) {
+    event.preventDefault();
+    void nativeInvoke('open_usage_window').catch(error => showToast(t('操作失败'),String(error),'error'));
+    return;
+  }
   if (event.key === 'Enter' && event.target.dataset.input === 'chat-days') {
     event.preventDefault();
     setChatDays(event.target.value);
@@ -4198,7 +4261,17 @@ function resizePanel(type, height) {
   const projectPane = type === 'project-recent' || type === 'project-structure';
   const pane = document.querySelector(projectPane ? '.projects-workspace' : '.chats-workspace');
   if (!pane) return;
+  if (projectPane && state.projectsCollapsed && state.projectChatsCollapsed) return;
+  if (type === 'project-structure' && (state.projectsCollapsed || state.projectChatsCollapsed)) return;
   if (type === 'project-recent') {
+    if (state.projectsCollapsed || state.projectChatsCollapsed) {
+      const header = pane.querySelector?.('.folder-view-label')?.getBoundingClientRect?.().height || MIN_SECTION_SIZE;
+      const reserved = header + Math.max(64,header + MIN_SECTION_SIZE) + (state.projectArchiveOpen && !state.projectChatsCollapsed ? 100 : 0);
+      const value = Math.max(MIN_SECTION_SIZE,Math.min(Math.max(MIN_SECTION_SIZE,pane.clientHeight - reserved),height));
+      state.projectRecentHeight = value;
+      pane.style.setProperty('--project-recent-height',`${value}px`);
+      return;
+    }
     const total = state.projectRecentHeight + state.projectStructureHeight;
     const value = Math.max(MIN_SECTION_SIZE, Math.min(total - MIN_SECTION_SIZE, height));
     state.projectRecentHeight = value;
@@ -4271,12 +4344,13 @@ async function listenForSourceChanges() {
   if (!nativeInvoke) return;
   await window.__TAURI__?.event?.listen?.('codex-source-changed', event => {
     const change = event.payload || {};
+    usagePreloader.changed(change.threads || []);
     queueSourceRefresh(change);
     if (!document.hidden && previewChatId && (change.full || change.threads?.includes(previewChatId))) refreshConversationPreview();
   });
 }
 document.addEventListener('visibilitychange', () => {
-  if (isMetricsWindow) return;
+  if (isMetricsWindow || isUsageWindow) return;
   syncLiveTimers();
   if (!document.hidden && nativeInvoke) {
     chats.filter(chat => chat.working && (!isPreviewWindow || chat.id === previewChatId)).forEach(chat => pendingActivityIds.add(chat.id));
@@ -4286,7 +4360,17 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-if (isMetricsWindow) {
+if (isUsageWindow) {
+  document.body.classList.add('usage-window');
+  render();
+  const usageView = createUsageView({invoke:nativeInvoke,nativeWindow});
+  void (async () => {
+    await loadToolConfig();
+    await window.__TAURI__?.event?.listen?.('usage-index-progress',event => usageView.progress(event.payload));
+    await window.__TAURI__?.event?.listen?.('usage-context-changed',() => {void usageView.invalidate();});
+    await usageView.open();
+  })();
+} else if (isMetricsWindow) {
   document.body.classList.add('metrics-window');
   render();
   if (nativeWindow?.isMaximized) void syncWindowState();
@@ -4324,7 +4408,7 @@ if (isMetricsWindow) {
   });
   void listenForSourceChanges().finally(async () => {
     await loadNativeSnapshot();
-    void refreshLiveRateLimits();
+    void refreshLiveRateLimits(true);
   });
   if (nativeWindow) {
     void nativeWindow.onResized(() => {

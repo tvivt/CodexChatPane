@@ -26,6 +26,24 @@ pub struct RateLimits {
     pub secondary: Option<RateWindow>,
     #[serde(alias = "planType")]
     pub plan_type: Option<String>,
+    pub account_id: Option<String>,
+    pub reset_credits: Option<ResetCredits>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCredits {
+    pub available_count: u64,
+    pub credits: Option<Vec<ResetCredit>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCredit {
+    pub id: String,
+    pub status: String,
+    pub expires_at: Option<i64>,
+    pub granted_at: Option<i64>,
 }
 
 fn response(lines: &Receiver<String>, id: i64, deadline: Instant) -> Result<Value, String> {
@@ -56,7 +74,11 @@ fn parse_limits(message: &Value) -> Result<RateLimits, String> {
         .as_object()
         .or_else(|| message["rateLimits"].as_object())
         .ok_or("Codex 未返回额度")?;
-    serde_json::from_value(Value::Object(limits.clone())).map_err(|error| error.to_string())
+    let mut result: RateLimits =
+        serde_json::from_value(Value::Object(limits.clone())).map_err(|error| error.to_string())?;
+    result.account_id = message["accountId"].as_str().map(str::to_owned);
+    result.reset_credits = serde_json::from_value(message["rateLimitResetCredits"].clone()).ok();
+    Ok(result)
 }
 
 #[cfg(windows)]
@@ -240,6 +262,16 @@ impl Drop for ProcessTree {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn preserves_account_and_reset_cards_without_confusing_credit_balance() {
+        let data = json!({"accountId":"account","rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":300,"resetsAt":1000},"credits":{"balance":"12"}},"rateLimitResetCredits":{"availableCount":2,"credits":[{"id":"card","status":"available","expiresAt":2000,"grantedAt":1000}]}});
+        let value = parse_limits(&data).unwrap();
+        assert_eq!(value.account_id.as_deref(), Some("account"));
+        let cards = value.reset_credits.unwrap();
+        assert_eq!(cards.available_count, 2);
+        assert_eq!(cards.credits.unwrap()[0].expires_at, Some(2000));
+    }
 
     #[test]
     fn reads_codex_bucket_from_app_server() {

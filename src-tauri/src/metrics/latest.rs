@@ -268,6 +268,10 @@ fn feed(parser: &mut Parser, path: &Path, start: u64, end: u64) -> Result<u64, S
 
 fn snapshot(mut data: ChatMetrics, parser: &Parser) -> ChatMetrics {
     let (mut turns, _, _, warnings, complete) = parser.clone().finish();
+    data.usage_batches = turns
+        .iter()
+        .map(|t| (t.model.clone(), t.service_tier.clone(), t.requests.clone()))
+        .collect();
     data.complete = complete;
     data.warnings = warnings;
     if let Some(mut turn) = turns.pop() {
@@ -380,7 +384,26 @@ mod tests {
         );
         assert_eq!(latest.turns[0].requests[0].response_id, "latest");
         assert_eq!(latest.turns[0].status, "interrupted");
+        assert!(
+            latest
+                .usage_batches
+                .iter()
+                .map(|(_, _, r)| r.len())
+                .sum::<usize>()
+                >= 2,
+            "usage reuse must retain all settled requests even though the speed UI selects one"
+        );
         assert!(latest.subagents.is_empty() && latest.tools.is_empty());
+        crate::usage::context::confirm(dir.path(), Some("reuse-test")).unwrap();
+        crate::usage::costs::reuse(dir.path(), &latest).unwrap();
+        let usage = serde_json::to_value(
+            crate::usage::costs::report(dir.path(), Default::default()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            usage["totals"]["requests"].as_u64().unwrap() >= 2,
+            "the single-request speed view must not truncate persisted consumption"
+        );
         assert_eq!(cache.as_ref().unwrap().parser.order, vec!["turn"]);
         append(
             &path,
