@@ -8,9 +8,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub(crate) mod analysis;
+pub(crate) mod details;
 mod latest;
+mod legacy;
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
     pub input_tokens: Option<u64>,
@@ -33,9 +36,11 @@ pub struct Summary {
     pub tool_wait_ms: u64,
     pub turn_count: usize,
     pub completed_turn_count: usize,
+    #[serde(default)]
+    pub activity_count: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub response_id: String,
@@ -54,7 +59,7 @@ pub struct Request {
     total_tokens: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Activity {
     pub id: String,
@@ -67,7 +72,7 @@ pub struct Activity {
     pub detail: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
     pub turn_id: String,
@@ -83,7 +88,7 @@ pub struct Turn {
     pub consumption: Option<crate::usage::costs::Totals>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
     pub name: String,
@@ -93,7 +98,7 @@ pub struct Tool {
     pub wait_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subagent {
     pub thread_id: String,
@@ -106,7 +111,7 @@ pub struct Subagent {
     pub consumption: Option<crate::usage::costs::Consumption>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMetrics {
     pub thread_id: String,
@@ -126,13 +131,39 @@ pub struct ChatMetrics {
     pub tools: Vec<Tool>,
     pub subagents: Vec<Subagent>,
     pub consumption: Option<crate::usage::costs::Consumption>,
+    #[serde(default)]
+    pub recent_speed: Option<SpeedEstimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_total: Option<usize>,
     #[serde(skip)]
     pub(crate) parent_thread_id: Option<String>,
     #[serde(skip)]
     pub(crate) usage_batches: Vec<(Option<String>, Option<String>, Vec<Request>)>,
+    #[serde(skip)]
+    pub(crate) usage_complete: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpeedConfig {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub service_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpeedEstimate {
+    pub config: SpeedConfig,
+    pub token_speed: f64,
+    pub samples: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 struct Usage {
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
@@ -141,7 +172,7 @@ struct Usage {
     total_tokens: Option<u64>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Candidate {
     starts: Vec<i64>,
     reasoning_start: bool,
@@ -150,7 +181,7 @@ struct Candidate {
     broken: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TurnState {
     turn: Turn,
     candidate: Candidate,
@@ -190,7 +221,7 @@ impl TurnState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Call {
     turn: String,
     name: String,
@@ -199,7 +230,7 @@ struct Call {
     failure: bool,
     runtime: u64,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Parser {
     id: String,
     active_thread: String,
@@ -672,6 +703,7 @@ impl Parser {
             metrics.tool_wait_ms = interval_sum(intervals);
             metrics.turn_count = 1;
             metrics.completed_turn_count = usize::from(state.turn.status == "completed");
+            metrics.activity_count = state.turn.activities.len();
             // Old token_count is a thread cumulative snapshot, never add snapshots from separate turns.
             if state.turn.requests.is_empty() && state.fallback.is_some() {
                 self.warning("旧日志仅有线程累计用量；轮次用量与生成速度不可用");
@@ -851,6 +883,10 @@ fn aggregate(turns: &[Turn]) -> Summary {
     let mut summary = summarize(&requests);
     summary.turn_count = turns.len();
     summary.completed_turn_count = completed.len();
+    summary.activity_count = completed
+        .iter()
+        .map(|turn| turn.metrics.activity_count)
+        .sum();
     summary.duration_ms = sum_options(completed.iter().map(|turn| turn.metrics.duration_ms));
     summary.tool_wait_ms = completed.iter().map(|turn| turn.metrics.tool_wait_ms).sum();
     let mut ttfts: Vec<_> = completed
@@ -868,16 +904,12 @@ fn aggregate(turns: &[Turn]) -> Summary {
     summary
 }
 
-pub fn read(thread_id: &str) -> Result<ChatMetrics, String> {
-    let home = crate::source::codex_home()?;
-    read_at(&home, thread_id, true)
-}
 pub fn read_latest(thread_id: &str) -> Result<ChatMetrics, String> {
     latest::read(&crate::source::codex_home()?, thread_id)
 }
 
 pub(crate) fn read_own(home: &Path, thread_id: &str) -> Result<ChatMetrics, String> {
-    read_at_mode(home, thread_id, false, true)
+    analysis::read(home, thread_id).map(|(data, _)| data)
 }
 
 fn catalog(home: &Path, thread_id: &str) -> Result<(String, ChatMetrics), String> {
@@ -886,8 +918,9 @@ fn catalog(home: &Path, thread_id: &str) -> Result<(String, ChatMetrics), String
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|e| e.to_string())?;
+    let title = crate::source::thread_title_expression(&db)?;
     let (path,title,cwd,model,archived,created,updated): (String,String,Option<String>,Option<String>,bool,Option<i64>,Option<i64>) = db.query_row(
-        "SELECT rollout_path,title,cwd,model,archived,created_at,updated_at FROM threads WHERE id=?1", [thread_id],
+        &format!("SELECT rollout_path,{title},cwd,model,archived,created_at,updated_at FROM threads WHERE id=?1"), [thread_id],
         |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).map_err(|e|e.to_string())?;
     let as_of = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -909,12 +942,17 @@ fn catalog(home: &Path, thread_id: &str) -> Result<(String, ChatMetrics), String
             warnings: vec![],
             parent_thread_id: None,
             usage_batches: vec![],
+            usage_complete: true,
             latest_turn_id: None,
             summary: Summary::default(),
             turns: vec![],
             tools: vec![],
             subagents: vec![],
             consumption: None,
+            recent_speed: None,
+            detail_revision: None,
+            turn_offset: None,
+            turn_total: None,
         },
     ))
 }
@@ -932,6 +970,7 @@ fn read_at_mode(
     let (path, mut data) = catalog(home, thread_id)?;
     let segments = crate::preview::metrics_segments(home, thread_id, Path::new(&path))?;
     let mut parser = Parser::new(thread_id);
+    let mut legacy = legacy::Collector::new(thread_id);
     let mut last_fallback = None;
     let mut subagent = false;
     let mut inherited_history = false;
@@ -953,6 +992,7 @@ fn read_at_mode(
             }
             match serde_json::from_str::<Value>(&line) {
                 Ok(record) => {
+                    legacy.apply(&record);
                     if usage_only
                         && !matches!(
                             record["type"].as_str(),
@@ -1004,6 +1044,7 @@ fn read_at_mode(
             }
         }
     }
+    legacy.attach(&mut parser);
     let (turns, tools, mut subagents, mut warnings, mut complete) = parser.finish();
     let mut summary = aggregate(&turns);
     if turns.iter().all(|turn| turn.requests.is_empty()) && !subagent && !inherited_history {
@@ -1028,23 +1069,9 @@ fn read_at_mode(
     let effort = turns.last().and_then(|turn| turn.effort.clone());
     if children {
         subagents.retain_mut(|agent| {
-            match read_at(home, &agent.thread_id, false) {
-                Ok(result) => {
-                    if result
-                        .parent_thread_id
-                        .as_deref()
-                        .is_some_and(|id| id != thread_id)
-                    {
-                        return false;
-                    }
+            match catalog(home, &agent.thread_id) {
+                Ok((_, result)) => {
                     agent.model = result.model;
-                    agent.consumption = result.consumption;
-                    agent.summary = Some(result.summary);
-                    agent.status = result
-                        .turns
-                        .last()
-                        .map(|turn| turn.status.clone())
-                        .unwrap_or(agent.status.clone());
                 }
                 Err(error) => {
                     agent.error = Some(error);
@@ -1473,13 +1500,16 @@ mod tests {
             serde_json::to_value(&before.consumption).unwrap()["totals"]["output"],
             100
         );
-        assert_eq!(
-            serde_json::to_value(&before.subagents[0].consumption).unwrap()["totals"]["output"],
-            75
+        assert!(before.subagents[0].consumption.is_none());
+        assert!(
+            before.subagents[0].summary.is_none(),
+            "parent details do not read child statistics"
         );
+        let child_data = read_at(home, "agent", false).unwrap();
+        assert_eq!(child_data.summary.output_tokens, Some(75));
         assert_eq!(
-            before.subagents[0].summary.as_ref().unwrap().output_tokens,
-            Some(75)
+            serde_json::to_value(&child_data.consumption).unwrap()["totals"]["output"],
+            75
         );
         for path in [&parent, &main, &child] {
             crate::rollout_log::compress_fixture(path);
@@ -1493,8 +1523,9 @@ mod tests {
             serde_json::to_value(&after.summary).unwrap(),
             serde_json::to_value(&before.summary).unwrap()
         );
+        assert!(after.subagents[0].summary.is_none());
         assert_eq!(
-            after.subagents[0].summary.as_ref().unwrap().output_tokens,
+            read_at(home, "agent", false).unwrap().summary.output_tokens,
             Some(75)
         );
         // A legacy cumulative snapshot may include the fork base; do not use it as own usage.

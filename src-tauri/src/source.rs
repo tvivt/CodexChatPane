@@ -41,6 +41,11 @@ pub struct SourceSnapshot {
     pub chats: Vec<ChatSnapshot>,
     #[serde(skip)]
     pub(crate) history_summaries: HashMap<String, HistorySummary>,
+    #[serde(skip)]
+    pub(crate) history_loaded: bool,
+    pub activity_pending: Vec<String>,
+    #[serde(skip)]
+    pub(crate) source_identity: Option<(PathBuf, Option<std::time::SystemTime>)>,
 }
 
 pub(crate) type HistorySummary = (
@@ -56,6 +61,7 @@ pub(crate) type HistorySummary = (
 #[serde(rename_all = "camelCase")]
 pub struct ActivityUpdate {
     pub chats: Vec<ChatSnapshot>,
+    pub projects: Vec<ProjectSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -70,6 +76,7 @@ pub struct ProjectSnapshot {
     pub synthetic: bool,
     pub path_valid: bool,
     pub codex_pinned: bool,
+    pub path_checked: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -79,6 +86,7 @@ pub struct ChatSnapshot {
     pub rollout_path: PathBuf,
     pub turn_id: Option<String>,
     pub metrics_revision: Option<String>,
+    pub generation: Option<rollout::Generation>,
     pub project_id: String,
     pub title: String,
     pub created_at: i64,
@@ -96,12 +104,14 @@ pub struct ChatSnapshot {
     pub execution_status: Option<String>,
     pub activity_at: i64,
     pub diagnostic: Option<Diagnostic>,
+    pub activity_synced: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 struct ThreadActivity {
     turn_id: Option<String>,
     metrics_revision: Option<String>,
+    generation: Option<rollout::Generation>,
     working: bool,
     last_user_message_at: i64,
     execution_started_at: Option<i64>,
@@ -266,9 +276,27 @@ pub fn scan() -> Result<SourceSnapshot, String> {
     scan_path(&home.join("state_5.sqlite"), &home)
 }
 
-pub fn scan_catalog(previous: &SourceSnapshot) -> Result<SourceSnapshot, String> {
+pub(crate) fn snapshot_identity() -> Result<(PathBuf, Option<std::time::SystemTime>), String> {
     let home = codex_home()?;
-    scan_path_with_previous(&home.join("state_5.sqlite"), &home, Some(previous))
+    snapshot_identity_at(&home.join("state_5.sqlite"), &home)
+}
+
+fn snapshot_identity_at(
+    database: &Path,
+    home: &Path,
+) -> Result<(PathBuf, Option<std::time::SystemTime>), String> {
+    Ok((
+        home.canonicalize().map_err(|e| e.to_string())?,
+        fs::metadata(database)
+            .map_err(|e| e.to_string())?
+            .created()
+            .ok(),
+    ))
+}
+
+pub fn scan_catalog(previous: Option<&SourceSnapshot>) -> Result<SourceSnapshot, String> {
+    let home = codex_home()?;
+    scan_path_mode(&home.join("state_5.sqlite"), &home, previous, true)
 }
 
 fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
@@ -280,6 +308,17 @@ fn scan_path_with_previous(
     home: &Path,
     previous: Option<&SourceSnapshot>,
 ) -> Result<SourceSnapshot, String> {
+    scan_path_mode(database, home, previous, false)
+}
+
+fn scan_path_mode(
+    database: &Path,
+    home: &Path,
+    previous: Option<&SourceSnapshot>,
+    catalog_only: bool,
+) -> Result<SourceSnapshot, String> {
+    let identity = snapshot_identity_at(database, home)?;
+    let previous = previous.filter(|p| p.source_identity.as_ref() == Some(&identity));
     if !database.is_file() {
         return Err(format!("Codex 状态库不存在：{}", database.display()));
     }
@@ -303,9 +342,15 @@ fn scan_path_with_previous(
     let history_summaries = previous
         .map(|snapshot| snapshot.history_summaries.clone())
         .unwrap_or_else(|| {
-            read_history_summaries(&home.join("thread_history_1.sqlite")).unwrap_or_default()
+            if catalog_only {
+                HashMap::new()
+            } else {
+                read_history_summaries(&home.join("thread_history_1.sqlite")).unwrap_or_default()
+            }
         });
-    let app_server_started_at = desktop_app_server_started_at();
+    let app_server_started_at = (!catalog_only)
+        .then(desktop_app_server_started_at)
+        .flatten();
     let mut thread_activity = if let Some(previous) = previous {
         previous
             .chats
@@ -316,6 +361,7 @@ fn scan_path_with_previous(
                     ThreadActivity {
                         turn_id: chat.turn_id.clone(),
                         metrics_revision: chat.metrics_revision.clone(),
+                        generation: chat.generation.clone(),
                         working: chat.working,
                         questions: chat.questions.clone(),
                         last_user_message_at: chat.last_user_message_at,
@@ -330,8 +376,12 @@ fn scan_path_with_previous(
             })
             .collect()
     } else {
-        read_thread_activity(&home.join("thread_history_1.sqlite"), app_server_started_at)
-            .unwrap_or_default()
+        if catalog_only {
+            HashMap::new()
+        } else {
+            read_thread_activity(&home.join("thread_history_1.sqlite"), app_server_started_at)
+                .unwrap_or_default()
+        }
     };
     let previous_paths: HashMap<&str, &Path> = previous
         .map(|snapshot| {
@@ -342,11 +392,15 @@ fn scan_path_with_previous(
                 .collect()
         })
         .unwrap_or_default();
-    let history = Connection::open_with_flags(
-        home.join("thread_history_1.sqlite"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok();
+    let history = (!catalog_only)
+        .then(|| {
+            Connection::open_with_flags(
+                home.join("thread_history_1.sqlite"),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .ok()
+        })
+        .flatten();
     let has_error = history.as_ref().is_some_and(|connection| {
         connection
             .query_row(
@@ -358,6 +412,9 @@ fn scan_path_with_previous(
     });
     {
         for thread in &threads {
+            if catalog_only {
+                continue;
+            }
             if previous_paths.get(thread.id.as_str()) == Some(&thread.rollout_path.as_path()) {
                 continue;
             }
@@ -394,7 +451,8 @@ fn scan_path_with_previous(
             {
                 continue;
             }
-            let Ok(rollout) = read_rollout_snapshot(&thread.rollout_path, app_server_started_at)
+            let Ok(rollout) =
+                read_rollout_snapshot(&thread.rollout_path, app_server_started_at, &thread.id)
             else {
                 continue;
             };
@@ -403,7 +461,7 @@ fn scan_path_with_previous(
             }
         }
     }
-    if previous.is_none() {
+    if previous.is_none() && !catalog_only {
         let active_turns = thread_activity
             .values()
             .filter(|activity| activity.working)
@@ -440,6 +498,17 @@ fn scan_path_with_previous(
         })
         .collect();
     let mut chats = Vec::with_capacity(threads.len());
+    let activity_pending = if catalog_only && previous.is_some() {
+        threads
+            .iter()
+            .filter(|thread| {
+                previous_paths.get(thread.id.as_str()) != Some(&thread.rollout_path.as_path())
+            })
+            .map(|thread| thread.id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     for thread in threads {
         let project_id = (!projectless_thread_ids.contains(&thread.id))
@@ -469,12 +538,20 @@ fn scan_path_with_previous(
             .as_ref()
             .map(|ids| ids.contains(&thread.id));
         let activity = thread_activity.get(&thread.id);
+        let activity_synced = if catalog_only {
+            previous
+                .and_then(|p| p.chats.iter().find(|c| c.id == thread.id))
+                .is_some_and(|c| c.activity_synced)
+        } else {
+            activity.is_some()
+        };
 
         chats.push(ChatSnapshot {
             id: thread.id,
             rollout_path: thread.rollout_path,
             turn_id: activity.and_then(|activity| activity.turn_id.clone()),
             metrics_revision: activity.and_then(|activity| activity.metrics_revision.clone()),
+            generation: activity.and_then(|activity| activity.generation.clone()),
             project_id,
             title: thread
                 .name
@@ -499,6 +576,7 @@ fn scan_path_with_previous(
             execution_status: activity.and_then(|activity| activity.execution_status.clone()),
             activity_at: activity.map_or(updated_at, |activity| activity.activity_at),
             diagnostic: activity.and_then(|activity| activity.diagnostic.clone()),
+            activity_synced,
         });
     }
 
@@ -526,9 +604,27 @@ fn scan_path_with_previous(
             let (count, latest) = aggregates.get(&project.id).copied().unwrap_or_default();
             let codex_pinned = pinned_project_ids.contains(&project.id);
             let synthetic = project.id == "synthetic:uncategorized";
-            let error = (!synthetic)
-                .then(|| project_path_error(project.path.as_deref()))
-                .flatten();
+            let missing_path = !synthetic
+                && project
+                    .path
+                    .as_deref()
+                    .is_none_or(|path| path.trim().is_empty());
+            let saved = previous.and_then(|p| {
+                p.projects
+                    .iter()
+                    .find(|old| old.id == project.id && old.path == project.path)
+            });
+            let error = if catalog_only {
+                if missing_path {
+                    Some("未配置项目文件夹".into())
+                } else {
+                    saved.and_then(|old| old.error.clone())
+                }
+            } else {
+                (!synthetic)
+                    .then(|| project_path_error(project.path.as_deref()))
+                    .flatten()
+            };
             ProjectSnapshot {
                 synthetic,
                 id: project.id,
@@ -539,6 +635,10 @@ fn scan_path_with_previous(
                 count,
                 latest,
                 codex_pinned,
+                path_checked: synthetic
+                    || missing_path
+                    || !catalog_only
+                    || saved.is_some_and(|old| old.path_checked),
             }
         })
         .collect();
@@ -549,6 +649,9 @@ fn scan_path_with_previous(
         projects,
         chats,
         history_summaries,
+        history_loaded: !catalog_only || previous.is_some_and(|p| p.history_loaded),
+        activity_pending,
+        source_identity: Some(identity),
     })
 }
 
@@ -659,9 +762,42 @@ fn refresh_activities_at(
     home: &Path,
     cutoff: Option<i64>,
 ) -> Result<ActivityUpdate, String> {
+    let initial = history_changed && !snapshot.history_loaded;
+    let requested: HashSet<_> = ids.iter().cloned().collect();
+    let mut bootstrap = if initial {
+        read_thread_activity(&home.join("thread_history_1.sqlite"), cutoff)?
+    } else {
+        HashMap::new()
+    };
+    if initial && home.join("thread_history_1.sqlite").is_file() {
+        let db = Connection::open_with_flags(
+            home.join("thread_history_1.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| e.to_string())?;
+        for (id, questions) in questions::Questions::read_all(&db)? {
+            if let Some(activity) = bootstrap.get_mut(&id) {
+                activity.questions = questions;
+            }
+        }
+    }
     let mut ids: HashSet<String> = ids.iter().cloned().collect();
     let mut history_ids: HashSet<String> = history_ids.iter().cloned().collect();
     let mut questions_only = HashSet::new();
+    if initial {
+        for chat in &snapshot.chats {
+            let owner = crate::rollout_log::fragment_id(&chat.rollout_path).unwrap_or(&chat.id);
+            if let Some(activity) = bootstrap.get(owner).or_else(|| bootstrap.get(&chat.id)) {
+                ids.insert(chat.id.clone());
+                if !requested.contains(&chat.id)
+                    && !activity.working
+                    && !activity.questions.is_pending()
+                {
+                    questions_only.insert(chat.id.clone());
+                }
+            }
+        }
+    }
     if history_changed {
         // Async answers can arrive after turn completion without changing its status.
         for chat in snapshot.chats.iter().filter(|chat| chat.waiting_for_input) {
@@ -676,15 +812,18 @@ fn refresh_activities_at(
         let owners: HashMap<_, _> = snapshot
             .chats
             .iter()
-            .map(|chat| {
-                (
-                    crate::rollout_log::fragment_id(&chat.rollout_path).unwrap_or(&chat.id),
-                    &chat.id,
-                )
+            .flat_map(|chat| {
+                [
+                    (chat.id.as_str(), &chat.id),
+                    (
+                        crate::rollout_log::fragment_id(&chat.rollout_path).unwrap_or(&chat.id),
+                        &chat.id,
+                    ),
+                ]
             })
             .collect();
         for (id, summary) in &summaries {
-            if snapshot.history_summaries.get(id) != Some(summary) {
+            if !initial && snapshot.history_summaries.get(id) != Some(summary) {
                 if let Some(owner) = owners.get(id.as_str()) {
                     ids.insert((*owner).clone());
                     history_ids.insert((*owner).clone());
@@ -700,7 +839,12 @@ fn refresh_activities_at(
         if let Some(summaries) = summaries {
             snapshot.history_summaries = summaries;
         }
-        return Ok(ActivityUpdate { chats: Vec::new() });
+        snapshot.history_loaded |= initial;
+        let projects = validate_project_paths(snapshot);
+        return Ok(ActivityUpdate {
+            chats: Vec::new(),
+            projects,
+        });
     }
     let database = home.join("thread_history_1.sqlite");
     let history = if !history_ids.is_empty() && database.is_file() {
@@ -729,19 +873,23 @@ fn refresh_activities_at(
         };
         activities.insert(
             id.clone(),
-            ThreadActivity {
-                turn_id: chat.turn_id.clone(),
-                metrics_revision: chat.metrics_revision.clone(),
-                working: chat.working,
-                questions: chat.questions.clone(),
-                last_user_message_at: chat.last_user_message_at,
-                execution_started_at: chat.execution_started_at,
-                execution_ms: chat.execution_ms,
-                execution_status: chat.execution_status.clone(),
-                activity_at: chat.activity_at,
-                diagnostic: chat.diagnostic.clone(),
-                ..Default::default()
-            },
+            bootstrap
+                .remove(crate::rollout_log::fragment_id(&chat.rollout_path).unwrap_or(id))
+                .or_else(|| bootstrap.remove(id))
+                .unwrap_or_else(|| ThreadActivity {
+                    turn_id: chat.turn_id.clone(),
+                    metrics_revision: chat.metrics_revision.clone(),
+                    generation: chat.generation.clone(),
+                    working: chat.working,
+                    questions: chat.questions.clone(),
+                    last_user_message_at: chat.last_user_message_at,
+                    execution_started_at: chat.execution_started_at,
+                    execution_ms: chat.execution_ms,
+                    execution_status: chat.execution_status.clone(),
+                    activity_at: chat.activity_at,
+                    diagnostic: chat.diagnostic.clone(),
+                    ..Default::default()
+                }),
         );
         if history_ids.contains(id) {
             if let Some(connection) = history.as_ref() {
@@ -759,7 +907,7 @@ fn refresh_activities_at(
         }
         // An answer-only history notification must not decode unrelated compressed archives.
         if !questions_only.contains(id) {
-            if let Ok(activity) = read_rollout_snapshot(&chat.rollout_path, cutoff) {
+            if let Ok(activity) = read_rollout_snapshot(&chat.rollout_path, cutoff, id) {
                 if let Some(activity) = activity {
                     merge_rollout_activity(&mut activities, id, activity);
                 }
@@ -805,6 +953,7 @@ fn refresh_activities_at(
             );
             chat.turn_id = activity.turn_id;
             chat.metrics_revision = activity.metrics_revision;
+            chat.generation = activity.generation;
             chat.working = activity.working;
             chat.waiting_for_input = activity.questions.is_pending();
             chat.questions = activity.questions;
@@ -818,6 +967,8 @@ fn refresh_activities_at(
             chat.execution_status = activity.execution_status;
             chat.activity_at = activity.activity_at;
             chat.diagnostic = activity.diagnostic;
+            chat.activity_synced =
+                activity.observed || chat.execution_status.is_some() || chat.waiting_for_input;
         } else if cutoff.is_none() {
             chat.working = false;
             chat.execution_started_at = None;
@@ -836,7 +987,24 @@ fn refresh_activities_at(
     if let Some(summaries) = summaries {
         snapshot.history_summaries = summaries;
     }
-    Ok(ActivityUpdate { chats: changed })
+    snapshot.history_loaded |= initial;
+    snapshot.activity_pending.retain(|id| !ids.contains(id));
+    let projects = validate_project_paths(snapshot);
+    Ok(ActivityUpdate {
+        chats: changed,
+        projects,
+    })
+}
+
+fn validate_project_paths(snapshot: &mut SourceSnapshot) -> Vec<ProjectSnapshot> {
+    let mut changed = Vec::new();
+    for project in snapshot.projects.iter_mut().filter(|p| !p.path_checked) {
+        project.error = project_path_error(project.path.as_deref());
+        project.path_valid = project.error.is_none();
+        project.path_checked = true;
+        changed.push(project.clone());
+    }
+    changed
 }
 
 fn read_thread_activity_for(
@@ -846,7 +1014,7 @@ fn read_thread_activity_for(
     cutoff: Option<i64>,
     has_error: bool,
 ) -> Result<Option<ThreadActivity>, String> {
-    let id = crate::rollout_log::fragment_id(rollout_path).unwrap_or(id);
+    let fragment = crate::rollout_log::fragment_id(rollout_path).unwrap_or(id);
     let error_column = if has_error {
         "turns.error_json"
     } else {
@@ -864,17 +1032,22 @@ fn read_thread_activity_for(
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    let mut rows = statement.query([id]).map_err(|error| error.to_string())?;
-    let mut activity = rows
-        .next()
-        .map_err(|error| error.to_string())?
-        .map(|row| activity_from_row(row, cutoff).map(|(_, activity)| activity))
-        .transpose()
-        .map_err(|error| error.to_string())?;
-    if let Some(activity) = activity.as_mut() {
-        activity.questions = questions::Questions::read(connection, id)?;
+    for owner in std::iter::once(fragment).chain((fragment != id).then_some(id)) {
+        let mut rows = statement
+            .query([owner])
+            .map_err(|error| error.to_string())?;
+        let activity = rows
+            .next()
+            .map_err(|error| error.to_string())?
+            .map(|row| activity_from_row(row, cutoff).map(|(_, activity)| activity))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        if let Some(mut activity) = activity {
+            activity.questions = questions::Questions::read(connection, owner)?;
+            return Ok(Some(activity));
+        }
     }
-    Ok(activity)
+    Ok(None)
 }
 
 fn read_thread_activity(
@@ -1156,6 +1329,22 @@ fn read_global_state(
     ))
 }
 
+pub(crate) fn thread_title_expression(connection: &Connection) -> Result<&'static str, String> {
+    let columns = connection
+        .prepare("PRAGMA table_info(threads)")
+        .map_err(|e| e.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let has_name = columns.iter().any(|name| name == "name");
+    Ok(if has_name {
+        "CASE WHEN name IS NOT NULL AND trim(name) != '' THEN name ELSE title END"
+    } else {
+        "title"
+    })
+}
+
 fn read_threads(connection: &Connection) -> Result<Vec<ThreadRow>, String> {
     let mut statement = connection
         .prepare(
@@ -1286,6 +1475,19 @@ mod tests {
         )
         .unwrap();
 
+        crate::rollout_log::read_stats(true);
+        let cold = scan_path_mode(&database, directory.path(), None, true).unwrap();
+        assert_eq!(
+            crate::rollout_log::read_stats(false).opens,
+            0,
+            "cold catalog must not open any rollout"
+        );
+        assert!(!cold.history_loaded);
+        assert!(cold.chats.iter().all(|c| !c.activity_synced));
+        assert_eq!(
+            cold.chats.iter().find(|c| c.id == "t1").unwrap().title,
+            "Visible"
+        );
         let snapshot = scan_path(&database, directory.path()).unwrap();
         assert_eq!(snapshot.projects.len(), 3);
         assert_eq!(snapshot.projects[0].count, 1);
@@ -1558,6 +1760,25 @@ mod tests {
                 .execution_ms,
             Some(30000)
         );
+        snapshot
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == "late")
+            .unwrap()
+            .rollout_path = home.join("rollout-late_unprojected.jsonl");
+        history.execute_batch("UPDATE thread_turns SET status='completed',error_json=NULL,completed_at=95,duration_ms=85000 WHERE thread_id='late';").unwrap();
+        let changed =
+            refresh_activities_at(&mut snapshot, &[], &[], true, home, Some(100)).unwrap();
+        assert_eq!(
+            changed.chats.len(),
+            1,
+            "logical history changes survive a fragment without its own projection"
+        );
+        assert_eq!(
+            changed.chats[0].execution_status.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(changed.chats[0].execution_ms, Some(85000));
     }
 
     #[test]
@@ -1814,7 +2035,7 @@ mod tests {
         let file = directory.path().join("completed.jsonl");
         fs::write(&file, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"done\",\"started_at\":120,\"completed_at\":132}}\n").unwrap();
         assert_eq!(
-            read_rollout_snapshot(&file, Some(100))
+            read_rollout_snapshot(&file, Some(100), "test")
                 .unwrap()
                 .unwrap()
                 .execution_ms,
@@ -1823,7 +2044,7 @@ mod tests {
         let file = directory.path().join("unknown.jsonl");
         fs::write(&file, "{\"type\":\"event_msg\",\"timestamp\":\"1970-01-01T00:02:12Z\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"unknown\"}}\n").unwrap();
         assert_eq!(
-            read_rollout_snapshot(&file, Some(100))
+            read_rollout_snapshot(&file, Some(100), "test")
                 .unwrap()
                 .unwrap()
                 .execution_ms,
@@ -1845,7 +2066,9 @@ mod tests {
         )
         .unwrap();
 
-        let activity = read_rollout_snapshot(&rollout, Some(100)).unwrap().unwrap();
+        let activity = read_rollout_snapshot(&rollout, Some(100), "test")
+            .unwrap()
+            .unwrap();
         assert!(activity.working);
         assert_eq!(activity.last_user_message_at, 140000);
         assert_eq!(activity.execution_started_at, Some(140000));
@@ -1985,5 +2208,41 @@ mod tests {
             assert!(chat.working, "the verification thread is currently running");
             assert!(chat.execution_started_at.is_some());
         }
+    }
+}
+#[test]
+#[ignore = "benchmarks local metadata and deferred state without changing source files"]
+fn live_catalog_audit() {
+    let home = codex_home().unwrap();
+    let database = home.join("state_5.sqlite");
+    for pass in 1..=2 {
+        crate::rollout_log::read_stats(true);
+        let start = std::time::Instant::now();
+        let mut snapshot = scan_path_mode(&database, &home, None, true).unwrap();
+        let catalog_ms = start.elapsed().as_millis();
+        let stats = crate::rollout_log::read_stats(false);
+        assert_eq!(stats.opens, 0);
+        assert_eq!(stats.bytes, 0);
+        println!(
+            "pass={pass} catalog_ms={catalog_ms} chats={} rollout={stats:?}",
+            snapshot.chats.len()
+        );
+        let start = std::time::Instant::now();
+        let update = refresh_activities_at(
+            &mut snapshot,
+            &[],
+            &[],
+            true,
+            &home,
+            desktop_app_server_started_at(),
+        )
+        .unwrap();
+        println!(
+            "pass={pass} deferred_ms={} states={} waiting={} rollout={:?}",
+            start.elapsed().as_millis(),
+            update.chats.len(),
+            update.chats.iter().filter(|c| c.waiting_for_input).count(),
+            crate::rollout_log::read_stats(false)
+        );
     }
 }

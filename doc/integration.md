@@ -19,10 +19,15 @@ CodexChatPane's own settings are kept separately in `.codex-chat-pane` under tha
 - `state_5.sqlite`: basic thread information and project associations.
 - `.codex-global-state.json`: global projects, thread assignments, pins, and unread state.
 - `thread_history_1.sqlite`: supplements message times, missing execution details, and failure status by chat ID. File changes compare the latest-turn status summary; tool item writes do not refresh the whole list's activity.
-- Rollout JSONL: incrementally supplies working state, recent user-message and progress times, execution time, and errors. Body content is read only for an open, paged preview.
+- Rollout JSONL: incrementally supplies state, user/progress times, execution time and errors. Parsers temporarily inspect needed fields; complete content is shown on demand in paged previews. Catalog and statistics windows do not receive request/activity bodies; statistics receive summaries and paged turns.
+- JSONL.ZST and history_base chains use the same logical reader. Previews may show inherited text; metrics/forecast ownership excludes inherited and child events. Migration preserves event times.
 - Codex Desktop logs: a limited set of retry and activity diagnostics.
 
 Usage limits are read through Codex App MCP first, using an existing chat as context. If MCP fails, the app queries `account/rateLimits/read` through the Desktop CLI app-server. Limits refresh at startup, when the window becomes visible, and once per minute while visible. A failed query keeps the last value.
+
+New snapshots carry `observation_source=online-mcp/cli-fallback`; imported observations use `history-log`, while legacy provenance stays unknown. Existing quota storage retains mode/candidate checkpoints, redemption evidence and stable-event aliases. `startedAt/endedAt` are the adopted `[start,end)` boundary for both labels and consumption; `boundaryFrom/boundaryTo` retain observation evidence. The current interface provides no reliable reset-occurrence timestamp. First consumption cannot substitute for one.
+
+Σ and speed statistics do not use an OpenTelemetry receiver, streaming internal IPC, WebView injection, traffic interception, additional app-server processes or account queries. Metadata rendering does not wait for quota or history bodies. Existing read-only quota fallback remains independent.
 
 At startup, the app checks key SQLite tables and columns. If the schema does not match, it reports an incompatibility instead of guessing what fields mean.
 
@@ -61,6 +66,8 @@ Supported write operations include:
 
 If a tool is unavailable, the renderer is not active, or Codex returns an error, the UI reports failure instead of showing a false local success.
 
+`codex_app_mcp.rs::run_action/run_project_pin` serialize the supported writes. A renderer-specific failure can activate the target through a deep link, await renderer evidence, retry once, and verify via state readback. This is not an arbitrary external tool proxy. Quota reads never redeem a reset card. Live catalog capability checks do not verify real writes.
+
 ## 4. Safety boundary
 
 - Normal browsing does not require MCP consent.
@@ -78,3 +85,9 @@ If lists become empty, the schema becomes incompatible, or write operations fail
 3. Review UI errors and the local log level.
 4. Separate read-only data issues, rollout parsing issues, and App MCP write issues.
 5. Record the actual schema or tool response before changing integration code; do not infer behavior from names alone.
+
+## 6. Internal data test events
+
+With the same build already running, launch a second process with `--internal-test-file=<JSON path>`. The single-instance callback forwards a JSON `{event,data}` to the main window; the file is at most 64 KiB and event names at most 64 ASCII letters/digits/`._-`. This accepts data, not JavaScript or arbitrary MCP operations. It is not dispatched on the initial process startup. Logs record handled/unhandled status.
+
+The current event is `quota.reset-notice`, taking `{cycle,report}` with totals and a model rows array. The in-memory preview uses a fixed test ID, performs no consumption/quota query, and writes neither quota samples nor dismissal state. Dismissing the test clears only the preview; ordinary polling preserves it until dismissal or process exit. Real notification dismissals remain persistent. The [PowerShell example](integration.zh-CN.md#6-内部数据测试入口) uses BOM-free UTF-8 and shows the complete shape. This round did not execute the native preview manually; parser and in-memory rendering are covered by tests.

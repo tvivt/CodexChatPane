@@ -31,9 +31,12 @@ fn open_database(path: &Path) -> Result<Connection, String> {
          CREATE TABLE IF NOT EXISTS quota_samples(id INTEGER PRIMARY KEY,at INTEGER NOT NULL,until INTEGER NOT NULL,account TEXT NOT NULL,data TEXT NOT NULL);
          CREATE INDEX IF NOT EXISTS quota_account ON quota_samples(account,id);
          CREATE TABLE IF NOT EXISTS quota_ack(event_id TEXT PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS quota_derivations(account TEXT NOT NULL,scope TEXT NOT NULL,version INTEGER NOT NULL,inputs INTEGER NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(account,scope));
+         CREATE TABLE IF NOT EXISTS quota_event_alias(account TEXT NOT NULL,minutes INTEGER NOT NULL,old_id TEXT NOT NULL,event_id TEXT NOT NULL,PRIMARY KEY(account,minutes,old_id));
          CREATE TABLE IF NOT EXISTS usage_threads(id TEXT PRIMARY KEY,signature TEXT NOT NULL,title TEXT NOT NULL,project_id TEXT NOT NULL,project TEXT NOT NULL,parent TEXT,error TEXT);
          CREATE TABLE IF NOT EXISTS usage_requests(thread_id TEXT NOT NULL,response_id TEXT NOT NULL,at INTEGER,data TEXT NOT NULL,PRIMARY KEY(thread_id,response_id));
-         CREATE INDEX IF NOT EXISTS usage_time ON usage_requests(at);"
+         CREATE INDEX IF NOT EXISTS usage_time ON usage_requests(at);
+         CREATE TABLE IF NOT EXISTS usage_round_details(thread_id TEXT PRIMARY KEY,signature TEXT NOT NULL,data TEXT NOT NULL);"
     ).map_err(|e| e.to_string())?;
     Ok(db)
 }

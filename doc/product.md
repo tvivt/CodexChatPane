@@ -24,7 +24,8 @@ CodexChatPane makes local Codex Desktop projects and chats easier to browse, fil
 - Codex owns projects, chats, archives, Codex pins, and unread state.
 - CodexChatPane owns local folders, groups, stars, recent activity rules, manual order, themes, and window settings.
 - Working state, execution time, usage limits, and diagnostics are derived from Codex data and events; the app does not rewrite original events.
-- Conversation text is read on demand for previews and is not saved in local snapshots.
+- Parsers may inspect message content temporarily for state/questions. Complete text is shown on demand in preview/details, not persisted in ordinary catalog snapshots or settings.
+- Settled metrics and consumption are distinct from Σ predictions. Forecast phases/timers are memory-only; rebuildable own-request and short question-summary caches stay in the app's data directory.
 
 ## 4. Project assignment for chats
 
@@ -45,13 +46,16 @@ The synthetic project is only a UI placeholder and is not written back to Codex.
 - Chat status can include unread, working, completed, failed, interrupted, and no-response diagnostics.
 - Project and chat pin priority comes from Codex; local groups do not change Codex pins.
 - Recent activity normally follows the selected day range. A chat may be set to always include or exclude through the context menu; the Activity rules dialog lists both overrides and can restore automatic behavior. Include uses a solid purple bar; exclude uses a striped purple bar.
+- Default state priority is waiting/unread/working/read. Structured question answers and later user input resolve waiting; async questions survive turn completion. P project grouping and N status/name ordering are independently single-choice, with mutually exclusive directions.
+- Waiting uses `?` for both projects and chats. The close and upward restore controls on Projects operate both Projects and Chats, retaining their organization; Chats has no separate control.
 
 ## 6. Local persistence
 
-The app creates two kinds of local files:
+The app separates settings from rebuildable analytics:
 
 - `%CODEX_HOME%\.codex-chat-pane\settings.toml`: language, theme, font sizes, window mode and dimensions, preview switch, log level, and MCP consent.
 - `folders.json` in the same directory: folders, groups, local project and chat assignments, stars, recent activity rules, order, and collapse state.
+- `usage.sqlite` for quota samples and dismissals; identity-scoped `usage-cache-<digest>.sqlite` for own requests, reports, compact quota observations, append checkpoints, and short question-round mappings. Local estimates are not an account bill.
 
 Without `CODEX_HOME`, the app uses `%USERPROFILE%\.codex`. Preview is off by default.
 
@@ -64,3 +68,8 @@ Filters, pane heights, and some frequently changing UI state are stored in brows
 - Writing synthetic projects back to Codex.
 - Promising compatibility with every future Codex Desktop version beyond its stable public APIs.
 - Providing macOS or Linux window integration at present.
+- Claiming exact live generation boundaries from completion-only logs. Σ uses no OpenTelemetry receiver, internal IPC, traffic proxy, additional app-server, account requests, or predicted TTFT.
+
+The [feature-to-code map](product.zh-CN.md#8-功能文档与代码对应) connects all user, data, integration, performance, and delivery areas to their current documentation and implementation entry points. Historical benchmarks and current verification have separate labels.
+
+The [documentation index](README.md) covers the full feature set and distinguishes request, technical turn, question round, conversation family and quota period. Feature descriptions use the delivery behavior; they are not claims of native interaction acceptance.

@@ -369,7 +369,7 @@ vm.runInContext(`
   const chatMenu = itemMenu(example, project, '');
   assert.ok(chatMenu.includes('data-codexaction="rename"'));
   assert.ok(chatMenu.includes('data-codexaction="archive"'));
-  assert.ok(chatMenu.includes('动态显示') && chatMenu.includes('>自动<') && chatMenu.includes('>加入<') && chatMenu.includes('>移出<') && chatMenu.includes('移动到会话文件夹') && chatMenu.includes('归档对话'));
+  assert.ok(chatMenu.includes('动态显示') && chatMenu.includes('>自动<') && chatMenu.includes('>加入<') && chatMenu.includes('>移出<') && chatMenu.includes('移动对话') && chatMenu.includes('归档对话'));
   assert.ok(chatMenu.includes('context-submenu-popup') && chatMenu.includes('data-menu-action="recent-auto"') && chatMenu.includes('data-menu-action="recent-include"') && chatMenu.includes('data-menu-action="recent-exclude"'));
   const recentPanelMarkup = projectRecentPanel();
   assert.ok(recentPanelMarkup.includes('data-action="open-recent-rules"'), 'activity rules have a toolbar button');
@@ -526,21 +526,21 @@ vm.runInContext(`
       state.projectsCollapsed = state.projectChatsCollapsed = false;
       state.projectArchiveOpen = true;
       const expanded = renderProjectPane();
-      assert.ok(expanded.includes('data-action="toggle-project-section" data-kind="project"') && expanded.includes('data-action="toggle-project-section" data-kind="chat"'));
+      assert.ok(expanded.includes('data-action="toggle-project-section" data-kind="project"') && !expanded.includes('data-action="toggle-project-section" data-kind="chat"'));
       for (const kind of ['project','chat']) {
         const header = collapsedFolderSection(kind);
-        assert.equal((header.match(/<button/g)||[]).length,1,'collapsed sections keep one restore button');
-        assert.ok(header.includes('href="#i-chevrons-up"') && !header.includes('>恢复</button>') && !header.includes('class="count"') && !header.includes('data-resize'));
-        const label = '恢复 ' + (kind === 'project' ? 'Projects' : 'Chats');
-        assert.ok(header.includes('title="' + label + '"') && header.includes('aria-label="' + label + '"'));
+        assert.equal((header.match(/<button/g)||[]).length,kind === 'project' ? 1 : 0,'only Projects keeps a restore button');
+        assert.ok(!header.includes('class="count"') && !header.includes('data-resize'));
+        if (kind === 'project') {
+          assert.ok(header.includes('href="#i-chevrons-up"'));
+          assert.ok(header.includes('title="恢复 Projects / Chats"') && header.includes('aria-label="恢复 Projects / Chats"'));
+        }
       }
       toggle('project');
       assert.equal(state.projectsCollapsed,true);
+      assert.equal(state.projectChatsCollapsed,true);
       let markup = renderProjectPane();
       assert.ok(markup.includes(collapsedFolderSection('project')) && !markup.includes('class="scroll tree"'));
-      assert.ok(markup.includes('class="scroll project-chat-list"') && markup.includes('project-archive-panel'),'Chats remains expanded independently');
-      toggle('chat');
-      markup = renderProjectPane();
       assert.ok(markup.includes(collapsedFolderSection('chat')) && !markup.includes('class="scroll project-chat-list"'));
       assert.ok(!markup.includes('project-archive-panel') && state.projectArchiveOpen,'archive visibility is restored with Chats');
       const stored = JSON.parse(localStorage.getItem(PREFERENCES_KEY));
@@ -551,21 +551,25 @@ vm.runInContext(`
       const recent = state.projectRecentHeight;
       resizePanel('project-recent',recent+40);
       assert.equal(state.projectRecentHeight,recent,'both collapsed sections have no active height separator');
-      toggle('project');
-      markup = renderProjectPane();
-      assert.ok(markup.includes('class="scroll tree"') && !markup.includes('class="scroll project-chat-list"'));
-      resizePanel('project-recent',recent+20);
-      assert.equal(state.projectRecentHeight,recent+20);
-      assert.equal(state.projectStructureHeight,saved.projectStructureHeight,'resizing with Chats closed preserves the expanded Projects height');
-      toggle('chat');
-      assert.ok(renderProjectPane().includes('project-archive-panel'));
-      assert.equal(state.projectStructureHeight,saved.projectStructureHeight);
-      assert.equal(JSON.stringify([[...state.openFolders],[...state.openChatFolders]]),folderState,'collapse and restore preserve folder expansion');
-      toggle('project');
-      resizePanel('project-recent',recent+30);
-      assert.equal(state.projectStructureHeight,saved.projectStructureHeight,'Projects closed also preserves its expanded height');
       resizePanel('project-structure',999);
       assert.equal(state.projectStructureHeight,saved.projectStructureHeight,'a hidden separator cannot overwrite the saved height');
+      toggle('chat');
+      assert.equal(state.projectsCollapsed,true);assert.equal(state.projectChatsCollapsed,true,'obsolete Chats control cannot separate the sections');
+      toggle('project');
+      markup = renderProjectPane();
+      assert.equal(state.projectsCollapsed,false);assert.equal(state.projectChatsCollapsed,false);
+      assert.ok(markup.includes('class="scroll tree"') && markup.includes('class="scroll project-chat-list"') && markup.includes('project-archive-panel'));
+      assert.equal(state.projectRecentHeight,recent);
+      assert.equal(state.projectStructureHeight,saved.projectStructureHeight);
+      assert.equal(JSON.stringify([[...state.openFolders],[...state.openChatFolders]]),folderState,'collapse and restore preserve folder expansion');
+      for (const collapsed of [true,false]) {
+        state.projectsCollapsed = collapsed;
+        state.projectChatsCollapsed = !collapsed;
+        markup = renderProjectPane();
+        assert.equal(state.projectChatsCollapsed,collapsed,'legacy independent states follow Projects');
+        assert.equal(markup.includes('class="scroll tree"'),!collapsed);
+        assert.equal(markup.includes('class="scroll project-chat-list"'),!collapsed);
+      }
     } finally { Object.assign(state,saved); }
   }
 `, context);
@@ -903,8 +907,62 @@ vm.runInContext(`
   assert.deepEqual(activityOrder([laterWorking,read,earlierUnread,unread,earlierWorking,laterUnread]).map(chat=>chat.id),['later-unread','earlier-unread','unread','later-working','earlier-working','read'], 'new chats lead within each status group');
   state.dynamicProjectSort = 'asc';
   const projectSortedStatus = chatGroupSection({id:'default',name:'ALL'}, [{...laterWorking,projectId:'pane'}, {...laterUnread,projectId:'stock'}]);
-  assert.ok(projectSortedStatus.indexOf('data-chat="later-unread"') < projectSortedStatus.indexOf('data-chat="later-working"'), 'project sorting keeps unread and working status groups separate');
+  const expectedProjectFirst = projectLabel(byProject('pane')).localeCompare(projectLabel(byProject('stock')), language()) < 0 ? 'later-working' : 'later-unread';
+  assert.ok(projectSortedStatus.indexOf('data-chat="'+expectedProjectFirst+'"') < projectSortedStatus.lastIndexOf('data-chat="'), 'Project grouping takes priority over chat status');
   state.dynamicProjectSort = 'off';
+  assert.equal(state.recentChatSort, 'status-asc');
+  assert.equal(state.dynamicChatSort, 'status-asc');
+  const sortRows = [{...read,id:'sort-z',title:'Zulu'}, {...working,id:'sort-a',title:'Alpha'}, {...waiting,id:'sort-m',title:'Middle'}];
+  const sortedIds = () => chatsByProject(sortRows, 'dynamicProjectSort', 'dynamicChatSort').map(chat => chat.id);
+  state.dynamicChatSort = 'name-asc';
+  assert.deepEqual(sortedIds(), ['sort-a','sort-m','sort-z'], 'name sorting ignores work status');
+  state.dynamicChatSort = 'name-desc';
+  assert.deepEqual(sortedIds(), ['sort-z','sort-m','sort-a']);
+  state.dynamicChatSort = 'status-asc';
+  assert.deepEqual(sortedIds(), ['sort-m','sort-a','sort-z'], 'default status direction preserves pending-first priority');
+  const sameNameProjects = [{id:'sort-p1',name:'Same'}, {id:'sort-p2',name:'Same'}];
+  projects.push(...sameNameProjects);
+  const groupedRows = [
+    {...read,id:'p1-z',title:'Zulu',projectId:'sort-p1'},
+    {...waiting,id:'p2-a',title:'Alpha',projectId:'sort-p2'},
+    {...working,id:'p1-a',title:'Alpha',projectId:'sort-p1'},
+    {...read,id:'p2-z',title:'Zulu',projectId:'sort-p2'}
+  ];
+  state.dynamicProjectSort = 'asc'; state.dynamicChatSort = 'name-asc';
+  assert.deepEqual(chatsByProject(groupedRows, 'dynamicProjectSort', 'dynamicChatSort').map(chat=>chat.id), ['p1-a','p1-z','p2-a','p2-z'], 'same-named Projects stay contiguous with names sorted inside');
+  state.dynamicProjectSort = 'desc'; state.dynamicChatSort = 'name-desc';
+  assert.deepEqual(chatsByProject(groupedRows, 'dynamicProjectSort', 'dynamicChatSort').map(chat=>chat.id), ['p2-z','p2-a','p1-z','p1-a']);
+  projects.splice(-2);
+  state.dynamicProjectSort = 'off';
+  state.dynamicChatSort = 'status-asc';
+  const clickChatSort = field => dispatch('click',{target:{dataset:{action:'cycle-chat-sort',field},closest(selector){return selector === '[data-action]' ? this : null;}}});
+  assert.ok(chatSortButton('dynamicChatSort').includes('sort-glyph">N</span>') && chatSortButton('dynamicChatSort').includes('aria-pressed="false"'), 'default N uses work status without an active name sort');
+  clickChatSort('recentChatSort');
+  assert.equal(state.recentChatSort, 'name-asc');
+  clickChatSort('recentChatSort');
+  assert.equal(state.recentChatSort, 'name-desc');
+  clickChatSort('dynamicChatSort');
+  const savedSorts = JSON.parse(localStorage.getItem(PREFERENCES_KEY));
+  assert.equal(savedSorts.recentChatSort, 'name-desc');
+  assert.equal(savedSorts.dynamicChatSort, 'name-asc', 'each dynamic area persists its independent sort');
+  assert.ok(chatSortButton('dynamicChatSort').includes('sort-glyph">N↑'));
+  assert.ok(chatSortButton('recentChatSort').includes('sort-glyph">N↓'));
+  assert.ok(!chatSortButton('recentChatSort').includes('picker'), 'sort toggles directly without a dropdown');
+  clickChatSort('dynamicChatSort');
+  assert.equal(state.dynamicChatSort, 'name-desc');
+  clickChatSort('dynamicChatSort');
+  assert.equal(state.dynamicChatSort, 'status-asc');
+  assert.deepEqual(sortedIds(), ['sort-m','sort-a','sort-z'], 'third click restores status priority');
+  assert.equal(JSON.parse(localStorage.getItem(PREFERENCES_KEY)).dynamicChatSort, 'status-asc');
+  const sortingProjectId = state.projectId;
+  clickChatSort('projectId');
+  assert.equal(state.projectId, sortingProjectId, 'sort action rejects fields outside chat sorting');
+  const sortConfiguration = {version:1,data:{[PREFERENCES_KEY]:JSON.stringify(savedSorts)}};
+  assert.doesNotThrow(()=>validateConfiguration(sortConfiguration));
+  assert.doesNotThrow(()=>validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({...savedSorts,dynamicChatSort:'status-desc'})}}), 'old status direction imports can fall back to default status order');
+  assert.throws(()=>validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({...savedSorts,dynamicChatSort:'sent-desc'})}}));
+  clickChatSort('recentChatSort');
+  assert.equal(state.recentChatSort, 'status-asc');
   const olderRead = {...read,id:'older-read',region:'read',regionEnteredAt:1000,activityAt:9000};
   const clickedRead = {...read,id:'clicked-read',region:'read',regionEnteredAt:2000,activityAt:500};
   assert.deepEqual(activityOrder([olderRead,clickedRead]).map(chat=>chat.id),['clicked-read','older-read'],'same status keeps insert-at-top order and ignores later activity');
@@ -935,6 +993,9 @@ vm.runInContext(`
   const recentDaysAt = recentHeader.indexOf('class="days-count-label"');
   const recentCountAt = recentHeader.indexOf('class="count"');
   assert.ok(recentDaysAt < recentCountAt && recentCountAt < recentFilterAt && recentFilterAt < recentSortAt, '3 Days and count lead the header before project controls');
+  assert.ok(recentSortAt < recentHeader.indexOf('data-field="recentChatSort"'), 'chat sorting is immediately right of Project sorting');
+  const chatSortHeader = globalDynamicPanel();
+  assert.ok(chatSortHeader.indexOf('toggle-dynamic-project-sort') < chatSortHeader.indexOf('data-field="dynamicChatSort"'));
   assert.ok(recentHeader.indexOf('toggle-recent-project-column') < recentHeader.indexOf('toggle-project-recent-link'), 'project column toggle sits before link');
   const projectColumnToggle = {dataset:{action:'toggle-recent-project-column'},closest(selector){return selector === '[data-action]' ? this : null;}};
   dispatch('click',{target:projectColumnToggle});
@@ -960,6 +1021,10 @@ vm.runInContext(`
   state.recentIncludedChatIds.delete(manualRecent.id); state.recentExcludedChatIds.delete(manualRecent.id); chats.pop();
   state.recentProjectFilter = [projects[1].id];
   assert.ok(projectRecentChats().every(chat => chat.projectId === projects[1].id), '3 Days filter is scoped to recent chats');
+  state.recentChatSort = 'name-asc';
+  const filteredNames = projectRecentChats().map(chat => chat.title);
+  assert.deepEqual(filteredNames, [...filteredNames].sort((a,b)=>a.localeCompare(b,language())), 'name sorting combines with the existing Project filter');
+  state.recentChatSort = 'status-asc';
   assert.ok(filteredTimelineChats().some(chat => chat.projectId !== projects[1].id), 'Chats tab is not affected by the 3 Days filter');
   state.recentProjectFilter = [];
   state.recentProjectSort = 'asc';
@@ -1107,7 +1172,7 @@ vm.runInContext(`
   assert.ok(!fixedMenu.includes('menu-submenu') && !fixedMenu.includes('<details>'));
   const multiChatMenu = itemMenu(dynamicChat,project,'global','default',[dynamicChat.id,'plain']);
   assert.ok(!multiChatMenu.includes('data-targetaction="group-copy"'));
-  assert.ok(!multiChatMenu.includes('data-codexaction') && multiChatMenu.includes('移动到会话文件夹'));
+  assert.ok(!multiChatMenu.includes('data-codexaction') && multiChatMenu.includes('移动对话'));
   state.localProjectFolders.add('Batch');
   const multiProjectMenu = itemMenu(null,project,'','',[project.id,projects[1].id],'');
   assert.ok(multiProjectMenu.includes('data-menu-action="choose-target"'));
@@ -1702,7 +1767,7 @@ await vm.runInContext(`(async () => {
   const savedChats = chats, savedSelected = state.selectedChatId, savedHover = hoveredChatId;
   const savedGet = document.getElementById, savedInvoke = nativeInvoke, savedMetricsWindow = isMetricsWindow, savedAuxiliaryWindow = isAuxiliaryWindow;
   const dialog = {innerHTML:'',open:false,setAttribute(){},show(){this.open=true;},showModal(){throw new Error('native details must not use a modal');},close(){this.open=false;}};
-  const summary = {ttftMs:1800,tokenSpeed:61.6,cacheHitRate:0.934,coverage:0.862,validRequestCount:61,requestCount:82,inputTokens:1000,cachedInputTokens:934,outputTokens:100,reasoningOutputTokens:20,generationMs:1600,durationMs:8000,toolWaitMs:4000,turnCount:1,completedTurnCount:1};
+  const summary = {ttftMs:1800,tokenSpeed:61.6,cacheHitRate:0.934,coverage:0.862,validRequestCount:61,requestCount:82,inputTokens:1000,cachedInputTokens:934,outputTokens:100,reasoningOutputTokens:20,generationMs:1600,durationMs:8000,toolWaitMs:4000,turnCount:1,completedTurnCount:1,activityCount:7};
   const fixture = id => ({threadId:id,title:'<script>unsafe</script>',cwd:'C:/<project>',model:'model',complete:true,warnings:[],latestTurnId:'latest',summary:{...summary,outputTokens:999,tokenSpeed:10},turns:[{turnId:'latest',startedAt:1700000000000,status:'completed',metrics:{...summary},requests:[{responseId:'<request>',included:false,excludedReason:'缺少输出起点',outputTokens:3}],activities:[{type:'tool',label:'<tool>',detail:'<img src=x onerror=alert(1)>',at:1700000000000}]}],tools:[],subagents:[{threadId:'child',name:'<child>',summary:null,status:'completed'}]});
   try {
     setLanguage('zh');
@@ -1721,7 +1786,7 @@ await vm.runInContext(`(async () => {
     const costData = {...data,consumption:{totals:costTotals,priceDate:'2026-10-23'},turns:[{...data.turns[0],consumption:costTotals,requests:[{...data.turns[0].requests[0],costUsd:0.003}]}],subagents:[{...data.subagents[0],consumption:{totals:{...costTotals,costUsd:0.02}}}]};
     const costHtml = chatMetricsMarkup(costData);
     assert.ok(costHtml.includes('本对话消耗（全部已结算请求）') && costHtml.includes('≈$0.0100'));
-    assert.ok(costHtml.includes('≈$0.0030') && costHtml.includes('≈$0.0200'),'request and subagent costs are shown separately');
+    assert.ok(!costHtml.includes('≈$0.0030') && costHtml.includes('≈$0.0200'),'request details are removed while turn and subagent costs remain');
     assert.equal(metricsCostMoney({requests:2,unpricedRequests:2,costUsd:0}),'—','unknown prices are not shown as free');
     assert.equal(metricsCostMoney({requests:2,unpricedRequests:1,costUsd:.01}),'≈$0.0100 + 未计价');
     assert.equal(metricsCostMoney(null),'—');
@@ -1743,16 +1808,29 @@ await vm.runInContext(`(async () => {
     assert.deepEqual([...orderedHtml.matchAll(/<option value="([^"]+)"/g)].map(match => match[1]), ['all','newest','middle','older','unknown']);
     assert.deepEqual([...orderedHtml.matchAll(/data-scope="([^"]+)"/g)].map(match => match[1]), ['newest','middle','older','unknown']);
     assert.deepEqual(unorderedTurns.map(turn => turn.turnId), ['older','newest','middle','unknown'], 'display sorting does not mutate the source turns');
-    assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;') && chatMetricsMarkup(data,'latest').includes('&lt;img src=x onerror=alert(1)&gt;'),'log content is escaped');
+    assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;') && !chatMetricsMarkup(data,'latest').includes('onerror'),'titles are escaped and activity bodies are absent');
+    assert.ok(html.includes('<dt>活动记录数</dt><dd>7</dd>'));
+    assert.ok(!html.includes('请求明细')&&!html.includes('metrics-activity'),'removed detail lists are never rendered');
+    {
+      const guarded={...data.turns[0]};
+      Object.defineProperty(guarded,'requests',{get(){throw Error('removed request details must not be read');}});
+      Object.defineProperty(guarded,'activities',{get(){throw Error('removed activity details must not be read');}});
+      assert.ok(chatMetricsMarkup({...data,turns:[guarded]}).includes('活动记录数'));
+      const large=Array.from({length:10000},(_,i)=>({...data.turns[0],turnId:'large-'+i,startedAt:i}));
+      const bounded=chatMetricsMarkup({...data,turns:large,turnTotal:10000,turnOffset:0,detailRevision:'1'});
+      assert.equal([...bounded.matchAll(/data-scope="/g)].length,50,'ten thousand turns create at most fifty rows');
+      assert.equal([...bounded.matchAll(/<option /g)].length,51,'the selector is bounded with the same page');
+      assert.ok(bounded.includes('1–50 / 10,000'));
+    }
     assert.ok(html.includes('工具统计（全会话）') && html.includes('子智能体（各自全会话）'),'tools and subagents declare their own scope');
-    assert.ok(chatMetricsMarkup(data,'latest').includes('缺少输出起点') && html.includes('data-metrics-action="agent"'));
+    assert.ok(!chatMetricsMarkup(data,'latest').includes('缺少输出起点') && html.includes('data-metrics-action="agent"'));
     assert.ok(metricsTooltip(summary,data).includes('61/82') && metricsTooltip(summary,data).includes('86.2%'));
     const briefTip=metricsTooltip(summary,{...data,complete:false,turns:[{status:'inProgress',metrics:summary,requests:[{responseId:'hidden-response-id'}]}]});
     assert.equal(briefTip.split(String.fromCharCode(10)).length,6,'metrics tips keep the six requested lines');
     for(const detail of ['工具等待','响应 ID','hidden-response-id','日志缺少','仅采用','记录不完整']) assert.ok(!briefTip.includes(detail));
     setLanguage('en');
     assert.ok(chatMetricsMarkup(data).includes('Conversation details'));
-    assert.ok(chatMetricsMarkup(data,'latest').includes('Missing output start'));
+    assert.ok(chatMetricsMarkup(data,'latest').includes('Activity records'));
     setLanguage('zh');
     const pending = new Map(), calls = [];
     nativeInvoke = (command,args) => { calls.push({command,args}); return new Promise(resolve => pending.set(args.threadId,resolve)); };
@@ -1934,14 +2012,112 @@ await vm.runInContext(`(async () => {
     pending.get('late')(fixture('late')); await afterClose;
     assert.equal(metricsView,null,'close invalidates pending detail navigation');
     assert.equal(dialog.open,false);
+    {
+      const oldInvoke=nativeInvoke,selectionElement={innerHTML:''};
+      const fullMarkup=dialog.innerHTML,pages=[];
+      dialog.querySelector=selector=>selector==='[data-metrics-selection]'?selectionElement:null;
+      const page=(offset,count)=>({...fixture('paged'),detailRevision:'10',turnOffset:offset,turnTotal:120,summary:{...summary,activityCount:19},turns:Array.from({length:count},(_,i)=>({...fixture('paged').turns[0],turnId:'page-'+(offset+i),startedAt:1700000000000-i}))});
+      metricsView={threadId:'paged',scope:'',parents:[],data:page(0,50)};
+      nativeInvoke=(command,args)=>new Promise(resolve=>pages.push({args,resolve}));
+      const next=loadMetricsPage(50);
+      assert.deepEqual(pages[0].args,{threadId:'paged',latestOnly:false,turnOffset:50,detailRevision:'10'});
+      pages[0].resolve(page(50,50));await next;
+      assert.equal(metricsView.scope,'page-50');assert.equal(metricsView.data.turnOffset,50);
+      assert.equal(dialog.innerHTML,fullMarkup,'paging leaves header, consumption, tools and agent DOM intact');
+      assert.ok(selectionElement.innerHTML.includes('51–100 / 120'));
+      metricsView.scope='all';const last=loadMetricsPage(100);pages[1].resolve(page(100,20));await last;
+      assert.equal(metricsView.scope,'all');assert.ok(selectionElement.innerHTML.includes('<dt>活动记录数</dt><dd>19</dd>'));
+      const late=loadMetricsPage(0);closeChatMetrics();pages[2].resolve(page(0,50));await late;
+      assert.equal(metricsView,null,'a late page cannot repopulate a closed detail window');
+      nativeInvoke=oldInvoke;delete dialog.querySelector;
+    }
     assert.ok(!itemMenu({...savedChats[0],sourceArchived:true},{id:'project'},'global').includes('chat-metrics'),'archived menu remains restore-only');
     assert.equal(itemMenu({...savedChats[0],sourceArchived:false},{id:'project'},'global').match(/data-menu-action="[^"]+"/g).at(-1), 'data-menu-action="chat-metrics"', 'details is the last ordinary chat menu action');
     assert.ok(!JSON.stringify(configurationDocument()).includes('chatMetrics'),'metrics are not persisted in configuration');
+    isAuxiliaryWindow=false;state.selectedChatId='';chatMetrics.clear();runningMetricsKeys.clear();
+    chats=[
+      {id:'a',title:'Actual renamed title',working:true,turnId:'a-turn',executionStatus:'inProgress'},
+      {id:'b',title:'<Second title>',working:true,turnId:'b-turn',executionStatus:'inProgress'},
+      {id:'waiting',title:'Waiting question',working:true,waitingForInput:true,turnId:'w-turn',executionStatus:'inProgress'},
+      {id:'done',title:'Completed chat',working:false,turnId:'d-turn',executionStatus:'completed'}
+    ];
+    const predictionConfig={model:'gpt-model',effort:null,serviceTier:null};
+    const activity=(turnId,phase='possible',at=Date.now())=>({turnId,phase,at,config:{...predictionConfig}});
+    const forecast=(data,speed)=>({...data,recentSpeed:{config:{...predictionConfig},tokenSpeed:speed,samples:3}});
+    chats[0].generation=activity('a-turn');chats[1].generation=activity('b-turn');
+    const totalCalls=[],totalPending=new Map();
+    nativeInvoke=(command,args)=>{totalCalls.push(args);return new Promise(resolve=>totalPending.set(args.threadId,resolve));};
+    const combined=refreshSelectedChatMetrics();
+    assert.deepEqual(totalCalls.map(args=>args.threadId),['a','b'],'only running main chats are read, even without a selected chat');
+    assert.ok(totalCalls.every(args=>args.latestOnly));
+    totalPending.get('a')(forecast({...withTurn('a','a-turn',62,'inProgress'),title:'FIRST USER MESSAGE'},62));
+    totalPending.get('b')(forecast(withTurn('b','b-turn',48,'inProgress'),48));await combined;
+    const combinedMarkup=runningMetricsMarkup();
+    const combinedTip=runningMetricsTipMarkup();
+    assert.ok(combinedMarkup.includes('Σ≈110t/s')&&combinedMarkup.includes('aria-describedby="running-metrics-tip"'));
+    assert.ok(combinedTip.includes('Actual renamed title<small class="running-metrics-model">[model]</small></span><span class="running-metrics-speed">62t/s</span>'));
+    assert.ok(!combinedTip.includes('≈'),'only the aggregate label retains the approximation sign');
+    assert.ok(combinedTip.includes('&lt;Second title&gt;<small')&&!combinedTip.includes('FIRST USER MESSAGE'),'tips use current chat titles, not metrics prompt titles');
+    assert.ok(!combinedTip.includes('Waiting question')&&!combinedTip.includes('Completed chat'));
+    assert.ok(!combinedTip.includes('2.2s')&&!combinedTip.includes('50%'),'aggregate tips contain chat names, models and speeds');
+    {
+      const previousSelector=document.querySelector,previousGet=document.getElementById;
+      const currentNode={innerHTML:''},totalNode={textContent:'Σ≈110t/s'},tipNode={innerHTML:combinedTip};
+      const statusNode={querySelector:selector=>selector==='.status-chat-current'?currentNode:totalNode,set innerHTML(value){throw Error('the hovered aggregate node must survive status refresh');}};
+      document.querySelector=selector=>selector==='.status-chat'?statusNode:previousSelector(selector);
+      document.getElementById=id=>id==='running-metrics-tip'?tipNode:previousGet(id);
+      try {
+        state.selectedChatId='a';updateStatusChat();updateStatusChat();
+        assert.ok(currentNode.innerHTML.includes('status-metrics'),'selected request rendering is updated separately');
+        chatMetrics.get('a').recentSpeed.tokenSpeed=63;updateStatusChat();
+        assert.equal(totalNode.textContent,'Σ≈111t/s','the existing hover/focus target updates its text without replacement');
+        chatMetrics.get('a').recentSpeed.tokenSpeed=62;
+      } finally {state.selectedChatId='';document.querySelector=previousSelector;document.getElementById=previousGet;}
+    }
+    assert.ok(!combinedTip.includes('running-metrics-note'),'complete estimates need no extra explanatory row');
+    chats[0].generation.phase='waiting';assert.ok(runningMetricsMarkup().includes('Σ≈110t/s'),'tool waits retain the running chat forecast');
+    chats[1].generation.phase='waiting';assert.ok(runningMetricsMarkup().includes('Σ≈110t/s'),'waiting on multiple tools does not subtract generation capacity');
+    chats[0].working=false;assert.ok(runningMetricsMarkup().includes('Σ≈48t/s'),'termination uses the calibrated activity state');chats[0].working=true;
+    chats[0].generation=activity('a-turn','possible',Date.now()-30001);
+    assert.ok(runningMetricsMarkup().includes('Σ≈110t/s'),'silence does not expire a running chat forecast');
+    chats[1].generation=activity('b-turn');
+    const firstForecast=chatMetrics.get('a').recentSpeed;delete chatMetrics.get('a').recentSpeed;
+    assert.ok(runningMetricsMarkup().includes('Σ≈48t/s')&&runningMetricsTipMarkup().includes('1/2个运行中对话'),'missing samples remain unknown and partial estimates show coverage');
+    chatMetrics.get('a').recentSpeed=firstForecast;
+    chats[0].generation.phase='compacting';assert.ok(runningMetricsMarkup().includes('Σ≈48t/s'),'an explicitly known current compaction is excluded');
+    chats[0].generation.phase='running';assert.ok(runningMetricsMarkup().includes('Σ≈110t/s'),'a finished compaction restores the existing samples');
+    chats[0].generation.phase='compacting';chats[0].generation.turnId='older-turn';
+    assert.equal(runningMetricsEntries().length,2,'old compaction metadata cannot exclude a new turn');
+    chats[0].generation=activity('a-turn');
+    const secondForecast=chatMetrics.get('b').recentSpeed;
+    chatMetrics.get('a').recentSpeed={...firstForecast,tokenSpeed:0};chatMetrics.get('b').recentSpeed={...secondForecast,tokenSpeed:0};
+    assert.ok(runningMetricsMarkup().includes('Σ≈0t/s'),'a valid zero forecast remains visible');
+    chatMetrics.get('a').recentSpeed=firstForecast;chatMetrics.get('b').recentSpeed=secondForecast;
+    chats[0].generation=activity('a-turn');chats[0].generation.config.model='another';
+    assert.equal(runningMetricsEntries()[1].speed,null,'known model/config changes reject old samples');
+    chats[0].generation=activity('a-turn');
+    assert.ok(renderStatusbar().includes('</footer><div id="running-metrics-tip"'),'the tooltip sits outside the clipped statusbar');
+    await refreshSelectedChatMetrics();assert.equal(totalCalls.length,2,'unchanged running requests reuse cached metrics');
+    chats[0]={...chats[0],metricsRevision:'new-response'};chats[1]={...chats[1],working:false};
+    const newResponse=refreshSelectedChatMetrics();
+    totalPending.get('a')(forecast(withTurn('a','a-turn',76,'inProgress'),76));await newResponse;
+    assert.ok(runningMetricsMarkup().includes('Σ≈76t/s'),'finished chats leave the sum and settlements update it');
+    chats[0]={...chats[0],turnId:'new-turn'};
+    const incomplete=refreshSelectedChatMetrics();
+    assert.ok(!runningMetricsMarkup().includes('76t/s'),'a new turn cannot reuse the preceding turn speed');
+    totalPending.get('a')(withTurn('a','new-turn',null,'inProgress'));await incomplete;
+    assert.ok(runningMetricsMarkup().includes('Σ—'),'missing valid samples are never fabricated as zero');
+    chats[0]={...chats[0],metricsRevision:'late-response'};
+    const stopped=refreshSelectedChatMetrics();chats[0]={...chats[0],working:false};await refreshSelectedChatMetrics();
+    totalPending.get('a')(withTurn('a','new-turn',999,'inProgress'));await stopped;
+    assert.ok(runningMetricsMarkup().includes('Σ0t/s'),'zero remains visible after all running chats stop');
+    assert.equal(runningMetricsTipMarkup(),'','late results cannot restore a stopped chat to the tooltip');
+    assert.ok(statusChatMarkup().includes('Σ0t/s'),'zero remains visible without a selected chat');
   } finally {
     chats = savedChats; state.selectedChatId = savedSelected; hoveredChatId = savedHover;
     nativeInvoke = savedInvoke; document.getElementById = savedGet;
     isMetricsWindow = savedMetricsWindow; isAuxiliaryWindow = savedAuxiliaryWindow;
-    chatMetrics.clear(); metricsPending.clear(); metricsRefreshKey = ''; metricsView = null; setLanguage('zh');
+    chatMetrics.clear(); metricsPending.clear(); runningMetricsKeys.clear(); metricsRefreshKey = ''; metricsView = null; setLanguage('zh');
   }
 })()`,context);
 console.log('Frontend checks passed: source refresh, previews, folders, config, metrics windows, quota tips, scope, async selection, subagent navigation, locale and resizing.');

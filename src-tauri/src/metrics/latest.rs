@@ -2,7 +2,7 @@ use super::*;
 use crate::rollout_log::{self, Stamp};
 use std::{
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 struct Entry {
@@ -14,16 +14,111 @@ struct Entry {
     guard: Vec<u8>,
     parser: Parser,
     snapshot: ChatMetrics,
+    recent: Recent,
+    forecast_scope: String,
+}
+
+#[derive(Default)]
+struct Recent {
+    config: SpeedConfig,
+    requests: Vec<Request>,
+    skip: usize,
+    excluded: HashSet<String>,
+}
+impl Recent {
+    fn configure(&mut self, config: SpeedConfig, skip: usize) {
+        if self.config != config {
+            self.config = config;
+            self.requests.clear();
+            self.skip = skip;
+        }
+    }
+    fn capture(&mut self, turn: &Turn) {
+        for request in turn.requests.iter().skip(self.skip) {
+            if !request.included || self.excluded.contains(&request.response_id) {
+                self.requests
+                    .retain(|old| old.response_id != request.response_id);
+                continue;
+            }
+            if let Some(old) = self
+                .requests
+                .iter_mut()
+                .find(|old| old.response_id == request.response_id)
+            {
+                *old = request.clone();
+            } else {
+                self.requests.push(request.clone());
+                if self.requests.len() > 3 {
+                    self.requests.remove(0);
+                }
+            }
+        }
+    }
+    fn estimate(&self) -> Option<SpeedEstimate> {
+        self.config.model.as_ref()?;
+        let summary = summarize(&self.requests);
+        if summary.generation_ms == 0 {
+            return None;
+        }
+        Some(SpeedEstimate {
+            config: self.config.clone(),
+            token_speed: summary.valid_output_tokens as f64 * 1000.0 / summary.generation_ms as f64,
+            samples: self.requests.len(),
+        })
+    }
+}
+
+fn forecast_scope(home: &Path) -> String {
+    let auth = std::fs::metadata(home.join("auth.json"))
+        .ok()
+        .map(|m| (m.created().ok(), m.modified().ok(), m.len()));
+    let source = std::fs::metadata(home.join("state_5.sqlite"))
+        .ok()
+        .and_then(|m| m.created().ok());
+    format!(
+        "{:?}|{auth:?}|{source:?}",
+        crate::usage::context::identity(home).ok()
+    )
 }
 
 pub(super) fn read(home: &Path, id: &str) -> Result<ChatMetrics, String> {
-    // Only the selected conversation needs a live cursor; details use the full reader.
-    static CACHE: OnceLock<Mutex<Option<Entry>>> = OnceLock::new();
-    let mut cache = CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|e| e.to_string())?;
-    read_cached(home, id, &mut cache)
+    type Slot = (PathBuf, String, Arc<Mutex<Option<Entry>>>);
+    static CACHE: OnceLock<Mutex<Vec<Slot>>> = OnceLock::new();
+    let slot = {
+        let mut cache = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let slot = cache
+            .iter()
+            .position(|(h, i, _)| h == home && i == id)
+            .map(|index| cache.remove(index).2)
+            .unwrap_or_default();
+        cache.push((home.into(), id.into(), slot.clone()));
+        if cache.len() > 32 {
+            cache.remove(0);
+        }
+        slot
+    };
+    let mut entry = slot.lock().map_err(|e| e.to_string())?;
+    read_cached(home, id, &mut entry)
+}
+
+#[cfg(test)]
+fn read_multiple(home: &Path, id: &str, cache: &mut Vec<Entry>) -> Result<ChatMetrics, String> {
+    let mut entry = cache
+        .iter()
+        .position(|entry| entry.home == home && entry.id == id)
+        .map(|index| cache.remove(index));
+    let result = read_cached(home, id, &mut entry);
+    if let Some(entry) = entry {
+        cache.push(entry);
+    }
+    // shortcut: keep 32 recent cursors; prune by active IDs if larger concurrent sets need caching.
+    if cache.len() > 32 {
+        cache.remove(0);
+    }
+    result
 }
 
 fn read_cached(home: &Path, id: &str, cache: &mut Option<Entry>) -> Result<ChatMetrics, String> {
@@ -38,6 +133,22 @@ fn read_cached(home: &Path, id: &str, cache: &mut Option<Entry>) -> Result<ChatM
         Err(error) => return Err(error.to_string()),
     };
     let stamp = log.stamp.clone();
+    let scope = forecast_scope(home);
+    if let Some(entry) = cache
+        .as_mut()
+        .filter(|entry| entry.home == home && entry.id == id && entry.forecast_scope != scope)
+    {
+        entry.recent.requests.clear();
+        entry.recent.excluded.clear();
+        entry.recent.skip = entry
+            .parser
+            .order
+            .last()
+            .and_then(|id| entry.parser.turns.get(id))
+            .map_or(0, |state| state.turn.requests.len());
+        entry.snapshot.recent_speed = None;
+        entry.forecast_scope = scope.clone();
+    }
     let matching = cache
         .as_ref()
         .filter(|entry| entry.id == id && entry.home == home)
@@ -50,11 +161,13 @@ fn read_cached(home: &Path, id: &str, cache: &mut Option<Entry>) -> Result<ChatM
     if let Some(entry) = matching.filter(|entry| entry.stamp == stamp) {
         let mut snapshot = entry.snapshot.clone();
         snapshot.as_of = data.as_of;
+        snapshot.title = data.title;
         return Ok(snapshot);
     }
     let append = matching.is_some_and(|entry| {
         !log.compressed
             && entry.stamp.path == stamp.path
+            && entry.stamp.created == stamp.created
             && stamp.len > entry.stamp.len
             && guard(&stamp.path, entry.offset).is_ok_and(|bytes| bytes == entry.guard)
     });
@@ -81,10 +194,17 @@ fn read_cached(home: &Path, id: &str, cache: &mut Option<Entry>) -> Result<ChatM
             )
         };
         let mut parser = Parser::new(id);
+        let mut recent = Recent::default();
         let mut dependencies = vec![];
         let mut offset = 0;
         for (index, (path, end)) in segments.iter().enumerate() {
-            offset = feed(&mut parser, path, if index == 0 { start } else { 0 }, *end)?;
+            offset = feed(
+                &mut parser,
+                &mut recent,
+                path,
+                if index == 0 { start } else { 0 },
+                *end,
+            )?;
             if index + 1 < segments.len() {
                 dependencies.push(rollout_log::open(path).map_err(|e| e.to_string())?.stamp);
             }
@@ -98,10 +218,18 @@ fn read_cached(home: &Path, id: &str, cache: &mut Option<Entry>) -> Result<ChatM
             guard: vec![],
             parser,
             snapshot: data.clone(),
+            recent,
+            forecast_scope: scope,
         }
     };
     if append {
-        entry.offset = feed(&mut entry.parser, &stamp.path, entry.offset, stamp.len)?;
+        entry.offset = feed(
+            &mut entry.parser,
+            &mut entry.recent,
+            &stamp.path,
+            entry.offset,
+            stamp.len,
+        )?;
     }
     entry.stamp = stamp;
     entry.guard = if log.compressed {
@@ -109,7 +237,7 @@ fn read_cached(home: &Path, id: &str, cache: &mut Option<Entry>) -> Result<ChatM
     } else {
         guard(&entry.stamp.path, entry.offset)?
     };
-    entry.snapshot = snapshot(data, &entry.parser);
+    entry.snapshot = snapshot(data, &entry.parser, &mut entry.recent);
     let result = entry.snapshot.clone();
     *cache = Some(entry);
     Ok(result)
@@ -215,7 +343,13 @@ fn last_start(path: &Path, limit: Option<u64>, id: &str) -> Result<(Option<u64>,
     Ok((found, offset))
 }
 
-fn feed(parser: &mut Parser, path: &Path, start: u64, end: u64) -> Result<u64, String> {
+fn feed(
+    parser: &mut Parser,
+    recent: &mut Recent,
+    path: &Path,
+    start: u64,
+    end: u64,
+) -> Result<u64, String> {
     let mut reader = BufReader::new(
         rollout_log::open(path)
             .and_then(|log| log.reader_at(start))
@@ -254,8 +388,50 @@ fn feed(parser: &mut Parser, path: &Path, start: u64, end: u64) -> Result<u64, S
                 if own && boundary {
                     if let Some(turn) = turn {
                         if parser.order.last().is_some_and(|old| old != turn) {
+                            if let Some(old) = parser.clone().finish().0.last() {
+                                recent.capture(old);
+                            }
+                            recent.skip = 0;
+                            recent.excluded.clear();
                             *parser = Parser::new(&parser.id);
                         }
+                    }
+                }
+                if own && record["type"] == "turn_context" {
+                    let skip = parser
+                        .order
+                        .last()
+                        .and_then(|id| parser.turns.get(id))
+                        .map_or(0, |state| state.turn.requests.len());
+                    recent.configure(
+                        SpeedConfig {
+                            model: p["model"].as_str().map(str::to_owned),
+                            effort: p["effort"].as_str().map(str::to_owned),
+                            service_tier: recent.config.service_tier.clone(),
+                        },
+                        skip,
+                    );
+                }
+                if own && record["type"] == "event_msg" && p["type"] == "thread_settings_applied" {
+                    let skip = parser
+                        .order
+                        .last()
+                        .and_then(|id| parser.turns.get(id))
+                        .map_or(0, |state| state.turn.requests.len());
+                    recent.configure(
+                        SpeedConfig {
+                            service_tier: p["thread_settings"]["service_tier"]
+                                .as_str()
+                                .map(str::to_owned),
+                            ..recent.config.clone()
+                        },
+                        skip,
+                    );
+                }
+                if own && record["type"] == "compacted" {
+                    if let Some(id) = p["compaction_response_id"].as_str() {
+                        recent.excluded.insert(id.into());
+                        recent.requests.retain(|request| request.response_id != id);
                     }
                 }
                 parser.apply(record);
@@ -266,7 +442,7 @@ fn feed(parser: &mut Parser, path: &Path, start: u64, end: u64) -> Result<u64, S
     Ok(offset)
 }
 
-fn snapshot(mut data: ChatMetrics, parser: &Parser) -> ChatMetrics {
+fn snapshot(mut data: ChatMetrics, parser: &Parser, recent: &mut Recent) -> ChatMetrics {
     let (mut turns, _, _, warnings, complete) = parser.clone().finish();
     data.usage_batches = turns
         .iter()
@@ -275,6 +451,8 @@ fn snapshot(mut data: ChatMetrics, parser: &Parser) -> ChatMetrics {
     data.complete = complete;
     data.warnings = warnings;
     if let Some(mut turn) = turns.pop() {
+        recent.capture(&turn);
+        data.recent_speed = recent.estimate();
         data.latest_turn_id = Some(turn.turn_id.clone());
         data.effort = turn.effort.clone();
         let selected = turn.requests.iter().rposition(|request| {
@@ -345,6 +523,220 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn recent_speed_weights_three_own_samples_without_changing_latest_metrics() {
+        let mut records = vec![
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            started("turn"),
+            json!({"type":"turn_context","payload":{"turn_id":"turn","model":"model","effort":"high"}}),
+        ];
+        records.extend(request("turn", "a", 2000, 3000, 100));
+        records.extend(request("turn", "b", 4000, 13000, 100));
+        let (dir, path) = fixture(&records);
+        let mut cache = None;
+        let data = read_cached(dir.path(), "main", &mut cache).unwrap();
+        assert_eq!(data.summary.token_speed, Some(11.0));
+        assert_eq!(
+            data.recent_speed.unwrap().token_speed,
+            20.0,
+            "weight valid generation time, not per-request speeds"
+        );
+        append(&path, &request("turn", "c", 14000, 15000, 41));
+        append(&path, &request("turn", "d", 16000, 17000, 101));
+        let data = read_cached(dir.path(), "main", &mut cache).unwrap();
+        let estimate = data.recent_speed.unwrap();
+        assert_eq!(estimate.samples, 3);
+        assert_eq!(estimate.token_speed, 22.0);
+        let duplicate = request("turn", "d", 16000, 17000, 101).pop().unwrap();
+        append(&path, &[duplicate]);
+        let repeated = read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .unwrap();
+        assert_eq!(repeated.token_speed, estimate.token_speed);
+        assert_eq!(repeated.samples, 3);
+        append(
+            &path,
+            &[
+                started("next"),
+                json!({"type":"turn_context","payload":{"turn_id":"next","model":"model","effort":"high"}}),
+            ],
+        );
+        let next = read_cached(dir.path(), "main", &mut cache).unwrap();
+        assert!(
+            next.summary.token_speed.is_none(),
+            "the selected chat still needs a current-turn settled request"
+        );
+        assert_eq!(
+            next.recent_speed.unwrap().token_speed,
+            estimate.token_speed,
+            "only the forecast reuses same-configuration samples"
+        );
+        append(
+            &path,
+            &[
+                json!({"type":"turn_context","payload":{"turn_id":"next","model":"other","effort":"high"}}),
+            ],
+        );
+        assert!(read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .is_none());
+        let mut child = request("next", "child", 18000, 19000, 10001);
+        for record in &mut child {
+            record["payload"]["thread_id"] = json!("child");
+        }
+        append(&path, &child);
+        assert!(read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .is_none());
+        append(&path, &request("next", "new-model", 20000, 21000, 21));
+        assert_eq!(
+            read_cached(dir.path(), "main", &mut cache)
+                .unwrap()
+                .recent_speed
+                .unwrap()
+                .token_speed,
+            21.0
+        );
+        append(
+            &path,
+            &[
+                json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"priority"}}}),
+            ],
+        );
+        assert!(
+            read_cached(dir.path(), "main", &mut cache)
+                .unwrap()
+                .recent_speed
+                .is_none(),
+            "Fast settings cannot reuse Standard samples"
+        );
+    }
+    #[test]
+    fn compaction_mirrors_inheritance_and_format_changes_preserve_only_normal_samples() {
+        let mut records = vec![
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            started("turn"),
+            json!({"type":"turn_context","payload":{"turn_id":"turn","model":"model"}}),
+        ];
+        records.extend(request("turn", "a", 2000, 3000, 100));
+        records.extend(request("turn", "b", 4000, 13000, 100));
+        let (dir, path) = fixture(&records);
+        let mut cache = None;
+        assert_eq!(
+            read_cached(dir.path(), "main", &mut cache)
+                .unwrap()
+                .recent_speed
+                .unwrap()
+                .token_speed,
+            20.0
+        );
+        let compact = request("turn", "compaction-request", 14000, 16000, 900);
+        append(&path, &compact);
+        append(
+            &path,
+            &[
+                json!({"type":"compacted","payload":{"compaction_response_id":"compaction-request"}}),
+                compact.last().unwrap().clone(),
+            ],
+        );
+        let mut foreign = request("turn", "child", 17000, 18000, 10000);
+        for value in &mut foreign {
+            value["payload"]["thread_id"] = json!("child");
+        }
+        append(&path, &foreign);
+        append(
+            &path,
+            &[json!({"type":"session_meta","payload":{"id":"ancestor"}})],
+        );
+        let mut inherited = request("turn", "inherited", 19000, 20000, 10000);
+        for value in &mut inherited {
+            value["payload"]
+                .as_object_mut()
+                .unwrap()
+                .remove("thread_id");
+        }
+        append(&path, &inherited);
+        append(
+            &path,
+            &[json!({"type":"session_meta","payload":{"id":"main"}})],
+        );
+        let before = read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .unwrap();
+        assert_eq!(before.samples, 2);
+        assert_eq!(before.token_speed, 20.0);
+        crate::rollout_log::compress_fixture(&path);
+        let after = read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .unwrap();
+        assert_eq!(after.samples, 2);
+        assert_eq!(
+            after.token_speed, 20.0,
+            "completed compaction and JSONL/ZST replay restore the pre-compaction normal samples"
+        );
+        rollout_log::read_stats(true);
+        read_cached(dir.path(), "main", &mut cache).unwrap();
+        assert_eq!(rollout_log::read_stats(false).bytes, 0);
+    }
+    #[test]
+    fn account_and_auth_changes_clear_forecasts_without_changing_measured_requests() {
+        let mut records = vec![
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            started("turn"),
+            json!({"type":"turn_context","payload":{"turn_id":"turn","model":"model"}}),
+        ];
+        records.extend(request("turn", "before", 2000, 3000, 100));
+        let (dir, path) = fixture(&records);
+        let mut cache = None;
+        let first = read_cached(dir.path(), "main", &mut cache).unwrap();
+        assert_eq!(first.recent_speed.unwrap().token_speed, 100.0);
+        crate::usage::context::confirm(dir.path(), Some("account-a")).unwrap();
+        let changed = read_cached(dir.path(), "main", &mut cache).unwrap();
+        assert!(changed.recent_speed.is_none());
+        assert_eq!(changed.summary.token_speed, first.summary.token_speed);
+        let a = request("turn", "account-a-request", 4000, 5000, 31);
+        append(&path, &a);
+        assert_eq!(
+            read_cached(dir.path(), "main", &mut cache)
+                .unwrap()
+                .recent_speed
+                .unwrap()
+                .token_speed,
+            31.0
+        );
+        crate::usage::context::confirm(dir.path(), Some("account-b")).unwrap();
+        assert!(read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .is_none());
+        append(&path, &[a.last().unwrap().clone()]);
+        assert!(
+            read_cached(dir.path(), "main", &mut cache)
+                .unwrap()
+                .recent_speed
+                .is_none(),
+            "a previous-account mirror is not a new forecast sample"
+        );
+        append(&path, &request("turn", "account-b-request", 6000, 7000, 41));
+        assert_eq!(
+            read_cached(dir.path(), "main", &mut cache)
+                .unwrap()
+                .recent_speed
+                .unwrap()
+                .token_speed,
+            41.0
+        );
+        std::fs::write(dir.path().join("auth.json"), "{}").unwrap();
+        assert!(read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .is_none());
+    }
     #[test]
     fn latest_valid_request_follows_appends_interruptions_and_new_turns() {
         let mut records = vec![
@@ -465,6 +857,48 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_conversations_retain_their_cursors_and_current_titles() {
+        let mut records = vec![started("turn")];
+        records.extend(request("turn", "first", 2000, 3000, 31));
+        let (first, first_path) = fixture(&records);
+        let (second, _) = fixture(&records);
+        let mut cache = vec![];
+        read_multiple(first.path(), "main", &mut cache).unwrap();
+        let first_offset = cache[0].offset;
+        read_multiple(second.path(), "main", &mut cache).unwrap();
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache[0].offset, first_offset);
+        append(&first_path, &request("turn", "next", 4000, 5000, 101));
+        assert_eq!(
+            read_multiple(first.path(), "main", &mut cache)
+                .unwrap()
+                .summary
+                .token_speed,
+            Some(100.0)
+        );
+        assert_eq!(
+            read_multiple(second.path(), "main", &mut cache)
+                .unwrap()
+                .summary
+                .token_speed,
+            Some(30.0)
+        );
+        let catalog = Connection::open(first.path().join("state_5.sqlite")).unwrap();
+        catalog
+            .execute_batch(
+                "ALTER TABLE threads ADD COLUMN name TEXT; UPDATE threads SET name='Renamed chat';",
+            )
+            .unwrap();
+        assert_eq!(
+            read_multiple(first.path(), "main", &mut cache)
+                .unwrap()
+                .title,
+            "Renamed chat"
+        );
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
     fn continuation_keeps_tool_wait_and_inherited_usage_out() {
         let mut parent = vec![
             json!({"type":"session_meta","payload":{"id":"parent"}}),
@@ -532,6 +966,10 @@ mod tests {
         assert_eq!(latest.summary.token_speed, Some(200.0));
         assert_eq!(latest.turns[0].requests[0].response_id, "fresh");
         assert_eq!(cache.as_ref().unwrap().parser.order, vec!["replacement"]);
+        assert!(
+            latest.recent_speed.is_none(),
+            "a reset log cannot inherit the previous forecast window"
+        );
     }
 
     #[test]
@@ -539,8 +977,49 @@ mod tests {
     fn local_latest_request_matches_full_history() {
         let id = std::env::var("CODEX_PANE_VERIFY_METRICS_THREAD").unwrap();
         let home = crate::source::codex_home().unwrap();
-        let latest = read(&home, &id).unwrap();
+        let mut cursor = None;
+        let latest = read_cached(&home, &id, &mut cursor).unwrap();
         let full = read_at(&home, &id, false).unwrap();
+        if let Some(estimate) = &latest.recent_speed {
+            let requests = &cursor.as_ref().unwrap().recent.requests;
+            assert!(requests.len() <= 3);
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|r| &r.response_id)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                requests.len()
+            );
+            let mut output = 0;
+            let mut duration = 0;
+            for request in requests {
+                let expected = full
+                    .turns
+                    .iter()
+                    .flat_map(|t| &t.requests)
+                    .find(|r| r.response_id == request.response_id)
+                    .unwrap();
+                assert!(expected.included);
+                assert_eq!(
+                    (request.output_tokens, request.start_ms, request.end_ms),
+                    (expected.output_tokens, expected.start_ms, expected.end_ms)
+                );
+                output += expected.output_tokens.unwrap();
+                duration += expected.end_ms.unwrap() - expected.start_ms.unwrap();
+            }
+            assert_eq!(
+                estimate.token_speed,
+                output as f64 * 1000.0 / duration as f64
+            );
+            println!(
+                "forecast_samples={} output={} generation_ms={} forecast_tps={}",
+                requests.len(),
+                output,
+                duration,
+                estimate.token_speed
+            );
+        }
         assert!(latest.turns.len() <= 1 && latest.subagents.is_empty());
         if let Some(turn) = latest.turns.first() {
             let full_turn = full

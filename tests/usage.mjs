@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {createUsageView, quotaNoticeMarkup, resetCardsTip, usageSortedRows, usageTrendPoints, usageCycleRanges, usageCalendarRange} from '../src/usage.js';
+import {createUsageView, createQuotaNoticeView, quotaNoticeMarkup, resetCardsTip, usageSortedRows, usageTrendPoints, usageCycleRanges, usageCalendarRange, usageCycleLabel, usageModelColor, usageRangeCovered} from '../src/usage.js';
 
 const now = new Date(2026,9,23,12).getTime();
 const tip = resetCardsTip({reset_credits:{availableCount:3,credits:[
@@ -14,61 +14,241 @@ const start = new Date(2026,9,22,10).getTime(), end = new Date(2026,9,23,10).get
 const cycle = {id:'1-10080',minutes:10080,startedAt:start,observedStart:start,endedAt:end,boundaryFrom:end-60000,boundaryTo:end,scheduledReset:end+86400000,resetType:'early',outcome:'unknown',remaining:60,observedConsumed:40,incomplete:false,acknowledged:false};
 const notice = quotaNoticeMarkup([cycle]);
 assert.ok(notice.includes('额度提前重置'));
-assert.ok(notice.includes('2026-10-23 09:59 ～ 2026-10-23 10:00'));
+assert.ok(notice.includes('<time>10-23 10:00</time>') && !notice.includes('2026-') && !notice.includes('～'), 'reset time uses the adopted query boundary without a year or range');
+assert.ok(notice.includes('剩余60%') && notice.includes('上次重置 10-22 10:00'));
+const longNotice=quotaNoticeMarkup([{...cycle,startedAt:end-60000-(5*24+5)*3600000}]);
+assert.ok(longNotice.includes('重置周期 5d5h') && !longNotice.split('</header>')[0].includes('5d5h'), 'duration sits on the previous reset line');
+const unknownNotice=quotaNoticeMarkup([{...cycle,startedAt:null}]);
+assert.ok(unknownNotice.includes('上次重置 —') && unknownNotice.includes('重置周期 —'), 'unobserved starts are not invented');
 assert.ok(!notice.includes('来源未知') && !notice.includes('推测') && !notice.includes('已确认'));
 assert.ok(notice.includes('data-quota-dismiss="1-10080"'));
 assert.equal(quotaNoticeMarkup([{...cycle,acknowledged:true}]),'');
 assert.equal(quotaNoticeMarkup([{...cycle,resetType:'natural'}]),'');
 const combined=quotaNoticeMarkup([{...cycle,noticeId:'3'},{...cycle,id:'2-300',minutes:300,noticeId:'3'}]);
 assert.equal((combined.match(/<section>/g)||[]).length,1,'one reset affecting both windows produces one notification');
-assert.ok(combined.includes('data-quota-dismiss="3"') && combined.includes('W / 5h'));
+assert.ok(combined.includes('data-quota-dismiss="3"') && !combined.includes('W / 5h'), 'window labels are omitted');
 
 const earlier={...cycle,id:'old',startedAt:start-2*86400000,observedStart:start-2*86400000,endedAt:start-86400000};
 const current={...cycle,id:'live',startedAt:end,observedStart:end,endedAt:null};
 const short={...current,id:'short',minutes:300};
 const allCycles=[current,cycle,earlier,short];
+assert.equal(usageCycleLabel(cycle,true),'2026年 10-22 10:00 - 10-23 10:00 (1d0h)');
+assert.equal(usageCycleLabel(current,true,end+5*3600000),'2026年 10-23 10:00 进行中 (0d5h)');
+assert.equal(usageCycleLabel({...cycle,startedAt:new Date(2025,11,31,12).getTime(),endedAt:new Date(2026,0,2,12).getTime(),boundaryFrom:null},true),'2025年 12-31 12:00 - 01-02 12:00 (2d0h)');
+assert.equal(usageCycleLabel({...cycle,startedAt:null},true),'2026年 10-22 10:00 - 10-23 10:00 (1d0h)','duration follows the adopted boundary and the observed start when the reset start is unavailable');
 assert.deepEqual(usageCycleRanges(allCycles,['old','current']),[{from:earlier.startedAt,to:earlier.endedAt},{from:end,to:null}]);
 assert.deepEqual(usageCycleRanges(allCycles,['all']),[{from:earlier.startedAt,to:earlier.endedAt},{from:start,to:null}],'adjacent selected ranges merge, gaps do not');
 assert.deepEqual(usageCycleRanges(allCycles,['short']),[],'5h cycles never enter W statistics');
+assert.ok(usageRangeCovered([{from:start,to:end},{from:end,to:null}],{from:start,to:null}),'merged periods reuse adjacent indexed ranges');
+assert.ok(!usageRangeCovered([{from:start,to:end-1},{from:end,to:null}],{from:start,to:null}),'a real indexing gap stays unknown');
 assert.equal(usageCalendarRange('week','2026-10-23').from,new Date(2026,9,19).getTime());
 assert.equal(usageCalendarRange('week','2026-10-23').to,new Date(2026,9,26).getTime());
 assert.equal(usageCalendarRange('month','2026-10-23').to,new Date(2026,10,1).getTime());
 assert.deepEqual(usageCalendarRange('all','invalid'),{from:null,to:null});
 assert.throws(()=>usageCalendarRange('day','invalid'));
 const totals={input:100,cached:90,output:10,reasoning:5,requests:1,conversations:1,subagentRequests:0,costUsd:.01,mainUsd:.01,subagentUsd:0,unpricedRequests:0,estimatedRequests:0};
-const row={key:'p',label:'<Project>',project:'A&B',models:['gpt-6.1-sol'],totals};
-const sample={totals,rows:[row],projects:[{key:'p',label:'A&B'},{key:'',label:'无项目对话'}],models:['gpt-6.1-sol'],trend:[],warnings:[],priceDate:'2026-10-23',undatedRequests:0,totalRows:1};
+const row={key:'p',label:'<Project>',project:'A&B',models:['gpt-6.1-sol'],totals,modelTotals:[{model:'gpt-6.1-sol',totals}]};
+const sample={totals,rows:[row],projects:[{key:'p',label:'A&B'},{key:'',label:'无项目对话'}],models:['gpt-6.1-sol'],modelTotals:row.modelTotals,trend:[],warnings:[],priceDate:'2026-10-23',undatedRequests:0,totalRows:1};
+const pricedNotice=quotaNoticeMarkup([cycle],new Map([[cycle.id,{data:sample}]]));
+assert.ok(pricedNotice.includes('&lt;Project&gt;') && !pricedNotice.includes('><Project><'), 'model labels are escaped');
+assert.ok(pricedNotice.includes('>110 Token</span>') && pricedNotice.includes('≈$0.0100'), 'tokens are input plus output without adding cache or reasoning again');
+assert.ok(pricedNotice.includes('输入 100 · 缓存占比 90.0% · 输出 10 · 推理 5'), 'token breakdown is visible without expanding');
+assert.ok(pricedNotice.includes('>100.0%</span>') && pricedNotice.includes('输入 token：100'), 'model share and exact counts remain available');
+const otherTotals={...totals,input:50,cached:0,output:40,reasoning:20,costUsd:.02};
+const mixedNotice=quotaNoticeMarkup([cycle],new Map([[cycle.id,{data:{...sample,totals:{...totals,input:150,output:50,cached:90,reasoning:25,costUsd:.03},rows:[row,{...row,key:'other',label:'Other',totals:otherTotals}]}}]]));
+assert.ok(mixedNotice.includes('55.0%') && mixedNotice.includes('45.0%'), 'model percentages use input plus output across the cycle');
+const unpricedNotice=quotaNoticeMarkup([cycle],new Map([[cycle.id,{data:{...sample,totals:{...totals,unpricedRequests:1}}}]]));
+assert.ok(unpricedNotice.includes('quota-notice-total') && unpricedNotice.includes('>—</span>'), 'unknown prices are not shown as free');
+{
+  const element={innerHTML:'',hidden:true},noticeCalls=[],pending=[];
+  let noticeCycles=[{...cycle,noticeId:'3'},{...cycle,id:'2-300',minutes:300,startedAt:end-3600000,remaining:10,noticeId:'3'}];
+  const noticeView=createQuotaNoticeView({element:()=>element,invoke:async(command,args)=>{
+    noticeCalls.push({command,args});
+    if(command==='get_quota_history')return {cycles:noticeCycles};
+    if(!args.refresh)return sample;
+    return new Promise((resolve,reject)=>pending.push({resolve,reject}));
+  }});
+  await noticeView.refresh();
+  await new Promise(setImmediate);
+  assert.ok(!element.hidden && element.innerHTML.includes('剩余60%'), 'notification is visible before consumption finishes and prefers the W cycle');
+  assert.equal(pending.length,1,'same-event 5h and W usage is queried once');
+  assert.deepEqual(noticeCalls[0].args,{liveOnly:true},'normal notice polling never merges imported history');
+  assert.deepEqual(noticeCalls[1].args,{query:{from:start,to:end,group:'model',limit:200},refresh:false},'cached usage is shown before indexing');
+  assert.ok(element.innerHTML.includes('≈$0.0100'),'cached consumption is visible while the fresh query is pending');
+  assert.deepEqual(noticeCalls[2].args,{query:{from:start,to:end,group:'model',limit:200},refresh:true}, 'only the ended cycle is indexed, including all models and agents');
+  await noticeView.refresh();
+  assert.equal(pending.length,1,'polling reuses an in-flight report');
+  pending[0].resolve(sample);await new Promise(setImmediate);
+  assert.ok(element.innerHTML.includes('≈$0.0100'));
+  await noticeView.refresh();
+  assert.equal(pending.length,1,'settled notification summaries are reused');
+  noticeCycles=[{...cycle,id:'later',noticeId:'later'}];
+  await noticeView.refresh();await new Promise(setImmediate);
+  noticeCycles=[];await noticeView.refresh();
+  assert.ok(element.hidden);
+  pending[1].resolve(sample);await new Promise(setImmediate);
+  assert.ok(element.hidden,'a dismissed notification cannot return when usage arrives');
+  noticeCycles=[cycle];await noticeView.refresh();await new Promise(setImmediate);
+  noticeView.invalidate();
+  await noticeView.refresh();await new Promise(setImmediate);
+  assert.equal(pending.length,4,'new-account consumption does not wait for an obsolete account request');
+  noticeView.invalidate();
+  pending[2].resolve(sample);await new Promise(setImmediate);
+  assert.ok(element.hidden,'an old-account report cannot repopulate a cleared notification');
+  pending[3].resolve(sample);await new Promise(setImmediate);
+  await noticeView.refresh();
+  await new Promise(setImmediate);pending[4].reject(Error('Retry later'));await new Promise(setImmediate);
+  assert.ok(element.innerHTML.includes('Retry later') && !element.innerHTML.includes('≈$0.0000'), 'failed reports show no invented zero');
+  await noticeView.refresh();await new Promise(setImmediate);pending[5].resolve(sample);await new Promise(setImmediate);
+  assert.ok(element.innerHTML.includes('≈$0.0100'),'failed consumption is retried on the next normal refresh');
+}
+{
+  const element={innerHTML:'',hidden:true};
+  const empty={...sample,indexed:false,rows:[],totals:{...totals,input:0,cached:0,output:0,reasoning:0,requests:0,costUsd:0}};
+  const view=createQuotaNoticeView({element:()=>element,invoke:async command=>command==='get_quota_history'?{cycles:[cycle]}:empty});
+  await view.refresh();await new Promise(setImmediate);
+  assert.ok(element.innerHTML.includes('— Token')&&!element.innerHTML.includes('≈$0.0000'),'an unindexed empty notification stays unknown rather than reporting zero');
+}
+{
+  const element={innerHTML:'',hidden:true};
+  const calls=[];
+  const noticeView=createQuotaNoticeView({element:()=>element,invoke:async command=>{
+    calls.push(command);
+    if(command==='get_quota_history')return {cycles:[]};
+    throw Error('test preview must not index consumption');
+  }});
+  assert.ok(noticeView.preview({cycle:{...cycle,acknowledged:true},report:sample}));
+  assert.ok(element.innerHTML.includes('剩余60%') && element.innerHTML.includes('≈$0.0100'));
+  await noticeView.refresh();
+  assert.ok(!element.hidden,'normal polling does not replace a test preview');
+  assert.ok(noticeView.dismissPreview('internal-test-quota-reset'));
+  assert.ok(element.hidden,'closing the test preview only clears in-memory display');
+  assert.deepEqual(calls,['get_quota_history']);
+}
+{
+  const element={innerHTML:'',hidden:true},calls=[];
+  let revised=cycle;
+  const view=createQuotaNoticeView({element:()=>element,invoke:async(command,args)=>{
+    if(command==='get_quota_history')return {cycles:[revised]};
+    calls.push(args);return {...sample,indexed:true};
+  }});
+  await view.refresh();await new Promise(setImmediate);
+  const firstCalls=calls.length;
+  revised={...cycle,endedAt:end-1,boundaryFrom:end-60000};
+  await view.refresh();await new Promise(setImmediate);
+  assert.equal(calls.length,firstCalls+1,'a revised adopted boundary regroups only the affected cached report');
+  assert.deepEqual(calls.at(-1),{query:{from:start,to:end-1,group:'model',limit:200},refresh:false});
+  assert.ok(element.innerHTML.includes('<time>10-23 09:59</time>'),'the same adopted boundary drives notification time and the actual query');
+}
+const childTotals={...totals,input:200,cached:180,output:20,reasoning:10,subagentRequests:1,costUsd:.02,mainUsd:0,subagentUsd:.02};
+const familyTotals={...totals,input:300,cached:270,output:30,reasoning:15,requests:2,subagentRequests:1,costUsd:.03,subagentUsd:.02};
+const chatSample={...sample,totals:familyTotals,rows:[{...row,key:'chat-1',threadId:'chat-1',label:'<Chat title>',totals:familyTotals}]};
+const agentSample={...sample,totals:childTotals,rows:[{...row,key:'child',threadId:'child',label:'<Agent title>',isSubagent:true,totals:childTotals}]};
+const roundSample={...sample,rows:[{...row,key:'chat-1/1',roundNumber:1,label:'<First question>',at:start,completedAt:end,status:'completed'}]};
 const sorted=[row,{...row,key:'other',label:'Other',totals:{...totals,costUsd:1,cached:20}}];
 assert.equal(usageSortedRows(sorted)[0].key,'other');
 assert.equal(usageSortedRows(sorted,'cached')[0].key,'p');
 assert.equal(sorted[0].key,'p');
-const hour=new Date(2026,9,23,9).getTime();
-const points=usageTrendPoints({trend:[{at:hour,totals},{at:hour+7200000,totals}]},{from:hour,to:hour+10800000,ranges:[{from:hour,to:hour+3600000},{from:hour+7200000,to:hour+10800000}]},hour+10800000);
+const hour=new Date(2026,9,21).getTime(),dayMs=86400000;
+const points=usageTrendPoints({trend:[{at:hour,totals,modelTotals:row.modelTotals},{at:hour+2*dayMs,totals,modelTotals:row.modelTotals}]},{from:hour,to:hour+3*dayMs,ranges:[{from:hour,to:hour+dayMs},{from:hour+2*dayMs,to:hour+3*dayMs}]},hour+3*dayMs);
 assert.equal(points.length,3);
 assert.equal(points[1].totals.requests,0);
 assert.equal(points[1].excluded,true,'unselected gaps are distinguished from zero usage');
 assert.equal(points.reduce((n,p)=>n+p.totals.costUsd,0),.02);
+assert.deepEqual(points[0].modelTotals,row.modelTotals);
+assert.equal(usageModelColor('gpt-6.1-sol'),usageModelColor('gpt-6.1-sol'),'colors are deterministic across reports');
+assert.notEqual(usageModelColor('gpt-6.1-sol'),usageModelColor('gpt-6-astra'));
+assert.equal(usageTrendPoints({trend:[{at:hour,totals}]},{from:hour,to:hour+366*dayMs},hour+366*dayMs).length,366,'long ranges retain one bar per local day');
 
-const previousDocument=globalThis.document,handlers=new Map(),calls=[];
+const previousDocument=globalThis.document,previousObserver=globalThis.IntersectionObserver,handlers=new Map(),calls=[];
 const dialog={innerHTML:'',show(){this.open=true;},addEventListener(name,callback){handlers.set(name,callback);}};
 globalThis.document={getElementById:id=>id==='usage-dialog'?dialog:null};
 const click=(action,extra={})=>handlers.get('click')({preventDefault(){},target:{closest:()=>({dataset:{usageAction:action,...extra}})}});
 const change=(field,value,checked=false)=>handlers.get('change')({target:{dataset:{usageInput:field},value,checked}});
 try{
+  let failRounds=false,unpricedSubagent=false;
   const view=createUsageView({invoke:async(command,args)=>{
     calls.push({command,args});
     if(command==='get_quota_history')return {cycles:allCycles,observedSince:earlier.startedAt};
     if(command==='get_live_rate_limits')return {};
+    if(command==='open_chat_metrics_window')return {};
+    if(args?.query?.group==='chat'){
+      const selected=args.query.agent==='subagent'?childTotals:args.query.agent==='main'?totals:familyTotals;
+      return {...chatSample,totals:selected,rows:[{...chatSample.rows[0],totals:selected}]};
+    }
+    if(args?.query?.group==='round'){if(failRounds)throw Error('Round unavailable');return roundSample;}
+    if(args?.query?.group==='agent')return agentSample;
+    if(unpricedSubagent){
+      const selected={...familyTotals,costUsd:.01,subagentUsd:0,unpricedRequests:1,subagentUnpricedRequests:1};
+      return {...sample,totals:selected,rows:[{...row,totals:selected}]};
+    }
     return sample;
   },nativeWindow:{}});
   await view.open();
   assert.ok(dialog.open);
+  assert.ok(dialog.innerHTML.indexOf('data-usage-action="resets"')<dialog.innerHTML.indexOf('data-usage-action="consumption"'),'reset history is the first tab');
+  assert.ok(dialog.innerHTML.includes('W 额度重置历史'),'quota details opens on reset history by default');
+  assert.equal(calls.filter(c=>c.command==='get_usage_consumption').length,0,'opening reset history does not load a hidden consumption summary');
+  await click('consumption');
   assert.equal(calls.at(-1).args.query.group,'project');
   assert.deepEqual(calls.at(-1).args.query.ranges,[{from:end,to:null}]);
   assert.equal(calls.filter(c=>c.args?.refresh).length,1);
   assert.ok(dialog.innerHTML.includes('&lt;Project&gt;')&&!dialog.innerHTML.includes('><Project><'));
-  assert.ok(!dialog.innerHTML.includes('data-usage-action="expand"'),'the usage window has no chat/request drilldown');
-  assert.ok(!dialog.innerHTML.includes('5h'));
+  assert.ok(!dialog.innerHTML.includes('data-usage-action="expand-chat"'),'project summary does not load chat rounds');
+  assert.ok(!dialog.innerHTML.includes('data-usage-cycle="short"'));
+  assert.equal(calls.filter(c=>c.args?.query?.group==='round').length,0);
+  await click('group',{key:'chat'});
+  assert.ok(dialog.innerHTML.includes('&lt;Chat title&gt;') && !dialog.innerHTML.includes('Agent title'),'subagents stay inside their parent chat');
+  assert.ok(dialog.innerHTML.includes('主对话 ≈$0.0100') && dialog.innerHTML.includes('子代理 ≈$0.0200'),'source composition remains in compact tips');
+  assert.equal(calls.filter(c=>c.args?.query?.group==='round').length,0,'chat titles do not require round log reads');
+  await click('expand-chat',{id:'chat-1'});
+  const ownCall=calls.findLast(c=>c.args?.query?.group==='round');
+  assert.equal(ownCall.args.query.sourceThreadId,'chat-1');
+  assert.equal(ownCall.args.query.agent,'main');
+  assert.equal(ownCall.args.query.threadId,'chat-1');
+  assert.equal(calls.at(-1).args.query.group,'agent');
+  assert.equal(calls.at(-1).args.query.threadId,'chat-1');
+  assert.equal(calls.at(-1).args.query.agent,'subagent');
+  assert.equal(calls.at(-1).args.refresh,false);
+  assert.deepEqual(calls.at(-1).args.query.ranges,[{from:end,to:null}]);
+  assert.ok(dialog.innerHTML.includes('&lt;First question&gt;') && dialog.innerHTML.includes('中途打断继续合并'));
+  assert.ok(dialog.innerHTML.includes('&lt;Agent title&gt;') && dialog.innerHTML.includes('子代理明细'));
+  const afterExpand=calls.length;
+  await click('expand-chat',{id:'chat-1'});await click('expand-chat',{id:'chat-1'});
+  assert.equal(calls.length,afterExpand,'reopening a chat reuses its loaded round report');
+  await click('filter',{field:'fastOnly',key:'true'});
+  assert.ok(!dialog.innerHTML.includes('usage-round-table'));
+  await click('expand-chat',{id:'chat-1'});
+  assert.equal(calls.at(-1).args.query.threadId,'chat-1');
+  assert.equal(calls.at(-1).args.query.fastOnly,true);
+  await click('agent-details',{id:'child'});
+  assert.equal(calls.at(-1).command,'open_chat_metrics_window');
+  assert.equal(calls.at(-1).args.threadId,'child');
+  await click('filter',{field:'agent',key:'subagent'});
+  const beforeAgents=calls.length;
+  await click('expand-chat',{id:'chat-1'});
+  assert.equal(calls.length,beforeAgents+1);
+  assert.equal(calls.at(-1).args.query.group,'agent','subagent-only filters never read the main chat log');
+  assert.ok(!dialog.innerHTML.includes('本对话轮次（仅主对话自身）'));
+  await click('filter',{field:'agent',key:'main'});
+  const beforeMain=calls.length;
+  await click('expand-chat',{id:'chat-1'});
+  assert.equal(calls.length,beforeMain+1);
+  assert.equal(calls.at(-1).args.query.group,'round');
+  assert.ok(!dialog.innerHTML.includes('子代理明细'));
+  await click('clear');failRounds=true;
+  await click('expand-chat',{id:'chat-1'});
+  assert.ok(dialog.innerHTML.includes('Round unavailable') && dialog.innerHTML.includes('&lt;Agent title&gt;'),'a failed round read preserves cached subagent usage');
+  failRounds=false;await click('retry-chat',{id:'chat-1'});
+  assert.ok(!dialog.innerHTML.includes('Round unavailable') && dialog.innerHTML.includes('&lt;First question&gt;'));
+  for(const key of ['model','project','day']){
+    await click('group',{key});
+    assert.ok(dialog.innerHTML.includes('主对话 ') && dialog.innerHTML.includes('子代理 '));
+  }
+  unpricedSubagent=true;await click('group',{key:'model'});
+  assert.ok(dialog.innerHTML.includes('子代理 —'),'unpriced subagent usage is never displayed as free');
+  unpricedSubagent=false;
+  await click('clear');await click('group',{key:'project'});
   const beforeFilter=calls.length;
   await click('filter',{field:'projectId',key:'p'});
   assert.equal(calls.length,beforeFilter+1,'horizontal filters only read cached aggregates');
@@ -84,8 +264,9 @@ try{
   await click('apply-cycles');
   assert.deepEqual(calls.at(-1).args.query.ranges,[{from:earlier.startedAt,to:earlier.endedAt},{from:end,to:null}]);
   assert.equal(calls.filter((c,i)=>i>=beforeApply&&c.args?.refresh).length,1,'only the newly selected old cycle is indexed');
-  assert.equal(calls[beforeApply].args.query.from,earlier.startedAt);
-  assert.equal(calls[beforeApply].args.query.to,earlier.endedAt,'indexing does not widen over unselected periods');
+  const oldCycleIndex=calls.slice(beforeApply).find(c=>c.args?.refresh);
+  assert.equal(oldCycleIndex.args.query.from,earlier.startedAt);
+  assert.equal(oldCycleIndex.args.query.to,earlier.endedAt,'indexing does not widen over unselected periods');
   await click('cycle-picker');await change('all-cycles','',true);const cancelCalls=calls.length;await click('cancel-cycles');assert.equal(calls.length,cancelCalls);
   await click('mode',{key:'calendar'});
   assert.equal(calls.at(-1).args.query.ranges,undefined,'calendar mode ignores cycle selection');
@@ -108,13 +289,258 @@ try{
   await click('filter',{field:'projectId',key:''});assert.equal(calls.at(-1).args.query.projectId,'','no project is distinct from all projects');
   await click('clear');assert.equal(calls.at(-1).args.query.projectId,undefined);
   const beforeReset=calls.length;await click('resets');assert.equal(calls.length,beforeReset);
-  assert.ok(dialog.innerHTML.includes('W 额度重置历史')&&!dialog.innerHTML.includes('5h'));
+  assert.ok(dialog.innerHTML.includes('W 额度重置历史')&&!dialog.innerHTML.includes('data-usage-cycle="short"'));
+  assert.ok(!dialog.innerHTML.includes('结束情况')&&!dialog.innerHTML.includes('～'),'reset rows show one compact period without the reset observation range');
+  assert.ok(dialog.innerHTML.includes('2026年 10-22 10:00 - 10-23 10:00 (1d0h)'));
+  await click('expand-reset',{id:cycle.id});
+  assert.equal(calls.at(-1).args.query.group,'model');
+  assert.equal(calls.at(-1).args.query.from,start);
+  assert.equal(calls.at(-1).args.query.to,end);
+  assert.ok(dialog.innerHTML.includes('usage-reset-model-table') && dialog.innerHTML.includes('总 Token') && dialog.innerHTML.includes('>110</td>'));
+  assert.ok(dialog.innerHTML.includes('>100.0%</td>') && dialog.innerHTML.includes('>90.0%</span>'));
+  const afterResetReport=calls.length;
+  await click('expand-reset',{id:cycle.id});await click('expand-reset',{id:cycle.id});
+  assert.equal(calls.length,afterResetReport,'reopening a reset cycle reuses its model report');
   await click('cycle',{id:cycle.id});assert.deepEqual(calls.at(-1).args.query.ranges,[{from:start,to:end}]);
+  await click('cycle-picker');
+  assert.ok(dialog.innerHTML.includes('class="usage-cycle-label" data-usage-action="select-cycle"'),'period text has a separate single-select action');
+  assert.ok(dialog.innerHTML.includes('2026年 10-22 10:00 - 10-23 10:00 (1d0h)'),'picker period rows include duration');
+  assert.ok(!dialog.innerHTML.includes('<small>提前重置</small>'),'picker omits reset types so each period occupies one line');
+  const beforeCheck=calls.length;await change('cycle-item','old',true);
+  assert.equal(calls.length,beforeCheck,'checkboxes only edit the multiple-period selection');
+  await click('select-cycle',{id:'current'});
+  assert.deepEqual(calls.at(-1).args.query.ranges,[{from:end,to:null}],'clicking period text immediately replaces the selection with that period');
+  assert.ok(!dialog.innerHTML.includes('<section class="usage-popover usage-cycle-picker"'),'single-select closes the picker');
 
   const histories=[];
-  const next=createUsageView({invoke:async(command)=>command==='get_quota_history'?new Promise(resolve=>histories.push(resolve)):{...sample,rows:[]},nativeWindow:{}});
+  const next=createUsageView({invoke:async(command,args)=>command==='get_quota_history'?(args?.importLogs?{cycles:[]}:new Promise(resolve=>histories.push(resolve))):{...sample,rows:[]},nativeWindow:{}});
   const oldOpening=next.open(),switching=next.invalidate();
   histories[1]({cycles:[],observedSince:null});await switching;
   histories[0]({cycles:allCycles,observedSince:start});await oldOpening;
   assert.ok(!dialog.innerHTML.includes('当前 W 周期'),'old-account cycles cannot reappear after invalidation');
-}finally{globalThis.document=previousDocument;}
+
+  const pending=[];
+  const lazy=createUsageView({invoke:async(command,args)=>{
+    if(command==='get_quota_history')return {cycles:allCycles};
+    if(args?.query?.group==='round')return new Promise(resolve=>pending.push(resolve));
+    return args?.query?.group==='chat'?chatSample:sample;
+  },nativeWindow:{}});
+  await lazy.open();await click('consumption');await click('group',{key:'chat'});
+  const stale=click('expand-chat',{id:'chat-1'});
+  await click('filter',{field:'model',key:'another-model'});
+  pending[0]({...roundSample,rows:[{...roundSample.rows[0],label:'STALE FILTER ROUND'}]});
+  await stale;
+  assert.ok(!dialog.innerHTML.includes('STALE FILTER ROUND'),'old filter results cannot return');
+  const oldAccount=click('expand-chat',{id:'chat-1'});
+  await lazy.invalidate();
+  await click('consumption');await click('group',{key:'chat'});
+  pending[1]({...roundSample,rows:[{...roundSample.rows[0],label:'STALE ACCOUNT ROUND'}]});
+  await oldAccount;
+  assert.ok(!dialog.innerHTML.includes('STALE ACCOUNT ROUND'),'old account round results cannot return');
+
+  const resetPending=[];
+  const resetView=createUsageView({invoke:async(command,args)=>{
+    if(command==='get_quota_history')return {cycles:allCycles};
+    if(args?.refresh)return new Promise(resolve=>resetPending.push(resolve));
+    return sample;
+  },nativeWindow:{}});
+  await resetView.open();await click('resets');
+  const oldReset=click('expand-reset',{id:cycle.id});
+  await new Promise(setImmediate);
+  await resetView.invalidate();
+  resetPending[0]({...sample,rows:[{...row,label:'STALE ACCOUNT MODEL'}]});await oldReset;
+  await click('resets');const newReset=click('expand-reset',{id:cycle.id});
+  await new Promise(setImmediate);
+  assert.equal(resetPending.length,2,'a reset report from the old account is discarded');
+  resetPending[1](sample);await newReset;
+  assert.ok(!dialog.innerHTML.includes('STALE ACCOUNT MODEL'));
+
+  const updateCalls=[],updatesPending=[],waitUpdates=()=>new Promise(resolve=>setTimeout(resolve,350));
+  let holdUpdates=false;
+  const updating=createUsageView({invoke:async(command,args)=>{
+    updateCalls.push({command,args});
+    if(command==='get_quota_history')return {cycles:allCycles};
+    if(args?.query?.threadIds&&holdUpdates)return new Promise(resolve=>updatesPending.push(resolve));
+    return {...sample,indexed:true};
+  },nativeWindow:{close(){}}});
+  const targeted=since=>updateCalls.slice(since).filter(c=>c.args?.refresh&&c.args.query.threadIds);
+  await updating.open();await click('consumption');
+  for(const [action,extra] of [['group',{key:'day'}],['filter',{field:'projectId',key:'p'}]]){
+    const since=updateCalls.length;
+    updating.changed({threads:['changed-thread']});
+    await click(action,extra);await waitUpdates();
+    assert.equal(targeted(since).length,1,`${action} preserves the delayed source change`);
+    assert.deepEqual(targeted(since)[0].args.query.threadIds,['changed-thread']);
+    assert.equal(updateCalls.slice(since).filter(c=>c.args?.refresh).length,1,'display changes never fall back to full-range indexing');
+  }
+  await click('select-cycle',{id:'old'});await click('select-cycle',{id:'current'});
+  let since=updateCalls.length;
+  updating.changed({threads:['changed-range']});await click('select-cycle',{id:'old'});await waitUpdates();
+  assert.deepEqual(targeted(since)[0].args.query.ranges,[{from:earlier.startedAt,to:earlier.endedAt}],'pending changes use the newly selected range');
+  assert.equal(updateCalls.slice(since).filter(c=>c.args?.refresh).length,1,'an already covered range needs only the changed thread');
+
+  since=updateCalls.length;holdUpdates=true;
+  updating.changed({threads:['during-read']});await waitUpdates();
+  assert.equal(updatesPending.length,1);
+  await click('group',{key:'project'});
+  holdUpdates=false;updatesPending.shift()({...sample,rows:[{...row,label:'STALE VIEW UPDATE'}]});await new Promise(setImmediate);
+  assert.ok(!dialog.innerHTML.includes('STALE VIEW UPDATE'),'in-flight results do not overwrite a different view');
+  await waitUpdates();
+  assert.equal(targeted(since).length,2,'a change discarded during a view switch is replayed for the current query');
+  assert.equal(updateCalls.slice(since).filter(c=>c.args?.refresh).length,2,'an in-flight view switch also avoids a full-range scan');
+
+  since=updateCalls.length;
+  updating.changed({threads:['while-closed']});await click('close');await waitUpdates();
+  assert.equal(targeted(since).length,0,'closing cancels the delayed queue');
+  await updating.open();await waitUpdates();
+  assert.deepEqual(targeted(since)[0].args.query.threadIds,['while-closed'],'reopening preserves changes deferred during close');
+  since=updateCalls.length;
+  updating.changed({threads:['while-reset-hidden']});await click('resets');await waitUpdates();
+  assert.equal(targeted(since).length,0,'a reset tab without visible or expanded rows has no Token consumer');
+  await click('consumption');await waitUpdates();
+  assert.deepEqual(targeted(since)[0].args.query.threadIds,['while-reset-hidden'],'a tab without a consumer cannot silently consume the change');
+
+  since=updateCalls.length;
+  updating.changed({threads:['old-account-queued']});await updating.invalidate();await click('consumption');await waitUpdates();
+  assert.equal(targeted(since).length,0,'account invalidation discards queued IDs');
+  holdUpdates=true;updating.changed({threads:['old-account-running']});await waitUpdates();
+  await updating.invalidate();await click('consumption');
+  updating.changed({threads:['new-account']});holdUpdates=false;
+  updatesPending.shift()({...sample,rows:[{...row,label:'STALE ACCOUNT UPDATE'}]});await new Promise(setImmediate);await waitUpdates();
+  assert.ok(!dialog.innerHTML.includes('STALE ACCOUNT UPDATE'),'old-account source results cannot return');
+  assert.deepEqual(targeted(since).map(c=>c.args.query.threadIds),[['old-account-running'],['new-account']],'old-account work is never replayed into the new context');
+  await click('close');
+
+  const dashboardCalls=[];
+  const dashboardModels=Array.from({length:7},(_,i)=>({model:`model-${i}`,totals:{...totals,input:(i+1)*100,output:(i+1)*10,cached:i===0?100:0,costUsd:i===6?0:(7-i)*.01,unpricedRequests:i===6?1:0}}));
+  const dashboardTotals=dashboardModels.reduce((sum,m)=>{for(const key of ['input','output','cached','reasoning','costUsd','unpricedRequests'])sum[key]+=m.totals[key];return sum;},{...totals,input:0,output:0,cached:0,reasoning:0,costUsd:0,unpricedRequests:0,requests:7,subagentRequests:1});
+  const dashboardRow={...row,totals:dashboardTotals,modelTotals:dashboardModels};
+  const dashboardReport={...sample,totals:dashboardTotals,rows:[dashboardRow],modelTotals:dashboardModels,trend:[{at:new Date(2026,9,23).getTime(),totals:dashboardTotals,modelTotals:dashboardModels}]};
+  const dashboard=createUsageView({invoke:async(command,args)=>{
+    dashboardCalls.push({command,args});
+    if(command==='get_quota_history')return {cycles:allCycles};
+    if(args?.query.group==='round')return {...roundSample,rows:[{...roundSample.rows[0],partial:true,usageRecorded:false,totals:{...totals,input:0,output:0,requests:0}}]};
+    if(args?.query.group==='agent')return agentSample;
+    if(args?.query.group==='chat')return {...dashboardReport,rows:[{...dashboardRow,key:'chat-1',threadId:'chat-1',label:'Chat'}]};
+    if(args?.query.group==='day')return {...dashboardReport,rows:[{...dashboardRow,key:'2026-10-23',label:'2026-10-23'}]};
+    return dashboardReport;
+  },nativeWindow:{}});
+  await dashboard.open();await click('consumption');
+  const overviewMarkup=()=>dialog.innerHTML.match(/usage-overview-table[\s\S]*?<tbody>([\s\S]*?)<\/tbody>/)[1];
+  assert.equal((overviewMarkup().match(/usage-model-name/g)||[]).length,5,'the overview shows the five most expensive models by default');
+  assert.ok(!overviewMarkup().includes('model-5')&&overviewMarkup().includes('model-0'));
+  assert.ok(overviewMarkup().includes('3.6%'),'overall cache rate uses summed cached input divided by summed input rather than averaging model rates');
+  const beforeDisplaySwitch=dashboardCalls.length;
+  await click('overview-models');
+  assert.equal((overviewMarkup().match(/usage-model-name/g)||[]).length,7,'other models can be expanded without changing the total');
+  assert.match(dialog.innerHTML,/data-key="tokens"\s+aria-pressed="true"/,'the trend defaults to Token');
+  assert.ok(dialog.innerHTML.includes('含未计价请求，金额不完整'));
+  assert.ok(dialog.innerHTML.includes('model-6 · — (金额占比 —)'),'an entirely unpriced model has no fabricated money share');
+  assert.ok(dialog.innerHTML.includes('3,080 Token'),'Token excludes additional cache and reasoning counts');
+  const modelHeight=()=>Number(dialog.innerHTML.match(/data-model="model-0"[^>]*height:([\d.]+)%/)[1]);
+  assert.ok(Math.abs(modelHeight()-110/3080*100)<.00001,'Token stack height follows input plus output');
+  const color=usageModelColor('model-0');
+  assert.ok(dialog.innerHTML.includes(`background:${color}`));
+  await click('trend-metric',{key:'cost'});
+  assert.ok(Math.abs(modelHeight()-.07/.27*100)<.00001,'money mode changes stack height to priced API amounts');
+  assert.ok(dialog.innerHTML.includes('usage-unpriced-marker'),'unpriced money is marked instead of drawn as a zero-dollar model');
+  assert.ok(dialog.innerHTML.includes(`background:${color}`),'model colors stay fixed across trend modes');
+  await click('expand-group',{id:'p'});
+  assert.equal((dialog.innerHTML.match(/class="usage-model-row"/g)||[]).length,7,'project rows expand into model totals');
+  assert.equal(dashboardCalls.length,beforeDisplaySwitch,'model overview, trend and summary expansion reuse the current report');
+  assert.ok(!dialog.innerHTML.includes('data-field="model"')&&!dialog.innerHTML.includes('data-key="model" aria-pressed='),'models are a breakdown rather than a filter or standalone group button');
+  await click('group',{key:'day'});const beforeDayExpand=dashboardCalls.length;
+  await click('expand-group',{id:'2026-10-23'});
+  assert.equal((dialog.innerHTML.match(/class="usage-model-row"/g)||[]).length,7,'date rows use the same model breakdown');
+  assert.equal(dashboardCalls.length,beforeDayExpand);
+  await click('group',{key:'chat'});await click('expand-chat',{id:'chat-1'});
+  assert.ok(dialog.innerHTML.includes('模型构成')&&dialog.innerHTML.includes('usage-model-table'));
+  assert.ok(dialog.innerHTML.includes('部分消耗')&&dialog.innerHTML.includes('用量未记录'),'missing usage and partial windows stay visible without fabricated zero values');
+
+  const backfillCalls=[],cursor=start-30*86400000,olderCursor=cursor-31*86400000;
+  const many=Array.from({length:28},(_,i)=>({...cycle,id:`page-${i}`,startedAt:start-i*86400000,observedStart:start-i*86400000,endedAt:end-i*86400000}));
+  let finishImport,finishOldest;
+  const backfill=createUsageView({invoke:async(command,args)=>{
+    backfillCalls.push({command,args});
+    if(command==='get_quota_history'){
+      if(!args?.importLogs)return {cycles:[current,cycle],historyBefore:cursor};
+      if(args.before==null)return new Promise(resolve=>{finishImport=resolve;});
+      if(args.before===cursor)return {cycles:[...many,current],historyBefore:olderCursor,warnings:['Local history']};
+      return new Promise(resolve=>{finishOldest=resolve;});
+    }
+    return sample;
+  },nativeWindow:{}});
+  const opening=backfill.open();await new Promise(setImmediate);
+  assert.deepEqual(backfillCalls[0],{command:'get_quota_history',args:undefined},'opening reads local history before importing logs');
+  await click('resets');
+  assert.ok(dialog.innerHTML.includes('data-usage-cycle="current"')&&dialog.innerHTML.includes(`data-usage-cycle="${cycle.id}"`),'cached periods render while the current month is still being checked');
+  finishImport({cycles:[current,cycle],historyBefore:cursor});await opening;
+  assert.equal(backfillCalls.filter(c=>c.command==='get_quota_history'&&c.args?.before===cursor).length,1,'insufficient history scans the next month');
+  const rowIds=()=>[...dialog.innerHTML.matchAll(/<tr data-usage-cycle="([^"]+)"/g)].map(m=>m[1]);
+  assert.deepEqual(rowIds(),['current',...many.slice(0,5).map(c=>c.id)],'current is first and does not consume one of the five historical slots');
+  assert.ok(!backfillCalls.some(c=>c.args?.before===olderCursor),'five complete recent periods stop discovery without scanning the full history');
+  const tokensBefore=backfillCalls.filter(c=>c.command==='get_usage_consumption').length;
+  await click('expand-reset',{id:many[0].id});
+  const afterDetail=backfillCalls.filter(c=>c.command==='get_usage_consumption').length;
+  await click('older-history');
+  assert.equal(rowIds().length,16,'load more appends ten ended periods from existing data');
+  assert.ok(dialog.innerHTML.includes('aria-expanded="true"'),'appending preserves expanded details');
+  await click('older-history');assert.equal(rowIds().length,26,'each later page adds another ten cached periods');
+  assert.equal(backfillCalls.filter(c=>c.command==='get_usage_consumption').length,afterDetail,'pagination never indexes every historical period');
+  assert.ok(afterDetail>tokensBefore);
+  await click('consumption');
+  await click('cycle-picker');
+  assert.ok(dialog.innerHTML.includes('value="page-12"'),'the picker reuses the already loaded history');
+  await change('all-cycles','',true);
+  const allLoading=click('apply-cycles');await new Promise(setImmediate);
+  assert.equal(typeof finishOldest,'function','explicit all-period selection discovers older months before calculating the union');
+  const ancient={...earlier,id:'ancient',startedAt:olderCursor-86400000,observedStart:olderCursor-86400000,endedAt:olderCursor};
+  finishOldest({cycles:[current,...many,ancient],historyBefore:null,warnings:['Local history']});await allLoading;
+  assert.equal(backfillCalls.at(-1).args.query.from,ancient.startedAt,'all periods includes records beyond the visible page');
+  await click('resets');
+  assert.ok(dialog.innerHTML.includes('Local history'),'coverage warnings survive discovery');
+
+  const oldest={...earlier,id:'oldest',startedAt:earlier.startedAt-2*86400000,observedStart:earlier.startedAt-2*86400000,endedAt:earlier.startedAt-86400000};
+  const visible=new Set(['current',cycle.id,earlier.id]),observers=[];
+  globalThis.IntersectionObserver=class {
+    constructor(callback){this.callback=callback;this.rows=[];observers.push(this);}
+    observe(row){this.rows.push(row);if(this.scheduled)return;this.scheduled=true;queueMicrotask(()=>{if(!this.closed)this.callback(this.rows.map(target=>({target,isIntersecting:visible.has(target.dataset.usageCycle)})));});}
+    disconnect(){this.closed=true;}
+  };
+  const content={scrollTop:0};
+  dialog.querySelector=selector=>selector==='.usage-content'?content:null;
+  dialog.querySelectorAll=()=>[...dialog.innerHTML.matchAll(/<tr data-usage-cycle="([^"]+)"/g)].map(match=>({dataset:{usageCycle:match[1]}}));
+  const automatic=[],automaticCalls=[];
+  const automaticView=createUsageView({invoke:async(command,args)=>{
+    if(command==='get_quota_history')return {cycles:[current,cycle,earlier,oldest]};
+    if(args?.refresh&&args.query.from!==end){automaticCalls.push(args);return new Promise(resolve=>automatic.push(resolve));}
+    return sample;
+  },nativeWindow:{close(){}}});
+  const tick=()=>new Promise(setImmediate);
+  await automaticView.open();await click('resets');await tick();
+  assert.equal(automatic.length,1,'visible historical totals begin loading without expanding details, one period at a time');
+  assert.equal(automaticCalls[0].query.from,start);
+  assert.ok(!dialog.innerHTML.includes('usage-reset-model-table'),'automatic totals preserve collapsed details');
+  assert.equal(automaticCalls[0].query.group,'project','automatic totals do not request model details');
+  const expandingVisible=click('expand-reset',{id:cycle.id});await tick();
+  assert.equal(automatic.length,1,'expanding an in-flight visible period shares its existing Token index');
+  automatic[0](sample);await expandingVisible;await tick();
+  assert.equal(automatic.length,2,'the next visible period starts after the preceding one finishes');
+  assert.equal(automaticCalls[1].query.from,earlier.startedAt);
+  automatic[1](sample);await tick();
+  assert.equal(automatic.length,2,'offscreen historical periods are not indexed');
+  assert.ok(dialog.innerHTML.includes('title="110">110</td>'),'loaded totals are displayed directly in collapsed rows');
+  visible.clear();visible.add('oldest');
+  const activeObserver=observers.at(-1);
+  activeObserver.callback(activeObserver.rows.map(target=>({target,isIntersecting:visible.has(target.dataset.usageCycle)})));
+  await tick();assert.equal(automatic.length,3,'scrolling a historical period into view loads its total');
+  automatic[2](sample);await tick();
+  await click('consumption');await click('resets');await tick();
+  assert.equal(automatic.length,3,'returning to reset history reuses loaded totals');
+  visible.clear();visible.add('current');visible.add(cycle.id);visible.add(earlier.id);
+  await automaticView.invalidate();await click('resets');await tick();
+  const atClose=automatic.length;
+  await click('close');automatic.at(-1)(sample);await tick();
+  assert.equal(automatic.length,atClose,'closing stops queued historical work after the active read settles');
+  observers.at(-1).disconnect();
+}finally{globalThis.document=previousDocument;globalThis.IntersectionObserver=previousObserver;}

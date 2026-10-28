@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 #[derive(Clone)]
@@ -22,6 +22,28 @@ fn auth_stamp(home: &Path) -> Result<Option<(u64, std::time::SystemTime)>, Strin
 fn accounts() -> &'static Mutex<HashMap<PathBuf, Account>> {
     static ACCOUNTS: OnceLock<Mutex<HashMap<PathBuf, Account>>> = OnceLock::new();
     ACCOUNTS.get_or_init(Default::default)
+}
+
+// Share only active work; later calls must check the current file signatures again.
+pub(crate) fn share(key: String, work: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    type Task = Arc<OnceLock<Result<(), String>>>;
+    static TASKS: OnceLock<Mutex<HashMap<String, Task>>> = OnceLock::new();
+    let tasks = TASKS.get_or_init(Default::default);
+    let task = tasks
+        .lock()
+        .map_err(|_| "读取任务锁已损坏")?
+        .entry(key.clone())
+        .or_default()
+        .clone();
+    let result = task.get_or_init(work).clone();
+    let mut tasks = tasks.lock().map_err(|_| "读取任务锁已损坏")?;
+    if tasks
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, &task))
+    {
+        tasks.remove(&key);
+    }
+    result
 }
 
 pub fn confirm(home: &Path, account: Option<&str>) -> Result<(), String> {
@@ -114,7 +136,17 @@ pub fn identity(home: &Path) -> Result<String, String> {
     ))
 }
 
-pub(super) fn database(home: &Path) -> Result<Connection, String> {
+pub(super) fn account(home: &Path) -> Result<String, String> {
+    identity(home)?;
+    accounts()
+        .lock()
+        .map_err(|_| "账号状态锁已损坏")?
+        .get(home)
+        .map(|a| a.id.clone())
+        .ok_or_else(|| "尚未确认当前账号".into())
+}
+
+pub(crate) fn database(home: &Path) -> Result<Connection, String> {
     let identity = identity(home)?;
     let hash = identity.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
@@ -124,6 +156,7 @@ pub(super) fn database(home: &Path) -> Result<Connection, String> {
     let db = super::open_database(&directory.join(format!("usage-cache-{hash:016x}.sqlite")))?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS cache_identity(value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage_reports(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS usage_indexed_ranges(key TEXT PRIMARY KEY,from_at INTEGER,to_at INTEGER);
         CREATE TABLE IF NOT EXISTS usage_days(day INTEGER PRIMARY KEY,revision INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS usage_metadata(id INTEGER PRIMARY KEY,revision INTEGER NOT NULL);
         INSERT OR IGNORE INTO usage_metadata VALUES(1,0);
@@ -157,6 +190,42 @@ pub(super) fn database(home: &Path) -> Result<Connection, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_reads_share_success_and_error_but_later_reads_retry() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Barrier,
+        };
+        for result in [Ok(()), Err("unreadable".to_string())] {
+            let count = AtomicUsize::new(0);
+            let ready = Barrier::new(5);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            ready.wait();
+                            share("test-concurrent".into(), || {
+                                count.fetch_add(1, Ordering::SeqCst);
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                result.clone()
+                            })
+                        })
+                    })
+                    .collect();
+                ready.wait();
+                for handle in handles {
+                    assert_eq!(handle.join().unwrap(), result);
+                }
+            });
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            share("test-concurrent".into(), || {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(count.load(Ordering::SeqCst), 2);
+        }
+    }
     #[test]
     fn copied_cache_with_another_machine_identity_is_rejected() {
         let dir = tempfile::tempdir().unwrap();

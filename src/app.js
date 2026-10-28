@@ -1,9 +1,9 @@
 
 import { createDynamicStore } from './dynamic.js';
 import { t, ui, setLanguage, language, configureLanguagePersistence } from './i18n.js';
-import {createUsageView, resetCardsTip, quotaNoticeMarkup} from './usage.js';
-import {createUsagePreloader} from './usage-preload.js';
+import {createUsageView, resetCardsTip, createQuotaNoticeView} from './usage.js';
 const nativeInvoke = window.__TAURI__?.core?.invoke;
+const quotaNoticeView = createQuotaNoticeView({invoke:(...args)=>nativeInvoke(...args),element:()=>document.getElementById('quota-reset-notice')});
 const nativeWindow = window.__TAURI__?.window?.getCurrentWindow();
 const PreviewWebviewWindow = window.__TAURI__?.webviewWindow?.WebviewWindow;
 const PREVIEW_WINDOW_LABEL = 'conversation-preview';
@@ -14,7 +14,6 @@ const metricsThreadId = new URLSearchParams(window.location?.search || '').get('
 const isMetricsWindow = Boolean(metricsThreadId);
 const isUsageWindow = new URLSearchParams(window.location?.search || '').get('usage') === '1';
 const isAuxiliaryWindow = isPreviewWindow || isMetricsWindow || isUsageWindow;
-const usagePreloader = createUsagePreloader({invoke:(...args) => nativeInvoke(...args),enabled:() => Boolean(nativeInvoke) && !isAuxiliaryWindow});
 configureLanguagePersistence(!nativeInvoke);
 const dynamicStorage = nativeInvoke ? {getItem: key => localStorage.getItem(key), setItem() {}} : localStorage;
 const dynamic = createDynamicStore(dynamicStorage);
@@ -41,6 +40,8 @@ const isReservedFolderName = name => [AUTO_PIN_LABEL, AUTO_STAR_LABEL, AUTO_PRIO
 const isAutoProjectFolderKey = key => key === AUTO_PROJECT_FOLDER_KEY || key === AUTO_PROJECT_PIN_KEY;
 const PROJECT_DYNAMIC_FOLDER_KEY = "dynamic:projects";
 
+const CHAT_SORT_VALUES = ['status-asc', 'name-asc', 'name-desc'];
+const CHAT_SORT_FIELDS = ['recentChatSort', 'dynamicChatSort'];
 const state = {
   projectId: '',
   theme: 'dark',
@@ -64,6 +65,8 @@ const state = {
   globalProjectSort: "off",
   dynamicProjectSort: "off",
   recentProjectSort: "off",
+  recentChatSort: 'status-asc',
+  dynamicChatSort: 'status-asc',
   projectRecentLinked: false,
   recentProjectColumnVisible: true,
   chatsLowerPanel: '',
@@ -122,7 +125,7 @@ const state = {
 };
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
-const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
+const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', ...CHAT_SORT_FIELDS, 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars', 'previewEnabled'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
@@ -145,6 +148,7 @@ if (!['light', 'dark'].includes(state.theme)) state.theme = 'dark';
 if (!THEME_FAMILIES.some(([id]) => id === state.themeFamily)) state.themeFamily = 'tokyo';
 if (!['off','asc','desc'].includes(state.dynamicProjectSort)) state.dynamicProjectSort = 'off';
 if (!['off','asc','desc'].includes(state.recentProjectSort)) state.recentProjectSort = 'off';
+for (const field of CHAT_SORT_FIELDS) if (!CHAT_SORT_VALUES.includes(state[field])) state[field] = 'status-asc';
 if (!['off','asc','desc'].includes(state.nameSort)) state.nameSort = 'off';
 if (!['off','asc','desc'].includes(state.projectNameSort)) state.projectNameSort = 'off';
 state.chatDays = Math.max(0, Math.min(365, Math.round(state.chatDays)));
@@ -333,6 +337,7 @@ function nativeProject(project, index, previous) {
     order: previous?.order ?? index,
     path: project.path,
     pathValid: project.pathValid,
+    pathChecked: project.pathChecked,
     error: project.error || '',
     synthetic: project.synthetic,
     codexPinned: Boolean(project.codexPinned),
@@ -380,6 +385,8 @@ function nativeChat(chat, index, previous) {
     executionStatus: chat.executionStatus,
     turnId: chat.turnId,
     metricsRevision: chat.metricsRevision,
+    generation: chat.generation,
+    activitySynced: chat.activitySynced,
     activityAt,
     localAlias: false,
     reasons: previous?.reasons?.filter(reason => reason !== "已归档") || [],
@@ -391,7 +398,7 @@ function nativeChat(chat, index, previous) {
     errorSeen: diagnostic ? diagnostic.severity !== "warning" && codexUnread === false : !sourceChanged && previous?.errorSeen || false,
     openedAt,
     region,
-    regionEnteredAt: previous?.region == null ? previous?.regionEnteredAt ?? activityAt ?? 0 : previous.region === region ? previous.regionEnteredAt || 0 : Date.now(),
+    regionEnteredAt: previous?.region == null || previous?.activitySynced===false ? previous?.regionEnteredAt || activityAt || 0 : previous.region === region ? previous.regionEnteredAt || 0 : Date.now(),
     openable: true,
     timelineAt,
     dayOffset: Math.max(0, Math.floor((today - chatDay) / 86400000)),
@@ -416,7 +423,6 @@ async function refreshLiveRateLimits(force = false) {
   liveRateLimitsInFlight = true;
   try {
     const limits = await nativeInvoke('get_live_rate_limits');
-    usagePreloader.quota(limits);
     if (acceptRateLimits(limits)) updateQuota();
     if (!isAuxiliaryWindow) await refreshQuotaNotices();
   } catch (_) {
@@ -427,13 +433,9 @@ async function refreshLiveRateLimits(force = false) {
 }
 async function refreshQuotaNotices() {
   if (!nativeInvoke || isAuxiliaryWindow) return;
-  const notice = document.getElementById('quota-reset-notice');
-  if (!notice) return;
-  const history = await nativeInvoke('get_quota_history');
-  notice.innerHTML = quotaNoticeMarkup(history.cycles);
-  notice.hidden = !notice.innerHTML;
+  await quotaNoticeView.refresh();
 }
-async function loadNativeSnapshot(catalogOnly = nativeLoaded || isPreviewWindow) {
+async function loadNativeSnapshot(catalogOnly = true) {
   if (!nativeInvoke || nativeScanInFlight) return;
   if (sourceRefreshBlocked()) {
     if (catalogOnly || nativeLoaded) pendingCatalogRefresh = true;
@@ -482,11 +484,11 @@ async function loadNativeSnapshot(catalogOnly = nativeLoaded || isPreviewWindow)
         bootstrapActivityOrder();
       }
       nativeLoaded = true;
-      usagePreloader.catalog(chats);
     }
     void refreshSelectedChatMetrics();
     render();
     syncLiveTimers();
+    if(!isAuxiliaryWindow)queueSourceRefresh({history:true,threads:snapshot.activityPending||[]});
     if (snapshot.error) showToast(snapshot.state, snapshot.error, "error");
   } catch (error) {
     state.syncError = String(error);
@@ -545,7 +547,7 @@ async function flushSourceRefresh() {
     return;
   }
   if (pendingFullRefresh || pendingCatalogRefresh || !nativeLoaded) {
-    const catalogOnly = isPreviewWindow || pendingCatalogRefresh && !pendingFullRefresh && nativeLoaded;
+    const catalogOnly = true;
     const activityAfterCatalog = catalogOnly ? [...pendingActivityIds] : [];
     const historyAfterCatalog = catalogOnly ? [...pendingHistoryIds] : [];
     pendingFullRefresh = false;
@@ -574,6 +576,7 @@ async function flushSourceRefresh() {
     state.syncAt = Date.now();
     updateSyncStatus();
     let changed = false;
+    for(const raw of update.projects||[]){const index=projects.findIndex(p=>p.id===raw.id);if(index>=0){projects[index]=nativeProject(raw,index,projects[index]);changed=true;}}
     for (const raw of update.chats || []) {
       const index = chats.findIndex(chat => chat.id === raw.id);
       if (index < 0) continue;
@@ -583,7 +586,6 @@ async function flushSourceRefresh() {
         changed = true;
       }
     }
-    usagePreloader.catalog(chats);
     void refreshSelectedChatMetrics();
     if (changed) {
       for (const raw of update.chats || []) {
@@ -665,6 +667,7 @@ function sortFolderEntries(entries, parentPath = '') {
 function projectStateTip(project) {
   if (project.synthetic) return t('无项目对话');
   if (project.error) return project.error;
+  if(project.pathChecked===false)return `${t('项目路径尚未检查')}：${project.path||''}`;
   if (!project.pathValid) return project.path ? `${t('项目路径无效')}：${project.path}` : t('未配置项目文件夹');
   return project.path || t('未配置项目文件夹');
 }
@@ -819,13 +822,15 @@ function rememberChatMetrics(data) {
   chatMetrics.delete(data.threadId);
   chatMetrics.set(data.threadId, data);
   if (chatMetrics.size > 24) {
-    const oldest = [...chatMetrics.keys()].find(id => id !== state.selectedChatId);
-    chatMetrics.delete(oldest);
+    const oldest = [...chatMetrics.keys()].find(id => id !== state.selectedChatId && !chats.some(chat => chat.id === id && isRunningMetricsChat(chat)));
+    if (oldest) chatMetrics.delete(oldest);
   }
 }
 const metricsPending = new Map();
 let metricsSelectionRequest = 0;
+let metricsContextGeneration = 0;
 let metricsRefreshKey = '';
+const runningMetricsKeys = new Map();
 let metricsDetailRequest = 0;
 let metricsView = null;
 const metricValue = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -843,12 +848,12 @@ function metricsTooltip(metrics, data) {
     t('缓存命中率：') + metricPercent(metrics?.cacheHitRate, 2),
     t('点击查看对话详情')].join('\n');
 }
-const metricsPendingKey = (threadId, latestOnly) => `${threadId}:${latestOnly ? 'latest' : 'all'}`;
-async function readChatMetrics(threadId, latestOnly = false) {
+const metricsPendingKey = (threadId, latestOnly, offset=0, revision=null) => `${metricsContextGeneration}:${threadId}:${latestOnly ? 'latest' : 'all:'+offset+':'+(revision||'fresh')}`;
+async function readChatMetrics(threadId, latestOnly = false, turnOffset=0, detailRevision=null) {
   if (!nativeInvoke) throw new Error(t('桌面运行时不可用'));
-  const key = metricsPendingKey(threadId, latestOnly);
+  const key = metricsPendingKey(threadId, latestOnly, turnOffset, detailRevision);
   if (metricsPending.has(key)) return metricsPending.get(key);
-  const pending = nativeInvoke('get_chat_metrics', {threadId,latestOnly});
+  const pending = nativeInvoke('get_chat_metrics', latestOnly?{threadId,latestOnly}:{threadId,latestOnly,turnOffset,detailRevision});
   metricsPending.set(key, pending);
   try {
     const data = await pending;
@@ -858,13 +863,38 @@ async function readChatMetrics(threadId, latestOnly = false) {
 }
 function chatMetricsKey(chat) {
   return chat && (chat.turnId || chat.executionStatus)
-    ? `${chat.id}:${chat.turnId || ''}:${chat.executionStatus || ''}:${chat.metricsRevision || ''}:${chat.working ? '' : chat.activityAt || chat.completedAt || 0}` : '';
+    ? `${metricsContextGeneration}:${chat.id}:${chat.turnId || ''}:${chat.executionStatus || ''}:${chat.metricsRevision || ''}:${chat.working ? '' : chat.activityAt || chat.completedAt || 0}` : '';
+}
+function isRunningMetricsChat(chat) {
+  return chat.working && !chat.waitingForInput && !['completed','failed','interrupted'].includes(chat.executionStatus) && !(chat.generation?.phase==='compacting'&&chat.generation.turnId===chat.turnId);
+}
+async function refreshRunningChatMetrics() {
+  const running=chats.filter(chat=>isRunningMetricsChat(chat)&&chat.id!==state.selectedChatId);
+  const ids=new Set(running.map(chat=>chat.id));
+  for(const id of runningMetricsKeys.keys())if(!ids.has(id))runningMetricsKeys.delete(id);
+  await Promise.allSettled(running.map(async chat=>{
+    const key=chatMetricsKey(chat),id=chat.id;
+    if(!key||runningMetricsKeys.get(id)===key)return;
+    runningMetricsKeys.set(id,key);
+    const current=()=>runningMetricsKeys.get(id)===key&&chats.some(chat=>chat.id===id&&isRunningMetricsChat(chat)&&chatMetricsKey(chat)===key);
+    try{
+      const pending=metricsPending.get(metricsPendingKey(id,true));
+      if(pending)await pending.catch(()=>{});
+      if(!current())return;
+      const data=await readChatMetrics(id,true);
+      if(!current())return;
+      rememberChatMetrics(data);updateStatusChat();
+    }catch{
+      if(current())runningMetricsKeys.delete(id);
+    }
+  }));
 }
 function refreshSelectedChatMetrics() {
   if (isAuxiliaryWindow || document.hidden || !nativeInvoke) return;
   const chat = chats.find(chat => chat.id === state.selectedChatId);
   const key = chatMetricsKey(chat);
-  if (key && key !== metricsRefreshKey) return loadSelectedChatMetrics(chat.id, true);
+  const selected=key&&key!==metricsRefreshKey?loadSelectedChatMetrics(chat.id,true):null;
+  return Promise.allSettled([selected,refreshRunningChatMetrics()]);
 }
 async function loadSelectedChatMetrics(threadId, refresh = false) {
   const request = ++metricsSelectionRequest;
@@ -914,38 +944,50 @@ function metricsConsumptionMarkup(data) {
     ['缓存输入',metricNumber(totals.cached)],['其中推理',metricNumber(totals.reasoning)],['已结算请求',metricNumber(totals.requests)],['未计价请求',metricNumber(totals.unpricedRequests)]];
   return ui`<section class="metrics-consumption"><h3>${t('本对话消耗（全部已结算请求）')}</h3><dl class="metrics-overview">${fields.map(([label,value])=>`<div><dt>${esc(t(label))}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl><p class="metrics-note">${t('仅统计本对话自身，子代理在下方分别显示；包含中断和进行中轮次的已结算请求。')}</p><p class="metrics-note">${t('API 等价金额，非订阅扣款')} · ${t('价目表日期')} ${esc(consumption.priceDate)}${totals.estimatedRequests ? ` · ${metricNumber(totals.estimatedRequests)} ${esc(t('次请求按缺失计价配置估算'))}` : ''}</p></section>`;
 }
-function metricsTurnDetails(turn) {
-  const requests = (turn.requests || []).map(request => `<tr>${metricCells([
-    esc(request.responseId || '—'), metricNumber(request.inputTokens), metricNumber(request.cachedInputTokens), metricNumber(request.outputTokens), metricNumber(request.reasoningTokens),
-    esc(metricsTime(request.startMs)), esc(metricsTime(request.endMs)), metricValue(request.costUsd) ? `≈$${request.costUsd.toFixed(4)}` : '—', esc(t(request.included ? '已纳入' : request.excludedReason || '未纳入'))
-  ])}</tr>`);
-  const activities = (turn.activities || []).map(activity => `<details class="metrics-activity"><summary><time>${esc(metricsTime(activity.at ?? activity.startedAt))}</time> ${esc(activity.label || activity.type || '—')} <span>${esc(t(activity.status || ''))}</span></summary><div class="metrics-note">${esc(activity.type || '')} · ${esc(metricsTime(activity.startedAt))} → ${esc(metricsTime(activity.completedAt))}</div>${activity.detail ? `<pre>${esc(typeof activity.detail === 'string' ? activity.detail : JSON.stringify(activity.detail, null, 2))}</pre>` : `<p class="metrics-note">${esc(t('没有可读详情；内容可能缺失或加密'))}</p>`}</details>`).join('');
-  return `<details class="metrics-section"><summary>${esc(t('请求明细'))} (${requests.length})</summary>${metricsTable(['响应 ID','输入 token','缓存输入','输出 token','其中推理','开始时间','结束时间','API 等价金额','计时状态'], requests)}</details><details class="metrics-section"><summary>${esc(t('活动记录'))} (${turn.activities?.length || 0})</summary><p class="metrics-note">${esc(t('按日志时间展示；活动可能并行，空档不推断为生成时间。'))}</p>${activities || esc(t('没有可用记录'))}</details>`;
-}
 function metricsHeader(canGoBack = false) {
   return ui`<header${isMetricsWindow ? ' data-window-drag' : ''}>${canGoBack ? ui`<button class="icon-button" data-metrics-action="back" title="${t('返回上层')}" aria-label="${t('返回上层')}">${icon('chevron-left')}</button>` : ''}<span>${t('对话详情')}</span><span class="toolbar-spacer"></span>${isMetricsWindow ? ui`<button class="icon-button" data-window-action="minimize" title="${t('最小化')}" aria-label="${t('最小化')}">${icon('window-minimize')}</button><button class="icon-button" data-window-action="toggleMaximize" title="${t(state.windowMaximized ? '还原' : '最大化')}" aria-label="${t(state.windowMaximized ? '还原' : '最大化')}">${icon(state.windowMaximized ? 'window-restore' : 'window-maximize')}</button>` : ''}<button class="icon-button" data-metrics-action="close" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></header>`;
 }
-function chatMetricsMarkup(data, scope = '', canGoBack = false) {
-  const turns = [...(data.turns || [])].sort((a,b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+function metricsSelectionMarkup(data, scope = '') {
+  const turns = [...(data.turns || [])].sort((a,b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0,50);
   const metrics = metricsScope(data, scope), selectedTurnId = scope === 'all' ? '' : scope || data.latestTurnId;
   const scopeLabel = scope === 'all' ? t('全会话（已完成轮次）') : scope ? t('所选轮次') : t('最新轮次');
   const unCached = metricValue(metrics?.inputTokens) && metricValue(metrics?.cachedInputTokens) && metrics.inputTokens >= metrics.cachedInputTokens ? metrics.inputTokens - metrics.cachedInputTokens : null;
   const fields = [[metrics?.ttftEstimated ? '估算首 token' : '原生首 token',metricSeconds(metrics?.ttftMs,3)],['估算生成速度',metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'],['缓存命中率',metricPercent(metrics?.cacheHitRate,2)],
     ['输入 token',metricNumber(metrics?.inputTokens)],['缓存输入',metricNumber(metrics?.cachedInputTokens)],['未缓存输入',metricNumber(unCached)],['输出 token',metricNumber(metrics?.outputTokens)],['其中推理',metricNumber(metrics?.reasoningOutputTokens)],['总 token',metricNumber(metrics?.totalTokens)],
     ['有效请求 / 全部请求',`${metricNumber(metrics?.validRequestCount)} / ${metricNumber(metrics?.requestCount)}`],['token 覆盖率',metricPercent(metrics?.coverage)],['生成样本耗时',metricSeconds(metrics?.generationMs)],['总轮次耗时',metricSeconds(metrics?.durationMs)],['工具阻塞',metricSeconds(metrics?.toolWaitMs)],
-    ['完成轮次 / 全部轮次',`${metricNumber(metrics?.completedTurnCount)} / ${metricNumber(metrics?.turnCount)}`]];
+    ['完成轮次 / 全部轮次',`${metricNumber(metrics?.completedTurnCount)} / ${metricNumber(metrics?.turnCount)}`],['活动记录数',metricNumber(metrics?.activityCount)]];
   if (scope === 'all') fields.push(['首 token 中位数',metricSeconds(metrics?.ttftMedianMs,3)],['首 token 样本数',metricNumber(metrics?.ttftSampleCount)]);
   else fields.push(['本轮 API 等价金额',metricsCostMoney(data.turns?.find(turn=>turn.turnId===selectedTurnId)?.consumption)]);
   const turnRows = turns.map(turn => `<tr class="${turn.turnId === selectedTurnId ? 'metrics-selected' : ''}">${metricCells([
     `<button class="metrics-link" data-metrics-action="scope" data-scope="${esc(turn.turnId)}">${esc(metricsTime(turn.startedAt))}</button>`, esc(([turn.model, turn.effort].filter(Boolean).join(' / ') || '—') + (['priority','fast'].includes(turn.serviceTier) ? ' · Fast' : '')), esc(metricStatus(turn.status)),
     metricSeconds(turn.metrics?.ttftMs), metricValue(turn.metrics?.tokenSpeed) ? turn.metrics.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(turn.metrics?.coverage), metricPercent(turn.metrics?.cacheHitRate), metricNumber(turn.metrics?.outputTokens), metricSeconds(turn.metrics?.durationMs), metricSeconds(turn.metrics?.toolWaitMs), esc(metricsCostMoney(turn.consumption))
   ])}</tr>`);
-  const toolRows = (data.tools || []).map(tool => `<tr>${metricCells([esc(tool.name),metricNumber(tool.count),metricNumber(tool.failures),metricSeconds(tool.runtimeMs),metricSeconds(tool.waitMs)])}</tr>`);
-  const agentRows = (data.subagents || []).map(agent => `<tr>${metricCells([
-    `<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(agent.path || agent.threadId)}">${esc(agent.name || agent.path || agent.threadId)}</button>`, esc(agent.model || '—'), esc(metricStatus(agent.status)), metricNumber(agent.summary?.outputTokens), metricValue(agent.summary?.tokenSpeed) ? agent.summary.tokenSpeed.toFixed(1) + 't/s' : '—', metricPercent(agent.summary?.coverage), metricPercent(agent.summary?.cacheHitRate), esc(metricsCostMoney(agent.consumption)), agent.error ? esc(agent.error) : '—'
-  ])}</tr>`);
-  const currentTurn = data.turns?.find(turn => turn.turnId === selectedTurnId);
-  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title || data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd || '—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ') || '—')} · ${t(data.archived ? '已归档' : '未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p>${metricsConsumptionMarkup(data)}<div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${turns.map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有轮次记录'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞','API 等价金额'],turnRows)}${currentTurn ? metricsTurnDetails(currentTurn) : ''}<h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','API 等价金额','读取错误'],agentRows)}</div>`;
+  const offset=data.turnOffset||0,total=data.turnTotal??data.turns?.length??0;
+  const pager=total>50?`<nav class="metrics-turn-pages"><button class="text-button" data-metrics-action="page" data-offset="${offset-50}" ${offset===0||metricsView?.pageLoading?'disabled':''}>${esc(t('上一页'))}</button><span>${offset+1}–${Math.min(offset+50,total)} / ${metricNumber(total)}</span><button class="text-button" data-metrics-action="page" data-offset="${offset+50}" ${offset+50>=total||metricsView?.pageLoading?'disabled':''}>${esc(t('下一页'))}</button><button class="text-button" data-metrics-action="refresh">${esc(t('刷新'))}</button></nav>`:'';
+  return ui`<div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${turns.map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有轮次记录'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞','API 等价金额'],turnRows)}${pager}${metricsView?.pageError?`<p class="metrics-warning">${esc(metricsView.pageError)}</p>`:''}`;
+}
+function chatMetricsMarkup(data,scope='',canGoBack=false) {
+  const toolRows=(data.tools||[]).map(tool=>`<tr>${metricCells([esc(tool.name),metricNumber(tool.count),metricNumber(tool.failures),metricSeconds(tool.runtimeMs),metricSeconds(tool.waitMs)])}</tr>`);
+  const agentRows=(data.subagents||[]).map(agent=>`<tr>${metricCells([`<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(agent.path||agent.threadId)}">${esc(agent.name||agent.path||agent.threadId)}</button>`,esc(agent.model||'—'),esc(metricStatus(agent.status)),metricNumber(agent.summary?.outputTokens),metricValue(agent.summary?.tokenSpeed)?agent.summary.tokenSpeed.toFixed(1)+'t/s':'—',metricPercent(agent.summary?.coverage),metricPercent(agent.summary?.cacheHitRate),esc(metricsCostMoney(agent.consumption)),agent.error?esc(agent.error):'—'])}</tr>`);
+  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title||data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd||'—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ')||'—')} · ${t(data.archived?'已归档':'未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p>${metricsConsumptionMarkup(data)}<section data-metrics-selection>${metricsSelectionMarkup(data,scope)}</section><h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','API 等价金额','读取错误'],agentRows)}</div>`;
+}
+function renderMetricsSelection() {
+  if(!metricsView?.data)return;
+  const element=document.getElementById('chat-metrics-dialog')?.querySelector?.('[data-metrics-selection]');
+  if(element)element.innerHTML=metricsSelectionMarkup(metricsView.data,metricsView.scope);
+  else renderChatMetricsDialog();
+}
+async function loadMetricsPage(offset) {
+  const view=metricsView;
+  if(!view?.data||view.pageLoading||!Number.isInteger(offset)||offset<0||offset%50||offset>=(view.data.turnTotal||0))return;
+  const request=++metricsDetailRequest,context=metricsContextGeneration;
+  view.pageLoading=true;view.pageError='';renderMetricsSelection();
+  try {
+    const data=await readChatMetrics(view.threadId,false,offset,view.data.detailRevision);
+    if(metricsView!==view||request!==metricsDetailRequest||context!==metricsContextGeneration)return;
+    view.data=data;if(view.scope!=='all')view.scope=data.turns?.[0]?.turnId||'';
+  } catch(error) {if(metricsView===view&&request===metricsDetailRequest)view.pageError=String(error);}
+  finally {if(metricsView===view&&request===metricsDetailRequest){view.pageLoading=false;renderMetricsSelection();}}
 }
 function renderChatMetricsDialog() {
   const dialog = document.getElementById('chat-metrics-dialog');
@@ -999,7 +1041,7 @@ document.addEventListener('cancel', event => {
 document.addEventListener('change', event => {
   if (event.target.matches?.('[data-metrics-scope]') && metricsView?.data) {
     metricsView.scope = event.target.value;
-    renderChatMetricsDialog();
+    renderMetricsSelection();
   }
 });
 function fullLocalTime(at) {
@@ -1015,7 +1057,33 @@ function statusLocalTime(at) {
   const day = dateKey(date) === dateKey(now) ? (language() === 'zh' ? '今天' : 'Today') : dateKey(date) === dateKey(yesterday) ? (language() === 'zh' ? '昨天' : 'Yesterday') : dateKey(date);
   return `${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+function runningMetricsEntries() {
+  const running=chats.filter(isRunningMetricsChat).sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+  return running.map(chat=>{
+    const activity=chat.generation,sample=chatMetrics.get(chat.id)?.recentSpeed;
+    const current=Boolean(activity?.turnId&&activity.turnId===chat.turnId);
+    const config=activity?.config,known=sample&&config?.model&&['model','effort','serviceTier'].every(key=>(sample.config?.[key]??null)===(config[key]??null));
+    const speed=current&&known&&metricValue(sample.tokenSpeed)?sample.tokenSpeed:null;
+    return {chat,speed};
+  });
+}
+function runningMetricsTipMarkup() {
+  const entries=runningMetricsEntries(),estimated=entries.filter(entry=>metricValue(entry.speed)).length;
+  const note=estimated&&estimated<entries.length?`<span class="running-metrics-note">${estimated}/${entries.length}${esc(t('个运行中对话'))}</span>`:'';
+  return entries.map(({chat,speed})=>{const model=(chat.generation?.config?.model||chat.model||t('未知')).replace(/^gpt-/,'');return `<span class="running-metrics-title" title="${esc(chat.title||t('未命名对话'))} · ${esc(model)}">${esc(chat.title||t('未命名对话'))}<small class="running-metrics-model">[${esc(model)}]</small></span><span class="running-metrics-speed">${metricValue(speed)?Math.round(speed)+'t/s':'—'}</span>`;}).join('')+note;
+}
+function runningMetricsText() {
+  const entries=runningMetricsEntries();
+  const speeds=entries.map(entry=>entry.speed).filter(metricValue);
+  return 'Σ'+(speeds.length?'≈'+Math.round(speeds.reduce((sum,speed)=>sum+speed,0))+'t/s':entries.length?'—':'0t/s');
+}
+function runningMetricsMarkup() {
+  return `<span class="status-metrics-total" tabindex="0" aria-describedby="running-metrics-tip" aria-label="${esc(t('运行中对话总速度'))}">${runningMetricsText()}</span>`;
+}
 function statusChatMarkup() {
+  return `<span class="status-chat-current">${statusChatCurrentMarkup()}</span>${runningMetricsMarkup()}`;
+}
+function statusChatCurrentMarkup() {
   const chat = chats.find(item => item.id === state.selectedChatId);
   if (!chat) return '';
   const duration = executionLabel(chat);
@@ -1032,13 +1100,21 @@ function updateSyncStatus() {
   if (element) element.innerHTML = syncMarkup();
 }
 function renderStatusbar() {
-  return ui`<footer class="statusbar"><span class="status-sync">${syncMarkup()}</span><div class="status-chat">${statusChatMarkup()}</div><div class="status-quota" role="button" tabindex="0" aria-label="${t('额度与消耗')}">${quotaMarkup()}</div></footer>`;
+  return ui`<footer class="statusbar"><span class="status-sync">${syncMarkup()}</span><div class="status-chat">${statusChatMarkup()}</div><div class="status-quota" role="button" tabindex="0" aria-label="${t('额度与消耗')}">${quotaMarkup()}</div></footer><div id="running-metrics-tip" class="running-metrics-tip" role="tooltip">${runningMetricsTipMarkup()}</div>`;
 }
 function updateStatusChat() {
   const element = document.querySelector('.status-chat');
   if (!element) return;
-  const markup = statusChatMarkup();
-  if (element.innerHTML !== markup) element.innerHTML = markup;
+  const current=element.querySelector('.status-chat-current'),total=element.querySelector('.status-metrics-total');
+  if(!current||!total)element.innerHTML=statusChatMarkup();
+  else {
+    const markup=statusChatCurrentMarkup();
+    if(current.innerHTML!==markup)current.innerHTML=markup;
+    const label=runningMetricsText();
+    if(total.textContent!==label)total.textContent=label;
+  }
+  const tip=document.getElementById('running-metrics-tip'),tipMarkup=runningMetricsTipMarkup();
+  if(tip&&tip.innerHTML!==tipMarkup)tip.innerHTML=tipMarkup;
 }
 document.addEventListener('pointerover', event => {
   const row = event.target.closest('[data-chat]');
@@ -1507,7 +1583,7 @@ function recentProjectOptions() {
 function projectRecentChats() {
   let rows = projectRecentBaseChats();
   if (state.recentProjectFilter.length) rows = rows.filter(chat => state.recentProjectFilter.includes(chat.projectId));
-  return chatsByProject(rows, 'recentProjectSort');
+  return chatsByProject(rows, 'recentProjectSort', 'recentChatSort');
 }
 function projectRecentListMarkup(rows = projectRecentChats()) {
   return projectSortedChatMarkup(rows, 'recentProjectSort', chat => globalChatRow(chat, '', '', true, false)) || ui`<div class="empty-state">${t('没有对话')}</div>`;
@@ -1548,24 +1624,25 @@ function projectRecentPanel() {
   const daysUnit = state.chatDays === 1 ? 'Day' : 'Days';
   const daysTip = ui`按最近 ${state.chatDays} 天过滤；0 天仅显示手动加入。`;
   const timeLabel = t('调整时间列宽'), projectWidthLabel = t('调整项目列宽');
-  return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}<span class="toolbar-spacer"></span><button class="icon-button" data-action="open-recent-rules" title="${t('动态规则')}" aria-label="${t('动态规则')}">${icon('activity')}</button><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
+  return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}${chatSortButton('recentChatSort')}<span class="toolbar-spacer"></span><button class="icon-button" data-action="open-recent-rules" title="${t('动态规则')}" aria-label="${t('动态规则')}">${icon('activity')}</button><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
 }
 
-function projectSectionButton(kind, collapsed = false) {
-  const label = `${t(collapsed ? '恢复' : '关闭')} ${kind === 'project' ? 'Projects' : 'Chats'}`;
-  return ui`<button class="icon-button ${collapsed ? 'section-restore' : 'section-close'}" data-action="toggle-project-section" data-kind="${kind}" title="${esc(label)}" aria-label="${esc(label)}" aria-expanded="${!collapsed}">${icon(collapsed ? 'chevrons-up' : 'x')}</button>`;
+function projectSectionButton(collapsed = false) {
+  const label = `${t(collapsed ? '恢复' : '关闭')} Projects / Chats`;
+  return ui`<button class="icon-button ${collapsed ? 'section-restore' : 'section-close'}" data-action="toggle-project-section" data-kind="project" title="${esc(label)}" aria-label="${esc(label)}" aria-expanded="${!collapsed}">${icon(collapsed ? 'chevrons-up' : 'x')}</button>`;
 }
 function collapsedFolderSection(kind) {
-  return ui`<div class="view-block folder-view-block ${kind === 'project' ? 'project-structure' : 'project-chat-structure'} section-collapsed"><div class="folder-view-label"><strong>${kind === 'project' ? 'Projects' : 'Chats'}</strong><span class="toolbar-spacer"></span>${projectSectionButton(kind,true)}</div></div>`;
+  return ui`<div class="view-block folder-view-block ${kind === 'project' ? 'project-structure' : 'project-chat-structure'} section-collapsed"><div class="folder-view-label"><strong>${kind === 'project' ? 'Projects' : 'Chats'}</strong><span class="toolbar-spacer"></span>${kind === 'project' ? projectSectionButton(true) : ''}</div></div>`;
 }
 function renderProjectPane() {
+  state.projectChatsCollapsed = state.projectsCollapsed;
   const activeCount = state.projectsCollapsed ? 0 : filteredProjectFolderProjects().length;
   const archivedCount = state.projectChatsCollapsed ? 0 : projectChats().filter(chat => effectiveReasons(chat).length).length;
   const archiveOpen = state.projectArchiveOpen && !state.projectChatsCollapsed;
   return ui`<aside class="workspace-pane project-pane projects-workspace ${archiveOpen ? 'project-archive-open' : ''} ${state.projectsCollapsed ? 'projects-section-collapsed' : ''} ${state.projectChatsCollapsed ? 'chats-section-collapsed' : ''}" style="--project-recent-height:${state.projectRecentHeight}px;--project-structure-height:${state.projectStructureHeight}px;--project-label-width:${projectLabelWidth()}ch;--project-chat-time-width:${state.projectChatTimeWidth > 0 ? `${state.projectChatTimeWidth}px` : 'calc(var(--chat-lead) + 4px)'}" aria-label="Project 管理">
     ${projectRecentPanel()}
-    ${state.projectsCollapsed ? collapsedFolderSection('project') : ui`<div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}">${folderToggleAllButton('project')}<strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button>${projectSectionButton('project')}</div><div class="scroll tree">${projectTree()}</div></div>`}
-    ${state.projectChatsCollapsed ? collapsedFolderSection('chat') : ui`<div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="${state.projectsCollapsed ? 'project-recent' : 'project-structure'}" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t(state.projectsCollapsed ? '调整动态栏高度' : '调整 Project 与 Chat 文件夹高度')}">${folderToggleAllButton('chat')}<strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}${projectSectionButton('chat')}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>`}
+    ${state.projectsCollapsed ? collapsedFolderSection('project') : ui`<div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}">${folderToggleAllButton('project')}<strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button>${projectSectionButton()}</div><div class="scroll tree">${projectTree()}</div></div>`}
+    ${state.projectChatsCollapsed ? collapsedFolderSection('chat') : ui`<div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="${state.projectsCollapsed ? 'project-recent' : 'project-structure'}" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t(state.projectsCollapsed ? '调整动态栏高度' : '调整 Project 与 Chat 文件夹高度')}">${folderToggleAllButton('chat')}<strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>`}
     ${archiveOpen ? ui`<div class="view-block project-archive-panel archive-block"><div class="view-head scope-head scope-archive">${icon('archive')}<span>${t('归档对话')}</span><span class="count">${archivedCount}</span><span class="toolbar-spacer"></span><button class="icon-button" data-action="toggle-project-archive" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></div><div class="scroll">${archivedChatList()}</div></div>` : ''}
   </aside>`;
 }
@@ -1598,17 +1675,27 @@ function projectSortButton(field, action) {
   const title = value === 'off' ? t('按项目升序') : value === 'asc' ? t('项目升序，点击改为降序') : t('项目降序，点击关闭排序');
   return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}"><span class="sort-glyph">P${value === 'desc' ? '↓' : '↑'}</span></button>`;
 }
+function chatSortButton(field) {
+  const value = state[field];
+  const active = value !== 'status-asc';
+  const title = t(value === 'status-asc' ? '按工作状态排序，点击按对话名称升序' : value === 'name-asc' ? '对话名称升序，点击改为降序' : '对话名称降序，点击恢复工作状态排序');
+  return ui`<button type="button" class="icon-button sort-control ${active ? 'active' : ''}" data-action="cycle-chat-sort" data-field="${field}" aria-pressed="${active}" title="${esc(title)}" aria-label="${esc(title)}"><span class="sort-glyph">N${active ? value === 'name-desc' ? '↓' : '↑' : ''}</span></button>`;
+}
 function nameSortButton(field, action) {
   const value = state[field];
   const title = value === 'off' ? t('按名称升序') : value === 'asc' ? t('名称升序，点击改为降序') : t('名称降序，点击恢复活动时间顺序');
   return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}"><span class="sort-glyph">N${value === 'desc' ? '↓' : '↑'}</span></button>`;
 }
-function chatsByProject(rows, sortField) {
+function chatsByProject(rows, sortField, chatSortField) {
   const sort = state[sortField];
-  if (sort === 'off') return regionOrder(rows);
-  const direction = sort === 'desc' ? -1 : 1;
-  const ordered = [...rows].sort((a, b) => direction * projectLabel(byProject(a.projectId) || {synthetic:true,name:t('无项目对话')}).localeCompare(projectLabel(byProject(b.projectId) || {synthetic:true,name:t('无项目对话')}), language()) || statusTimeCompare(a, b));
-  return ordered;
+  const [mode, direction] = state[chatSortField].split('-');
+  const order = direction === 'desc' ? -1 : 1;
+  return [...rows].sort((a,b) => {
+    if (sort !== 'off' && a.projectId !== b.projectId) {
+      return (sort === 'desc' ? -1 : 1) * (projectLabel(byProject(a.projectId)).localeCompare(projectLabel(byProject(b.projectId)), language()) || a.projectId.localeCompare(b.projectId));
+    }
+    return mode === 'status' ? statusTimeCompare(a,b) : order * a.title.localeCompare(b.title, language()) || a.id.localeCompare(b.id);
+  });
 }
 function projectSortedChatMarkup(rows, sortField, renderRow) {
   const sort = state[sortField];
@@ -1839,6 +1926,7 @@ function chatLeadShowsDuration(chat) {
   return chat.waitingForInput || Boolean(chatDiagnostic(chat)) || chat.working || Boolean(chat.attentionAt);
 }
 function chatWorkStatus(chat) {
+  if(chat.activitySynced===false&&!chat.executionStatus&&!chat.working&&!chat.waitingForInput)return `<span class="chat-work-status" title="${esc(t('状态尚未同步'))}" aria-label="${esc(t('状态尚未同步'))}">·</span>`;
   if (chat.waitingForInput) return ui`<span class="chat-work-status waiting-input" title="${t('待回答')}" aria-label="${t('待回答')}">?</span>`;
   const issue = chatDiagnostic(chat);
   return issue ? diagnosticIcon('chat-work-status',chat) : chat.working ? workingIndicator('chat-work-status',chat) : chat.attentionAt ? ui`<span class="chat-work-status attention" aria-label="${t('完成待查看')}"></span>` : '';
@@ -2192,7 +2280,7 @@ function globalDynamicPanel() {
   const rows = filteredTimelineChats().filter(chat => !effectiveReasons(chat).length);
   const archivedCount = chats.filter(chat => effectiveReasons(chat).length).length;
   const timeLabel = t('调整时间列宽'), projectLabelText = t('调整项目列宽');
-  return ui`<div class="view-block dynamic-block global-dynamic chats-button-view" style="${chatColumnStyle()}" data-panel-scope="global"><div class="chats-button-row">${selectionBadge('chat')}${projectFilterPicker('chat-project')}${projectSortButton('dynamicProjectSort','toggle-dynamic-project-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-chats-archive', state.chatsLowerPanel === 'archive', archivedCount, 'archive-fab')}<button class="icon-button ${state.chatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button>${newChatButton(true)}</div>${searchOverlay('chat',state.chatSearchOpen,state.chatQuery,t('搜索对话或 ID'))}<div class="dynamic-list has-fab">${renderChatGroups(rows)}</div><div class="chat-column-resizer time-column" data-resize="chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="chat-column-resizer project-column" data-resize="chat-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectLabelText}" title="${projectLabelText}"></div></div>`;
+  return ui`<div class="view-block dynamic-block global-dynamic chats-button-view" style="${chatColumnStyle()}" data-panel-scope="global"><div class="chats-button-row">${selectionBadge('chat')}${projectFilterPicker('chat-project')}${projectSortButton('dynamicProjectSort','toggle-dynamic-project-sort')}${chatSortButton('dynamicChatSort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-chats-archive', state.chatsLowerPanel === 'archive', archivedCount, 'archive-fab')}<button class="icon-button ${state.chatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button>${newChatButton(true)}</div>${searchOverlay('chat',state.chatSearchOpen,state.chatQuery,t('搜索对话或 ID'))}<div class="dynamic-list has-fab">${renderChatGroups(rows)}</div><div class="chat-column-resizer time-column" data-resize="chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="chat-column-resizer project-column" data-resize="chat-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectLabelText}" title="${projectLabelText}"></div></div>`;
 }
 
 const displayWidth = value => [...String(value)].reduce((width, character) => width + (character.codePointAt(0) > 0xff ? 2 : 1), 0);
@@ -2204,8 +2292,7 @@ const FIXED_CHAT_GROUPS = new Set(['pin', 'star', 'default']);
 function chatGroupSection(group, items) {
   const scope = 'global';
   const open = !dynamic.collapsed(scope, group.id);
-  const projectCompare = (a,b) => (state.dynamicProjectSort === 'desc' ? -1 : 1) * projectLabel(byProject(a.projectId) || {synthetic:true,name:t('无项目对话')}).localeCompare(projectLabel(byProject(b.projectId) || {synthetic:true,name:t('无项目对话')}), language());
-  items = state.dynamicProjectSort === 'off' ? regionOrder(items) : [...items].sort((a,b) => chatRegionRank(a) - chatRegionRank(b) || projectCompare(a,b) || statusTimeCompare(a,b));
+  items = chatsByProject(items, 'dynamicProjectSort', 'dynamicChatSort');
   const rows = items.map((chat,index) => (state.dynamicProjectSort !== 'off' && index && chat.projectId !== items[index-1].projectId ? '<div class="dynamic-project-separator" role="separator"></div>' : '') + globalChatRow(chat, scope, group.id)).join('');
   return ui`<section class="dynamic-group fixed-group" data-dynamic-scope="${scope}" data-dynamic-group="${esc(group.id)}"><div class="dynamic-group-head" data-dynamic-heading draggable="false"><button class="dynamic-group-toggle" data-action="dynamic-toggle" data-scope="${scope}" data-group="${esc(group.id)}" aria-expanded="${open}">${icon(open ? 'chevron-down' : 'chevron-right')}<span class="row-name">${esc(group.name)}</span><span class="count">${items.length}</span></button></div>${open ? ui`<div class="dynamic-group-items">${rows}</div>` : ''}</section>`;
 }
@@ -2888,7 +2975,7 @@ function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceF
   if (chat) {
     const folders = [...state.localChatFolders].filter(key => key.startsWith(`${chat.projectId}${CHAT_FOLDER_SEPARATOR}`) && !state.recycledChatFolders.has(key));
     const sameProject = ids.every(targetId => chats.find(item => item.id === targetId)?.projectId === chat.projectId);
-    menu += menuButton('移动到会话文件夹','choose-target',{...data,targetaction:'folder'},!folders.length || !sameProject,t('没有可用文件夹'));
+    menu += menuButton('移动对话','choose-target',{...data,targetaction:'folder'},!folders.length || !sameProject,t('没有可用文件夹'));
     if (!multiple) menu += menuButton('所属项目','locate',data);
   } else if (!chat && !project.synthetic) {
     const targets = ['', ...state.localProjectFolders].filter(folder => folder !== sourceFolder);
@@ -3098,6 +3185,7 @@ function validateConfiguration(input) {
     if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter','openFolders','openChatFolders'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','projectChatTimeWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
     if (key === FOLDERS_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => ['projects','chats'].includes(field) ? object(v) && Object.values(v).every(item => object(item) && typeof item.folder === 'string' && Object.entries(item).every(([k,x]) => k === 'folder' ? x.length <= 4096 : k === 'folders' ? strings(x) : ['recycled','starred'].includes(k) ? typeof x === 'boolean' : k === 'region' ? typeof x === 'string' && x.length <= 32 : ['order','manualOrder','regionEnteredAt'].includes(k) && Number.isFinite(x))) : ['localProjectFolders','localChatFolders','recentIncludedChatIds','recentExcludedChatIds','recycledChatFolders','openFolders','openChatFolders','starredProjectIds','pinnedProjectIds'].includes(field) && strings(v));
     if (key === 'CodexChatPane.dynamic-v1') valid = object(parsed) && ['projects','chats'].every(kind => Array.isArray(parsed.groups?.[kind]) && parsed.groups[kind].every(g=>object(g) && typeof g.id==='string' && typeof g.name==='string' && g.name.length<=4096) && object(parsed.members?.[kind]) && Object.values(parsed.members[kind]).every(g=>typeof g==='string' || strings(g))) && object(parsed.views) && Object.values(parsed.views).every(v=>object(v) && strings(v.order) && strings(v.groups) && strings(v.collapsed) && (v.orders === undefined || object(v.orders) && Object.values(v.orders).every(strings)));
+    if (key === PREFERENCES_KEY && CHAT_SORT_FIELDS.some(field => parsed[field] != null && parsed[field] !== 'status-desc' && !CHAT_SORT_VALUES.includes(parsed[field]))) valid = false;
     if (!valid) throw new Error(t('工具配置格式无效'));
     result[key] = value;
   }
@@ -3298,6 +3386,7 @@ function updateRowSelection(kind, row, event) {
 document.addEventListener("click", async event => {
   const dismiss = event.target.closest('[data-quota-dismiss]');
   if (dismiss && nativeInvoke) {
+    if (quotaNoticeView.dismissPreview(dismiss.dataset.quotaDismiss)) return;
     try { await nativeInvoke('dismiss_quota_notice',{eventId:dismiss.dataset.quotaDismiss}); await refreshQuotaNotices(); }
     catch(error) { showToast(t('操作失败'),String(error),'error'); }
     return;
@@ -3315,7 +3404,9 @@ document.addEventListener("click", async event => {
     const {metricsAction:action,id,scope} = metricsAction.dataset;
     if (action === 'close') closeChatMetrics();
     else if (action === 'back') backChatMetrics();
-    else if (action === 'scope' && metricsView?.data) { metricsView.scope = scope; renderChatMetricsDialog(); }
+    else if (action === 'scope' && metricsView?.data) { metricsView.scope = scope; renderMetricsSelection(); }
+    else if (action === 'page') await loadMetricsPage(Number(metricsAction.dataset.offset));
+    else if (action === 'refresh' && metricsView) await openChatMetrics(metricsView.threadId);
     else if (action === 'open' || action === 'agent') await openChatMetrics(id,action === 'agent');
     return;
   }
@@ -3500,6 +3591,14 @@ document.addEventListener("click", async event => {
       render();
       return;
     }
+    if (name === 'cycle-chat-sort') {
+      const field = action.dataset.field;
+      if (CHAT_SORT_FIELDS.includes(field)) {
+        state[field] = CHAT_SORT_VALUES[(CHAT_SORT_VALUES.indexOf(state[field]) + 1) % CHAT_SORT_VALUES.length];
+        render();
+      }
+      return;
+    }
     if (name === 'pick-option') {
       const value = action.dataset.value;
       if (action.dataset.pickerId === 'chat-project') state.chatProjectFilter = value;
@@ -3624,9 +3723,8 @@ document.addEventListener("click", async event => {
     if (name === 'toggle-recent-project-column') { state.recentProjectColumnVisible = !state.recentProjectColumnVisible; render(); return; }
     if (name === 'toggle-project-recent-link') { state.projectRecentLinked = !state.projectRecentLinked; savePreferences(); render(); return; }
     if (name === 'toggle-project-section') {
-      const key = action.dataset.kind === 'project' ? 'projectsCollapsed' : action.dataset.kind === 'chat' ? 'projectChatsCollapsed' : '';
-      if (!key) return;
-      state[key] = !state[key];
+      if (action.dataset.kind !== 'project') return;
+      state.projectsCollapsed = state.projectChatsCollapsed = !state.projectsCollapsed;
       render();
       return;
     }
@@ -4344,7 +4442,6 @@ async function listenForSourceChanges() {
   if (!nativeInvoke) return;
   await window.__TAURI__?.event?.listen?.('codex-source-changed', event => {
     const change = event.payload || {};
-    usagePreloader.changed(change.threads || []);
     queueSourceRefresh(change);
     if (!document.hidden && previewChatId && (change.full || change.threads?.includes(previewChatId))) refreshConversationPreview();
   });
@@ -4368,6 +4465,7 @@ if (isUsageWindow) {
     await loadToolConfig();
     await window.__TAURI__?.event?.listen?.('usage-index-progress',event => usageView.progress(event.payload));
     await window.__TAURI__?.event?.listen?.('usage-context-changed',() => {void usageView.invalidate();});
+    await window.__TAURI__?.event?.listen?.('codex-source-changed',event => usageView.changed(event.payload||{}));
     await usageView.open();
   })();
 } else if (isMetricsWindow) {
@@ -4378,6 +4476,10 @@ if (isUsageWindow) {
   void (async () => {
     await window.__TAURI__?.event?.listen?.('chat-metrics-open', event => {
       if (typeof event.payload === 'string') void openChatMetrics(event.payload);
+    });
+    await window.__TAURI__?.event?.listen?.('usage-context-changed',()=>{
+      ++metricsContextGeneration;++metricsDetailRequest;metricsPending.clear();
+      if(metricsView)void openChatMetrics(metricsView.threadId);
     });
     await loadToolConfig();
     if (!metricsView) await openChatMetrics(metricsThreadId);
@@ -4398,6 +4500,17 @@ if (isUsageWindow) {
     });
   }
 } else {
+  void window.__TAURI__?.event?.listen?.('usage-context-changed',()=>{
+    quotaNoticeView.invalidate();++metricsContextGeneration;++metricsSelectionRequest;
+    metricsRefreshKey='';chatMetrics.clear();runningMetricsKeys.clear();metricsPending.clear();
+    updateStatusChat();void refreshSelectedChatMetrics();
+  });
+  void window.__TAURI__?.event?.listen?.('internal-test-event',event => {
+    const handlers=new Map([['quota.reset-notice',data => quotaNoticeView.preview(data)]]);
+    const eventName=event.payload?.event || '';
+    const handled=Boolean(handlers.get(eventName)?.(event.payload.data));
+    void nativeInvoke('report_internal_test_event',{eventName,handled}).catch(() => {});
+  });
   updateWorkingFrame();
   applyFontSize();
   render();

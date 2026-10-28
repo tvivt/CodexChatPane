@@ -1,0 +1,49 @@
+{
+  "event": "quota.reset-notice",
+  "data": {
+    "cycle": {
+      "startedAt": 1792458600000,
+      "boundaryFrom": 1792908600000,
+      "endedAt": 1792908660000,
+      "remaining": 19,
+      "acknowledged": true
+    },
+    "report": {
+      "totals": {
+        "input": 10300000,
+        "cached": 8200000,
+        "output": 330000,
+        "reasoning": 70000,
+        "requests": 130,
+        "costUsd": 16.5,
+        "unpricedRequests": 0
+      },
+      "rows": [
+        {
+          "label": "gpt-6.1-sol",
+          "totals": {
+            "input": 8000000,
+            "cached": 6400000,
+            "output": 240000,
+            "reasoning": 50000,
+            "requests": 100,
+            "costUsd": 12.3,
+            "unpricedRequests": 0
+          }
+        },
+        {
+          "label": "gpt-6-astra",
+          "totals": {
+            "input": 2300000,
+            "cached": 1800000,
+            "output": 90000,
+            "reasoning": 20000,
+            "requests": 30,
+            "costUsd": 4.2,
+            "unpricedRequests": 0
+          }
+        }
+      ]
+    }
+  }
+}

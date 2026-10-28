@@ -10,7 +10,15 @@ mod window_attach;
 
 use serde::{Deserialize, Serialize};
 use source::SourceSnapshot;
-use std::{fs, path::PathBuf, process::Command, sync::Mutex};
+use std::{
+    fs,
+    path::PathBuf,
+    process::Command,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -18,9 +26,69 @@ use tauri::{
 };
 
 #[derive(Default)]
-struct SnapshotState(Mutex<Option<SourceSnapshot>>);
+struct SnapshotState(Mutex<Option<SourceSnapshot>>, AtomicU64);
 
 struct RemoteDebuggingPort(u16);
+
+#[derive(Clone, Deserialize, Serialize)]
+struct InternalTestEvent {
+    event: String,
+    #[serde(default)]
+    data: serde_json::Value,
+}
+
+fn parse_internal_test_event(bytes: &[u8]) -> Result<InternalTestEvent, String> {
+    if bytes.len() > 64 * 1024 {
+        return Err("测试事件文件过大".into());
+    }
+    let event: InternalTestEvent =
+        serde_json::from_slice(bytes).map_err(|error| format!("测试事件格式无效：{error}"))?;
+    if event.event.is_empty()
+        || event.event.len() > 64
+        || !event
+            .event
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err("测试事件名称无效".into());
+    }
+    Ok(event)
+}
+
+fn read_internal_test_event(args: &[String]) -> Result<Option<InternalTestEvent>, String> {
+    let Some(path) = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--internal-test-file="))
+    else {
+        return Ok(None);
+    };
+    if fs::metadata(path)
+        .map_err(|error| format!("无法读取测试事件文件：{error}"))?
+        .len()
+        > 64 * 1024
+    {
+        return Err("测试事件文件过大".into());
+    }
+    let bytes = fs::read(path).map_err(|error| format!("无法读取测试事件文件：{error}"))?;
+    parse_internal_test_event(&bytes).map(Some)
+}
+
+#[tauri::command]
+fn report_internal_test_event(
+    event_name: String,
+    handled: bool,
+    logger: tauri::State<'_, diagnostics::Logger>,
+) {
+    if event_name.len() <= 64
+        && event_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        logger.info(format!(
+            "internal test event name={event_name} handled={handled}"
+        ));
+    }
+}
 
 fn debug_browser_args(port: u16) -> Option<String> {
     (port != 0).then(|| format!(
@@ -222,45 +290,73 @@ async fn get_catalog_snapshot(app: tauri::AppHandle) -> SourceSnapshot {
     load_snapshot(app, true).await
 }
 
-async fn load_snapshot(app: tauri::AppHandle, catalog_only: bool) -> SourceSnapshot {
+async fn load_snapshot(app: tauri::AppHandle, _catalog_only: bool) -> SourceSnapshot {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<SnapshotState>();
-        let mut guard = state.0.lock().expect("snapshot lock poisoned");
-        let result = match (catalog_only, guard.as_ref()) {
-            (true, Some(previous)) => source::scan_catalog(previous),
-            _ => source::scan(),
-        };
-        match result {
-            Ok(snapshot) => {
-                *guard = Some(snapshot.clone());
-                snapshot
+        for _ in 0..2 {
+            let (previous, version) = {
+                let guard = state.0.lock().expect("snapshot lock poisoned");
+                (guard.clone(), state.1.load(Ordering::SeqCst))
+            };
+            let identity = source::snapshot_identity().ok();
+            let result = source::scan_catalog(previous.as_ref());
+            let same_source = identity == source::snapshot_identity().ok();
+            let mut guard = state.0.lock().expect("snapshot lock poisoned");
+            if state.1.load(Ordering::SeqCst) != version || !same_source {
+                continue;
             }
-            Err(error) => {
-                if let Some(snapshot) = guard.as_mut() {
-                    snapshot.state = if error.contains("Unsupported") {
-                        "Unsupported"
-                    } else {
-                        "Stale"
-                    }
-                    .to_string();
-                    snapshot.error = Some(error);
-                    snapshot.clone()
-                } else {
-                    SourceSnapshot {
-                        state: if error.contains("Unsupported") {
+            state.1.fetch_add(1, Ordering::SeqCst);
+            match result {
+                Ok(snapshot) => {
+                    *guard = Some(snapshot.clone());
+                    return snapshot;
+                }
+                Err(error) => {
+                    if let Some(snapshot) = guard.as_mut() {
+                        snapshot.state = if error.contains("Unsupported") {
                             "Unsupported"
                         } else {
-                            "Unavailable"
+                            "Stale"
                         }
-                        .to_string(),
-                        error: Some(error),
-                        projects: Vec::new(),
-                        chats: Vec::new(),
-                        history_summaries: Default::default(),
+                        .to_string();
+                        snapshot.error = Some(error);
+                        return snapshot.clone();
+                    } else {
+                        return SourceSnapshot {
+                            state: if error.contains("Unsupported") {
+                                "Unsupported"
+                            } else {
+                                "Unavailable"
+                            }
+                            .to_string(),
+                            error: Some(error),
+                            projects: Vec::new(),
+                            chats: Vec::new(),
+                            history_summaries: Default::default(),
+                            history_loaded: false,
+                            activity_pending: vec![],
+                            source_identity: identity,
+                        };
                     }
                 }
             }
         }
+        let result = state
+            .0
+            .lock()
+            .expect("snapshot lock poisoned")
+            .clone()
+            .unwrap_or_else(|| SourceSnapshot {
+                state: "Unavailable".into(),
+                error: Some("日志来源在读取期间变化，请重试".into()),
+                projects: vec![],
+                chats: vec![],
+                history_summaries: Default::default(),
+                history_loaded: false,
+                activity_pending: vec![],
+                source_identity: None,
+            });
+        result
     })
     .await
     .expect("snapshot task failed")
@@ -283,14 +379,34 @@ async fn get_chat_activity(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<SnapshotState>();
-        let mut guard = state.0.lock().map_err(|error| error.to_string())?;
-        let snapshot = guard.as_mut().ok_or("快照尚未加载")?;
-        source::refresh_activities(
-            snapshot,
-            &thread_ids,
-            &history_ids,
-            history_changed.unwrap_or(false),
-        )
+        for _ in 0..2 {
+            let (mut snapshot, version) = {
+                let guard = state.0.lock().map_err(|e| e.to_string())?;
+                (
+                    guard.clone().ok_or("快照尚未加载")?,
+                    state.1.load(Ordering::SeqCst),
+                )
+            };
+            if snapshot.source_identity.as_ref() != Some(&source::snapshot_identity()?) {
+                return Err("日志来源已切换，请重新读取目录".into());
+            }
+            let update = source::refresh_activities(
+                &mut snapshot,
+                &thread_ids,
+                &history_ids,
+                history_changed.unwrap_or(false),
+            )?;
+            let same_source =
+                snapshot.source_identity.as_ref() == Some(&source::snapshot_identity()?);
+            let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+            if state.1.load(Ordering::SeqCst) != version || !same_source {
+                continue;
+            }
+            *guard = Some(snapshot);
+            state.1.fetch_add(1, Ordering::SeqCst);
+            return Ok(update);
+        }
+        Err("读取期间快照已更新，请重试".into())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -493,10 +609,29 @@ async fn open_usage_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_quota_history() -> Result<usage::ledger::History, String> {
-    tauri::async_runtime::spawn_blocking(|| usage::ledger::history(&source::codex_home()?))
-        .await
-        .map_err(|e| e.to_string())?
+async fn get_quota_history(
+    import_logs: Option<bool>,
+    before: Option<i64>,
+    live_only: Option<bool>,
+) -> Result<usage::ledger::History, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = source::codex_home()?;
+        let identity = usage::context::identity(&home).ok();
+        if import_logs.unwrap_or(false) {
+            usage::ledger::import(&home, before)?;
+        }
+        let history = if live_only.unwrap_or(false) {
+            usage::ledger::history_live(&home)?
+        } else {
+            usage::ledger::history(&home)?
+        };
+        if identity != usage::context::identity(&home).ok() {
+            return Err("账号或日志来源已切换，请重新读取".into());
+        }
+        Ok(history)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -571,18 +706,6 @@ async fn update_current_usage(
             .map(|c| c.started_at.unwrap_or(c.observed_start))
             .min()
             .ok_or("尚无当前额度周期")?;
-        static WARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-            std::sync::OnceLock::new();
-        let warmed = WARMED.get_or_init(Default::default);
-        let thread_ids = if warmed
-            .lock()
-            .map_err(|e| e.to_string())?
-            .contains(&identity)
-        {
-            thread_ids
-        } else {
-            None
-        };
         usage::costs::index(
             &home,
             snapshot.as_ref(),
@@ -596,7 +719,6 @@ async fn update_current_usage(
         if usage::context::identity(&home)? != identity {
             return Err("账号或日志来源已切换，忽略旧任务".into());
         }
-        warmed.lock().map_err(|e| e.to_string())?.insert(identity);
         Ok(())
     })
     .await
@@ -637,18 +759,24 @@ async fn get_chat_preview(
 async fn get_chat_metrics(
     thread_id: String,
     latest_only: Option<bool>,
+    turn_offset: Option<usize>,
+    detail_revision: Option<String>,
 ) -> Result<metrics::ChatMetrics, String> {
     if !is_thread_id(&thread_id) {
         return Err("Chat ID 格式无效".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
         let home = source::codex_home()?;
+        if !latest_only.unwrap_or(false) {
+            return metrics::details::read(
+                &home,
+                &thread_id,
+                turn_offset.unwrap_or(0),
+                detail_revision.as_deref(),
+            );
+        }
         let identity = usage::context::identity(&home).ok();
-        let mut data = if latest_only.unwrap_or(false) {
-            metrics::read_latest(&thread_id)
-        } else {
-            metrics::read(&thread_id)
-        }?;
+        let mut data = metrics::read_latest(&thread_id)?;
         if data.usage_batches.is_empty() {
             data.usage_batches = data
                 .turns
@@ -660,6 +788,7 @@ async fn get_chat_metrics(
         if identity.is_some() && identity == usage::context::identity(&home).ok() {
             let _ = usage::costs::reuse(&home, &data);
         }
+        metrics::details::strip(&mut data);
         Ok(data)
     })
     .await
@@ -1093,9 +1222,22 @@ mod win_shell {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            focus_main(app);
-        }))
+        .plugin(tauri_plugin_single_instance::init(
+            |app, args, _| match read_internal_test_event(&args) {
+                Ok(Some(event)) => {
+                    restore_main(app);
+                    if let Err(error) = app.emit_to("main", "internal-test-event", event) {
+                        app.state::<diagnostics::Logger>()
+                            .warn(format!("test event delivery failed error={error}"));
+                    }
+                }
+                Ok(None) => focus_main(app),
+                Err(error) => {
+                    app.state::<diagnostics::Logger>().warn(error);
+                    focus_main(app);
+                }
+            },
+        ))
         .manage(SnapshotState::default())
         .manage(window_attach::State::default())
         .manage(window_attach::TrayState::default())
@@ -1179,6 +1321,7 @@ pub fn run() {
             get_chat_preview,
             get_chat_metrics,
             log_preview_event,
+            report_internal_test_event,
             open_project_directory,
             set_always_on_top,
             set_window_mode,
@@ -1199,8 +1342,20 @@ mod tests {
     use super::diagnostics;
     use super::{
         debug_browser_args, encode_query_component, exported_toml, is_thread_id, new_chat_uri,
-        normalize_tool_config, parse_exported_contents, write_folder_layout, ToolConfig,
+        normalize_tool_config, parse_exported_contents, parse_internal_test_event,
+        write_folder_layout, ToolConfig,
     };
+
+    #[test]
+    fn internal_test_event_is_data_only_and_bounded() {
+        let event =
+            parse_internal_test_event(br#"{"event":"quota.reset-notice","data":{"remaining":19}}"#)
+                .unwrap();
+        assert_eq!(event.event, "quota.reset-notice");
+        assert_eq!(event.data["remaining"], 19);
+        assert!(parse_internal_test_event(br#"{"event":"../bad event"}"#).is_err());
+        assert!(parse_internal_test_event(&vec![b'x'; 64 * 1024 + 1]).is_err());
+    }
 
     #[test]
     fn remote_debugging_is_opt_in_with_a_valid_port() {

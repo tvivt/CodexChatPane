@@ -123,6 +123,21 @@ mod tests {
 }
 
 impl Questions {
+    pub fn read_all(connection: &Connection) -> Result<HashMap<String, Self>, String> {
+        let supported: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('thread_items') WHERE name='item_json')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !supported {
+            return Ok(HashMap::new());
+        }
+        let mut statement = connection.prepare("SELECT DISTINCT thread_id FROM thread_items WHERE item_type='agentMessage' AND json_array_length(item_json,'$.questions')>0").map_err(|e|e.to_string())?;
+        let ids = statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        ids.into_iter()
+            .map(|id| Self::read(connection, &id).map(|q| (id, q)))
+            .collect()
+    }
     pub fn is_pending(&self) -> bool {
         !self.pending.is_empty()
     }

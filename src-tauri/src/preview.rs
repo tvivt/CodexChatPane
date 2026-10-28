@@ -135,13 +135,14 @@ pub fn read(id: &str, before: Option<PreviewCursor>) -> Result<PreviewPage, Stri
     }
     let key = format!("{id}:{end:?}");
     static CACHE: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
-    let mut cache = CACHE
+    let cache = CACHE
         .get_or_init(Default::default)
         .lock()
         .map_err(|e| e.to_string())?;
     if let Some(entry) = cache.get(&key).filter(|entry| entry.chain == chain) {
         return Ok(entry.page.clone());
     }
+    drop(cache);
 
     let mut size = PAGE_BYTES;
     let distance = chain.absolute_offset(end);
@@ -160,8 +161,11 @@ pub fn read(id: &str, before: Option<PreviewCursor>) -> Result<PreviewPage, Stri
         }
         size = next_size;
     };
+    let mut cache = CACHE.get().unwrap().lock().map_err(|e| e.to_string())?;
     if cache.len() >= 24 {
-        cache.clear();
+        if let Some(key) = cache.keys().next().cloned() {
+            cache.remove(&key);
+        }
     }
     cache.insert(
         key,
@@ -217,17 +221,61 @@ fn read_page(file: &mut File, end: u64, size: u64) -> Result<PreviewPage, String
 }
 
 fn rollout_chain(home: &Path, id: &str, current_path: &Path) -> Result<RolloutChain, String> {
-    let current = rollout_descriptor(current_path)?;
+    rollout_chain_at(home, id, current_path, true)
+}
+
+fn rollout_chain_at(
+    home: &Path,
+    id: &str,
+    current_path: &Path,
+    lengths: bool,
+) -> Result<RolloutChain, String> {
+    type CachedChain = (PathBuf, String, PathBuf, bool, RolloutChain);
+    static CHAINS: OnceLock<Mutex<Vec<CachedChain>>> = OnceLock::new();
+    let cache = CHAINS.get_or_init(Default::default);
+    let key = (
+        home.to_path_buf(),
+        id.to_owned(),
+        rollout_log::logical_path(current_path),
+        lengths,
+    );
+    let saved = cache
+        .lock()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .find(|(h, i, p, l, _)| h == &key.0 && i == &key.1 && p == &key.2 && *l == lengths)
+        .map(|entry| entry.4.clone());
+    if let Some(chain) = saved.filter(|chain| {
+        chain
+            .segments
+            .iter()
+            .all(|s| rollout_log::open(&s.path).is_ok_and(|log| log.stamp == s.source))
+    }) {
+        let mut cache = cache.lock().map_err(|e| e.to_string())?;
+        if let Some(index) = cache
+            .iter()
+            .position(|(h, i, p, l, _)| h == &key.0 && i == &key.1 && p == &key.2 && *l == lengths)
+        {
+            let entry = cache.remove(index);
+            cache.push(entry);
+        }
+        return Ok(chain);
+    }
+    let current = rollout_descriptor_at(current_path, lengths)?;
     if current.meta.id != id {
         return Err("预览 rollout 与对话不匹配".into());
     }
     let mut descriptors = if current.meta.history_base.is_some() {
-        rollout_descriptors(&home.join("sessions"), id)?
+        rollout_descriptors_at(&home.join("sessions"), id, lengths)?
     } else {
         Vec::new()
     };
     if current.meta.history_base.is_some() {
-        descriptors.extend(rollout_descriptors(&home.join("archived_sessions"), id)?);
+        descriptors.extend(rollout_descriptors_at(
+            &home.join("archived_sessions"),
+            id,
+            lengths,
+        )?);
     }
     if !descriptors
         .iter()
@@ -258,13 +306,15 @@ fn rollout_chain(home: &Path, id: &str, current_path: &Path) -> Result<RolloutCh
             .iter()
             .any(|candidate| candidate.rollout_id == base.thread_id)
         {
-            descriptors.extend(rollout_descriptors(
+            descriptors.extend(rollout_descriptors_at(
                 &home.join("sessions"),
                 &base.thread_id,
+                lengths,
             )?);
-            descriptors.extend(rollout_descriptors(
+            descriptors.extend(rollout_descriptors_at(
                 &home.join("archived_sessions"),
                 &base.thread_id,
+                lengths,
             )?);
         }
         let parent = descriptors
@@ -281,7 +331,14 @@ fn rollout_chain(home: &Path, id: &str, current_path: &Path) -> Result<RolloutCh
         current = parent;
     }
     chain.reverse();
-    Ok(RolloutChain { segments: chain })
+    let chain = RolloutChain { segments: chain };
+    let mut cache = cache.lock().map_err(|e| e.to_string())?;
+    cache.retain(|(h, i, p, l, _)| !(h == &key.0 && i == &key.1 && p == &key.2 && *l == lengths));
+    cache.push((key.0, key.1, key.2, lengths, chain.clone()));
+    if cache.len() > 32 {
+        cache.remove(0);
+    }
+    Ok(chain)
 }
 
 pub(crate) fn metrics_segments(
@@ -292,8 +349,12 @@ pub(crate) fn metrics_segments(
     let path = match rollout_log::open(path) {
         Ok(_) => rollout_log::logical_path(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut candidates = rollout_descriptors(&home.join("sessions"), id)?;
-            candidates.extend(rollout_descriptors(&home.join("archived_sessions"), id)?);
+            let mut candidates = rollout_descriptors_at(&home.join("sessions"), id, false)?;
+            candidates.extend(rollout_descriptors_at(
+                &home.join("archived_sessions"),
+                id,
+                false,
+            )?);
             candidates
                 .into_iter()
                 .max_by_key(|entry| entry.modified)
@@ -302,16 +363,20 @@ pub(crate) fn metrics_segments(
         }
         Err(error) => return Err(error.to_string()),
     };
-    Ok(rollout_chain(home, id, &path)?
+    Ok(rollout_chain_at(home, id, &path, false)?
         .segments
         .into_iter()
         .map(|segment| (segment.path, segment.end))
         .collect())
 }
 
-fn rollout_descriptor(path: &Path) -> Result<RolloutDescriptor, String> {
+fn rollout_descriptor_at(path: &Path, lengths: bool) -> Result<RolloutDescriptor, String> {
     let mut log = rollout_log::open(path).map_err(|error| error.to_string())?;
-    let len = log.len().map_err(|error| error.to_string())?;
+    let len = if log.compressed && !lengths {
+        u64::MAX
+    } else {
+        log.len().map_err(|error| error.to_string())?
+    };
     let source = log.stamp.clone();
     let mut line = String::new();
     BufReader::new(log.reader_at(0).map_err(|error| error.to_string())?)
@@ -337,7 +402,11 @@ fn rollout_descriptor(path: &Path) -> Result<RolloutDescriptor, String> {
     })
 }
 
-fn rollout_descriptors(root: &Path, id: &str) -> Result<Vec<RolloutDescriptor>, String> {
+fn rollout_descriptors_at(
+    root: &Path,
+    id: &str,
+    lengths: bool,
+) -> Result<Vec<RolloutDescriptor>, String> {
     if !root.is_dir() {
         return Ok(Vec::new());
     }
@@ -360,7 +429,7 @@ fn rollout_descriptors(root: &Path, id: &str) -> Result<Vec<RolloutDescriptor>, 
                 {
                     continue;
                 }
-                if let Ok(descriptor) = rollout_descriptor(&path) {
+                if let Ok(descriptor) = rollout_descriptor_at(&path, lengths) {
                     descriptors.push(descriptor);
                 }
             }
@@ -514,7 +583,7 @@ fn advance_cursor(
     cursor
 }
 
-fn message_text(payload: &Value) -> String {
+pub(crate) fn message_text(payload: &Value) -> String {
     payload["content"]
         .as_array()
         .into_iter()
@@ -556,7 +625,7 @@ fn skill_label(text: &str) -> Option<String> {
     None
 }
 
-fn system_label(text: &str) -> Option<String> {
+pub(crate) fn system_label(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
     if lower.contains("<cited_memory")
         || lower.contains("<user_memory")

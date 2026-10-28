@@ -49,6 +49,23 @@ pub struct Range {
 }
 
 impl Query {
+    fn contains(&self, at: Option<i64>) -> bool {
+        if self.undated_only.unwrap_or(false) && at.is_some() {
+            return false;
+        }
+        match at {
+            Some(at) => {
+                self.from.is_none_or(|from| at >= from)
+                    && self.to.is_none_or(|to| at < to)
+                    && self.ranges.as_ref().is_none_or(|ranges| {
+                        ranges
+                            .iter()
+                            .any(|r| at >= r.from && r.to.is_none_or(|to| at < to))
+                    })
+            }
+            None => self.from.is_none() && self.to.is_none() && self.ranges.is_none(),
+        }
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.from.zip(self.to).is_some_and(|(a, b)| a >= b) {
             return Err("时间范围无效".into());
@@ -61,10 +78,20 @@ impl Query {
         if !(-840..=840).contains(&self.timezone_minutes.unwrap_or(480)) {
             return Err("时区偏移无效".into());
         }
-        if !["day", "chat", "project", "model", "agent", "request"]
-            .contains(&self.group.as_deref().unwrap_or("day"))
+        if ![
+            "day", "chat", "project", "model", "agent", "request", "round",
+        ]
+        .contains(&self.group.as_deref().unwrap_or("day"))
         {
             return Err("分组无效".into());
+        }
+        if self.group.as_deref() == Some("round")
+            && self
+                .source_thread_id
+                .as_ref()
+                .is_none_or(|id| id.is_empty())
+        {
+            return Err("轮次统计需要指定对话".into());
         }
         if self
             .agent
@@ -94,10 +121,16 @@ pub struct Totals {
     main_usd: f64,
     subagent_usd: f64,
     unpriced_requests: usize,
+    #[serde(default)]
+    subagent_unpriced_requests: usize,
     estimated_requests: usize,
+    #[serde(default)]
+    subagent_input: u64,
+    #[serde(default)]
+    subagent_output: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Consumption {
     totals: Totals,
@@ -171,6 +204,22 @@ pub struct Row {
     service_tier: Option<String>,
     is_subagent: bool,
     source_title: String,
+    #[serde(default)]
+    round_number: Option<usize>,
+    #[serde(default)]
+    completed_at: Option<i64>,
+    #[serde(default)]
+    status: Option<String>,
+    model_totals: Vec<ModelTotals>,
+    partial: bool,
+    usage_recorded: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTotals {
+    model: String,
+    totals: Totals,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -178,6 +227,7 @@ pub struct Row {
 pub struct Trend {
     at: i64,
     totals: Totals,
+    model_totals: Vec<ModelTotals>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -199,6 +249,9 @@ pub struct Report {
     projects: Vec<Choice>,
     models: Vec<String>,
     total_rows: usize,
+    model_totals: Vec<ModelTotals>,
+    #[serde(default)]
+    indexed: bool,
 }
 
 #[derive(Clone)]
@@ -210,29 +263,39 @@ struct Thread {
     parent: Option<String>,
 }
 
-type Signature = Vec<(String, String)>;
-fn signature(home: &Path, id: &str, path: &Path) -> Result<Signature, String> {
+pub(crate) type Signature = Vec<(String, String)>;
+pub(crate) fn signature(home: &Path, id: &str, path: &Path) -> Result<Signature, String> {
+    if let Some(signature) = metrics::analysis::cached_signature(home, id, path) {
+        return Ok(signature);
+    }
     let paths = crate::preview::metrics_segments(home, id, path)?;
     paths
         .into_iter()
         .map(|(p, _)| {
             let log = rollout_log::open(&p).map_err(|e| e.to_string())?;
-            Ok((p.to_string_lossy().into_owned(), format!("{:?}", log.stamp)))
+            Ok((
+                p.to_string_lossy().into_owned(),
+                format!("usage-v3:{:?}", log.stamp),
+            ))
         })
         .collect()
 }
-fn unchanged(saved: &str, root: &Path) -> bool {
+pub(super) fn unchanged(saved: &str, root: &Path) -> bool {
     let Ok(stamps) = serde_json::from_str::<Signature>(saved) else {
         return false;
     };
     stamps.last().is_some_and(|(p, _)| {
         rollout_log::logical_path(Path::new(p)) == rollout_log::logical_path(root)
     }) && stamps.iter().all(|(p, stamp)| {
-        rollout_log::open(Path::new(p)).is_ok_and(|log| format!("{:?}", log.stamp) == *stamp)
+        rollout_log::open(Path::new(p))
+            .is_ok_and(|log| format!("usage-v3:{:?}", log.stamp) == *stamp)
     })
 }
 
-fn candidates(home: &Path, query: &Query) -> Result<Vec<(String, String, String, String)>, String> {
+pub(super) fn candidates(
+    home: &Path,
+    query: &Query,
+) -> Result<Vec<(String, String, String, String)>, String> {
     if let Some(ranges) = &query.ranges {
         let mut result = BTreeMap::new();
         for range in ranges {
@@ -255,12 +318,19 @@ fn candidates(home: &Path, query: &Query) -> Result<Vec<(String, String, String,
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|e| e.to_string())?;
-    let mut statement=catalog.prepare("SELECT id,title,rollout_path,COALESCE(thread_source,'') FROM threads WHERE COALESCE(thread_source,'') != 'guardian_review' AND (?1 IS NULL OR updated_at>=?1) AND (?2 IS NULL OR created_at<?2) ORDER BY updated_at DESC").map_err(|e|e.to_string())?;
+    let title = crate::source::thread_title_expression(&catalog)?;
+    let mut statement=catalog.prepare(&format!("SELECT id,{title},rollout_path,COALESCE(thread_source,'') FROM threads WHERE COALESCE(thread_source,'') != 'guardian_review' AND (?1 IS NULL OR updated_at>=?1) AND (?2 IS NULL OR created_at<?2) ORDER BY updated_at DESC")).map_err(|e|e.to_string())?;
     let threads = statement
         .query_map(
             params![
-                query.from.map(|n| n.div_euclid(1000)),
-                query.to.map(|n| n.saturating_add(999).div_euclid(1000))
+                query
+                    .from
+                    .filter(|_| query.thread_ids.is_none())
+                    .map(|n| n.div_euclid(1000)),
+                query
+                    .to
+                    .filter(|_| query.thread_ids.is_none())
+                    .map(|n| n.saturating_add(999).div_euclid(1000))
             ],
             |r| {
                 Ok((
@@ -283,12 +353,36 @@ pub fn index(
     query: &Query,
     progress: impl Fn(usize, usize),
 ) -> Result<(), String> {
+    let identity = super::context::identity(home)?;
+    let key = serde_json::to_string(&(
+        "usage-v3",
+        &identity,
+        query.from,
+        query.to,
+        &query.ranges,
+        &query.thread_ids,
+    ))
+    .map_err(|e| e.to_string())?;
+    super::context::share(key, || {
+        index_shared(home, snapshot, query, progress, &identity)
+    })
+}
+
+fn index_shared(
+    home: &Path,
+    snapshot: Option<&SourceSnapshot>,
+    query: &Query,
+    progress: impl Fn(usize, usize),
+    identity: &str,
+) -> Result<(), String> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = LOCK
         .get_or_init(Default::default)
         .lock()
         .map_err(|_| "消耗索引锁已损坏")?;
-    let identity = super::context::identity(home)?;
+    if super::context::identity(home)? != identity {
+        return Err("账号或日志来源已切换，停止旧索引".into());
+    }
     let threads: Vec<_> = candidates(home, query)?
         .into_iter()
         .filter(|(id, _, path, _)| {
@@ -319,6 +413,7 @@ pub fn index(
         db.execute("INSERT INTO usage_threads(id,signature,title,project_id,project) VALUES(?1,'',?2,?3,?4) ON CONFLICT(id) DO UPDATE SET title=excluded.title,project_id=excluded.project_id,project=excluded.project WHERE title IS NOT excluded.title OR project_id IS NOT excluded.project_id OR project IS NOT excluded.project",params![chat.id,chat.title,chat.project_id,name]).map_err(|e|e.to_string())?;
     }
     db.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+    let mut complete = true;
     for (index, (id, title, path, kind)) in threads.iter().enumerate() {
         if super::context::identity(home)? != identity {
             return Err("账号或日志来源已切换，停止旧索引".into());
@@ -358,12 +453,15 @@ pub fn index(
         let result = (|| {
             let stamp = signature(home, id, Path::new(path))?;
             let data = metrics::read_own(home, id)?;
-            let stable = stamp == signature(home, id, Path::new(path))?;
+            let stable = data.usage_complete && stamp == signature(home, id, Path::new(path))?;
+            complete &= stable;
             if super::context::identity(home)? != identity {
                 return Err("账号或日志来源已切换，停止旧索引".into());
             }
             let mut issues = data.warnings.clone();
-            if !stable {
+            if !data.usage_complete {
+                issues.push("日志存在未完整或损坏记录，保留已有缓存".into());
+            } else if !stable {
                 issues.push("读取期间日志有更新，下次刷新重试".into());
             }
             if data.turns.iter().all(|t| t.requests.is_empty()) {
@@ -420,7 +518,31 @@ pub fn index(
             return Err("账号或日志来源已切换，停止旧索引".into());
         }
         if let Err(error) = result {
+            complete = false;
             db.execute("INSERT INTO usage_threads(id,signature,title,project_id,project,error) VALUES(?1,'',?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET signature='',error=excluded.error",params![id,title,project_id,project,error]).map_err(|e|e.to_string())?;
+        }
+    }
+    if complete && query.thread_ids.is_none() {
+        for range in query.ranges.clone().unwrap_or_else(|| {
+            vec![Range {
+                from: query.from.unwrap_or(i64::MIN),
+                to: query.to,
+            }]
+        }) {
+            let from = if query.ranges.is_none() {
+                query.from
+            } else {
+                Some(range.from)
+            };
+            db.execute(
+                "INSERT OR REPLACE INTO usage_indexed_ranges VALUES(?1,?2,?3)",
+                params![
+                    serde_json::to_string(&(from, range.to)).map_err(|e| e.to_string())?,
+                    from,
+                    range.to
+                ],
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     // Keep previously indexed usage outside this range for later lazy-loaded periods.
@@ -436,6 +558,8 @@ fn add(total: &mut Totals, entry: &Entry, child: bool) {
     total.requests += 1;
     if child {
         total.subagent_requests += 1;
+        total.subagent_input += entry.input;
+        total.subagent_output += entry.output;
     }
     if entry.tier.is_none() || entry.writes.is_none() || entry.writes.unwrap_or(0) > 0 {
         total.estimated_requests += 1;
@@ -456,19 +580,64 @@ fn add(total: &mut Totals, entry: &Entry, child: bool) {
                 total.main_usd += cost;
             }
         }
-        None => total.unpriced_requests += 1,
+        None => {
+            total.unpriced_requests += 1;
+            if child {
+                total.subagent_unpriced_requests += 1;
+            }
+        }
     }
+}
+
+pub(crate) mod rounds;
+
+fn sync_titles(home: &Path, db: &Connection) -> Result<(), String> {
+    let path = home.join("state_5.sqlite");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let catalog = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    let title = crate::source::thread_title_expression(&catalog)?;
+    let mut statement = catalog
+        .prepare(&format!("SELECT id,{title} FROM threads"))
+        .map_err(|e| e.to_string())?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+    {
+        let (id, title) = row.map_err(|e| e.to_string())?;
+        db.execute(
+            "UPDATE usage_threads SET title=?2 WHERE id=?1 AND title IS NOT ?2",
+            params![id, title],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn report(home: &Path, query: Query) -> Result<Report, String> {
     query.validate()?;
     let offset = query.timezone_minutes.unwrap_or(480);
     let group = query.group.as_deref().unwrap_or("day");
+    let round_details = if group == "round" {
+        Some(rounds::read(
+            home,
+            query.source_thread_id.as_deref().unwrap(),
+        )?)
+    } else {
+        None
+    };
     let db = database(home)?;
     db.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+    // Refresh labels before checking cached reports; token rows do not need reparsing.
+    sync_titles(home, &db)?;
     let key = format!(
-        "details-v3|{}|{}",
+        "details-v7|{}:{}|{}",
         pricing::PRICE_DATE,
+        pricing::POLICY_VERSION,
         serde_json::to_string(&query).map_err(|e| e.to_string())?
     );
     let metadata: i64 = db
@@ -479,7 +648,12 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
     let days = db.prepare("SELECT day,revision FROM usage_days WHERE day=-1 OR ((?1 IS NULL OR day>=?1) AND (?2 IS NULL OR day<=?2)) ORDER BY day")
         .map_err(|e|e.to_string())?.query_map(params![query.from.map(|v|v.div_euclid(86400000)),query.to.map(|v|v.saturating_sub(1).div_euclid(86400000))], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))
         .map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    let stamp = format!("{metadata}|{days:?}");
+    let stamp = format!(
+        "{metadata}|{days:?}|{}",
+        round_details
+            .as_ref()
+            .map_or("", |(_, stamp)| stamp.as_str())
+    );
     let cached: Option<String> = db
         .query_row(
             "SELECT data FROM usage_reports WHERE key=?1 AND stamp=?2",
@@ -488,7 +662,8 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    if let Some(report) = cached.and_then(|s| serde_json::from_str(&s).ok()) {
+    if let Some(mut report) = cached.and_then(|s| serde_json::from_str::<Report>(&s).ok()) {
+        report.indexed = covered(&db, &query)?;
         return Ok(report);
     }
     let mut statement = db
@@ -536,18 +711,16 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
     let mut per_group: HashMap<String, HashSet<String>> = HashMap::new();
     let mut trend: BTreeMap<i64, Totals> = BTreeMap::new();
     let mut trend_conversations: HashMap<i64, HashSet<String>> = HashMap::new();
+    let mut model_totals: BTreeMap<String, Totals> = BTreeMap::new();
+    let mut row_models: HashMap<String, BTreeMap<String, Totals>> = HashMap::new();
+    let mut trend_models: HashMap<i64, BTreeMap<String, Totals>> = HashMap::new();
+    let mut model_chats: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut row_model_chats: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    let mut trend_model_chats: HashMap<(i64, String), HashSet<String>> = HashMap::new();
     let mut projects = BTreeMap::new();
     let mut models = std::collections::BTreeSet::new();
     let search = query.search.as_deref().unwrap_or("").trim().to_lowercase();
-    let bucket = if query
-        .from
-        .zip(query.to)
-        .is_some_and(|(from, to)| to.saturating_sub(from) <= 2 * 86400000)
-    {
-        3600000
-    } else {
-        86400000
-    };
+    let bucket = 86400000;
     let shift = i64::from(offset) * 60000;
     let undated = db
         .query_row(
@@ -572,13 +745,7 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
         .map_err(|e| e.to_string())?
     {
         let (id, at, data, response_id) = item.map_err(|e| e.to_string())?;
-        if query.ranges.as_ref().is_some_and(|ranges| {
-            !at.is_some_and(|at| {
-                ranges
-                    .iter()
-                    .any(|r| at >= r.from && r.to.is_none_or(|to| at < to))
-            })
-        }) {
+        if !query.contains(at) {
             continue;
         }
         let Some(thread) = threads.get(&id) else {
@@ -614,14 +781,25 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
                 .as_deref()
                 .is_some_and(|v| (v == "subagent") != child)
             || (!search.is_empty()
-                && !format!("{} {} {}", root.title, root.project, model)
+                && !format!("{} {} {} {}", root.title, thread.title, root.project, model)
                     .to_lowercase()
                     .contains(&search))
         {
             continue;
         }
+        let round = round_details.as_ref().and_then(|(details, _)| {
+            details
+                .requests
+                .get(&response_id)
+                .and_then(|index| details.rounds.get(*index))
+                .filter(|round| !round.prompt.is_empty())
+        });
         let key = match group {
             "chat" => root.id.clone(),
+            "round" => format!(
+                "{id}/{}",
+                round.map_or("unknown".into(), |r| r.number.to_string())
+            ),
             "project" => root.project_id.clone(),
             "model" => model.to_string(),
             "agent" => id.clone(),
@@ -638,6 +816,7 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
         };
         let label = match group {
             "chat" => root.title.clone(),
+            "round" => round.map_or_else(|| "轮次未识别".into(), |r| r.prompt.clone()),
             "project" => root.project.clone(),
             "model" => model.to_string(),
             "agent" => thread.title.clone(),
@@ -650,7 +829,7 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
             project: root.project.clone(),
             models: vec![],
             totals: Totals::default(),
-            thread_id: matches!(group, "chat" | "agent" | "request").then(|| {
+            thread_id: matches!(group, "chat" | "agent" | "request" | "round").then(|| {
                 if group == "chat" {
                     root.id.clone()
                 } else {
@@ -658,12 +837,31 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
                 }
             }),
             project_id: root.project_id.clone(),
-            at,
+            at: if group == "round" {
+                round.and_then(|r| r.started_at)
+            } else {
+                at
+            },
             service_tier: matches!(group, "request")
                 .then(|| entry.tier.clone())
                 .flatten(),
-            is_subagent: matches!(group, "agent" | "request") && child,
+            is_subagent: if group == "chat" {
+                root.parent.is_some()
+            } else {
+                matches!(group, "agent" | "request" | "round") && child
+            },
             source_title: thread.title.clone(),
+            round_number: round.map(|r| r.number),
+            completed_at: round.and_then(|r| r.completed_at),
+            status: round.map(|r| r.status.clone()),
+            model_totals: vec![],
+            partial: round.is_some_and(|r| {
+                !query.contains(r.started_at)
+                    || r.completed_at
+                        .is_some_and(|at| !query.contains(Some(at.saturating_sub(1))))
+                    || r.request_times.iter().any(|at| !query.contains(*at))
+            }),
+            usage_recorded: true,
         });
         if let Some(model) = &entry.model {
             if !row.models.contains(model) {
@@ -672,9 +870,40 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
         }
         add(&mut row.totals, &entry, child);
         add(&mut totals, &entry, child);
+        let model_total = model_totals.entry(model.into()).or_default();
+        add(model_total, &entry, child);
+        model_total.conversations = {
+            let ids = model_chats.entry(model.into()).or_default();
+            ids.insert(root.id.clone());
+            ids.len()
+        };
+        let row_total = row_models
+            .entry(key.clone())
+            .or_default()
+            .entry(model.into())
+            .or_default();
+        add(row_total, &entry, child);
+        row_total.conversations = {
+            let ids = row_model_chats
+                .entry((key.clone(), model.into()))
+                .or_default();
+            ids.insert(root.id.clone());
+            ids.len()
+        };
         if let Some(at) = at {
             let at = (at + shift).div_euclid(bucket) * bucket - shift;
             add(trend.entry(at).or_default(), &entry, child);
+            let model_total = trend_models
+                .entry(at)
+                .or_default()
+                .entry(model.into())
+                .or_default();
+            add(model_total, &entry, child);
+            model_total.conversations = {
+                let ids = trend_model_chats.entry((at, model.into())).or_default();
+                ids.insert(root.id.clone());
+                ids.len()
+            };
             trend_conversations
                 .entry(at)
                 .or_default()
@@ -683,12 +912,61 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
         conversations.insert(root.id.clone());
         per_group.entry(key).or_default().insert(root.id.clone());
     }
+    if let Some((details, _)) = &round_details {
+        let id = query.source_thread_id.as_deref().unwrap();
+        if let Some(thread) = threads.get(id).filter(|thread| {
+            query
+                .project_id
+                .as_ref()
+                .is_none_or(|project| project == &thread.project_id)
+                && query.thread_id.as_ref().is_none_or(|root| root == id)
+                && query
+                    .agent
+                    .as_deref()
+                    .is_none_or(|role| (role == "subagent") == thread.parent.is_some())
+                && (search.is_empty()
+                    || format!("{} {}", thread.title, thread.project)
+                        .to_lowercase()
+                        .contains(&search))
+        }) {
+            for round in details.rounds.iter().filter(|r| {
+                !r.prompt.is_empty() && r.started_at.is_some_and(|at| query.contains(Some(at)))
+            }) {
+                let key = format!("{id}/{}", round.number);
+                rows.entry(key.clone()).or_insert_with(|| Row {
+                    key,
+                    label: round.prompt.clone(),
+                    project: thread.project.clone(),
+                    models: vec![],
+                    totals: Totals::default(),
+                    thread_id: Some(id.into()),
+                    project_id: thread.project_id.clone(),
+                    at: round.started_at,
+                    service_tier: None,
+                    is_subagent: thread.parent.is_some(),
+                    source_title: thread.title.clone(),
+                    round_number: Some(round.number),
+                    completed_at: round.completed_at,
+                    status: Some(round.status.clone()),
+                    model_totals: vec![],
+                    partial: round.request_times.iter().any(|at| !query.contains(*at))
+                        || round
+                            .completed_at
+                            .is_some_and(|at| !query.contains(Some(at.saturating_sub(1)))),
+                    usage_recorded: round.request_times.iter().any(|at| query.contains(*at)),
+                });
+            }
+        }
+    }
     totals.conversations = conversations.len();
     let mut rows: Vec<_> = rows.into_values().collect();
     for row in &mut rows {
         row.totals.conversations = per_group.get(&row.key).map_or(0, HashSet::len);
+        row.model_totals = model_rows(row_models.remove(&row.key).unwrap_or_default());
     }
-    if group == "request" {
+    if group == "round" {
+        rows.sort_by(|a, b| b.round_number.cmp(&a.round_number));
+    } else if group == "request" {
         rows.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.key.cmp(&b.key)));
     } else if group == "day" {
         rows.sort_by(|a, b| b.key.cmp(&a.key));
@@ -711,11 +989,17 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
         price_date: pricing::PRICE_DATE.into(),
         price_url: pricing::PRICE_URL.into(),
         total_rows,
+        model_totals: model_rows(model_totals),
+        indexed: covered(&db, &query)?,
         trend: trend
             .into_iter()
             .map(|(at, mut totals)| {
                 totals.conversations = trend_conversations.get(&at).map_or(0, HashSet::len);
-                Trend { at, totals }
+                Trend {
+                    at,
+                    totals,
+                    model_totals: model_rows(trend_models.remove(&at).unwrap_or_default()),
+                }
             })
             .collect(),
         projects: projects
@@ -735,6 +1019,46 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(report)
+}
+
+fn model_rows(models: BTreeMap<String, Totals>) -> Vec<ModelTotals> {
+    models
+        .into_iter()
+        .map(|(model, totals)| ModelTotals { model, totals })
+        .collect()
+}
+
+fn covered(db: &Connection, query: &Query) -> Result<bool, String> {
+    let mut statement = db
+        .prepare("SELECT from_at,to_at FROM usage_indexed_ranges")
+        .map_err(|e| e.to_string())?;
+    let mut saved = statement
+        .query_map([], |r| {
+            Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let ranges = query
+        .ranges
+        .as_ref()
+        .map(|rs| rs.iter().map(|r| (Some(r.from), r.to)).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![(query.from, query.to)]);
+    saved.sort_by_key(|(from, _)| from.unwrap_or(i64::MIN));
+    Ok(ranges.iter().all(|(from, to)| {
+        let mut cursor = from.unwrap_or(i64::MIN);
+        let end = to.unwrap_or(i64::MAX);
+        for (old_from, old_to) in &saved {
+            if old_from.unwrap_or(i64::MIN) > cursor {
+                break;
+            }
+            cursor = cursor.max(old_to.unwrap_or(i64::MAX));
+            if cursor >= end {
+                return true;
+            }
+        }
+        false
+    }))
 }
 
 fn save_request(
@@ -797,7 +1121,250 @@ pub fn reuse(home: &Path, data: &metrics::ChatMetrics) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zero_rated_requests_keep_tokens_roles_and_invalidate_old_price_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::context::confirm(dir.path(), Some("test")).unwrap();
+        let db = database(dir.path()).unwrap();
+        db.execute_batch("INSERT INTO usage_threads VALUES('main','','Main','','Project',NULL,NULL); INSERT INTO usage_threads VALUES('child','','Child','','Project','main',NULL);").unwrap();
+        for (i, model) in [
+            None,
+            Some("gpt-reserve"),
+            Some("codex-auto-review"),
+            Some("gpt-5.3-codex-spark"),
+            Some("gpt-6.1-sol"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let entry = Entry {
+                model: model.map(str::to_owned),
+                tier: Some("default".into()),
+                input: 100,
+                cached: 90,
+                output: 10,
+                reasoning: Some(0),
+                writes: Some(0),
+            };
+            db.execute(
+                "INSERT INTO usage_requests VALUES(?1,?2,?3,?4)",
+                params![
+                    if i % 2 == 0 { "main" } else { "child" },
+                    format!("request-{i}"),
+                    1000 + i as i64,
+                    serde_json::to_string(&entry).unwrap()
+                ],
+            )
+            .unwrap();
+        }
+        let query = Query::default();
+        let first = report(dir.path(), query.clone()).unwrap();
+        let mut old = serde_json::to_value(&first).unwrap();
+        old["totals"]["unpricedRequests"] = serde_json::json!(4);
+        let stamp: String = db
+            .query_row("SELECT stamp FROM usage_reports LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        db.execute("DELETE FROM usage_reports", []).unwrap();
+        let old_key = format!(
+            "details-v7|{}|{}",
+            pricing::PRICE_DATE,
+            serde_json::to_string(&query).unwrap()
+        );
+        db.execute(
+            "INSERT INTO usage_reports VALUES(?1,?2,?3)",
+            params![old_key, stamp, old.to_string()],
+        )
+        .unwrap();
+        let priced = serde_json::to_value(report(dir.path(), query).unwrap()).unwrap();
+        assert_eq!(priced["totals"]["unpricedRequests"], 0);
+        assert_eq!(priced["totals"]["requests"], 5);
+        assert_eq!(priced["totals"]["input"], 500);
+        assert_eq!(priced["totals"]["output"], 50);
+        assert_eq!(priced["totals"]["subagentRequests"], 2);
+        assert!(priced["totals"]["costUsd"].as_f64().unwrap() > 0.0);
+        assert_eq!(priced["totals"]["subagentUsd"], 0.0);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM usage_requests", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM usage_reports", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn adjacent_indexed_ranges_cover_a_merged_period_without_a_new_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::context::confirm(dir.path(), Some("test")).unwrap();
+        let db = super::database(dir.path()).unwrap();
+        db.execute(
+            "INSERT INTO usage_indexed_ranges(from_at,to_at) VALUES(10,20),(20,30)",
+            [],
+        )
+        .unwrap();
+        let query = super::Query {
+            from: Some(10),
+            to: Some(30),
+            ..Default::default()
+        };
+        assert!(super::covered(&db, &query).unwrap());
+        db.execute(
+            "UPDATE usage_indexed_ranges SET to_at=19 WHERE from_at=10",
+            [],
+        )
+        .unwrap();
+        assert!(!super::covered(&db, &query).unwrap());
+    }
     use super::*;
+
+    #[test]
+    fn legacy_rounds_keep_empty_questions_partial_usage_and_unknown_requests_reconciled() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        super::super::context::confirm(home, Some("test-account")).unwrap();
+        let catalog = Connection::open(home.join("state_5.sqlite")).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,rollout_path TEXT,created_at INTEGER,updated_at INTEGER,thread_source TEXT,cwd TEXT,model TEXT,archived INTEGER DEFAULT 0);").unwrap();
+        let main = home.join("main.jsonl");
+        let child = home.join("child.jsonl");
+        for (id, path, kind) in [("main", &main, "user"), ("child", &child, "subagent")] {
+            catalog.execute("INSERT INTO threads(id,title,rollout_path,created_at,updated_at,thread_source) VALUES(?1,?1,?2,0,10,?3)",params![id,path.to_string_lossy(),kind]).unwrap();
+        }
+        let old = |at: &str, total: u64, last: u64| {
+            json!({"type":"event_msg","timestamp":at,"payload":{"type":"token_count","info":{
+            "total_token_usage":{"input_tokens":total,"cached_input_tokens":total/2,"output_tokens":total/10},
+            "last_token_usage":{"input_tokens":last,"cached_input_tokens":last/2,"output_tokens":last/10}}}})
+        };
+        let records = vec![
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            json!({"timestamp":"1970-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}),
+            json!({"type":"turn_context","payload":{"turn_id":"one","model":"gpt-6.1-sol"}}),
+            json!({"timestamp":"1970-01-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"First question"}}),
+            old("1970-01-01T00:00:01Z", 100, 100),
+            old("1970-01-01T00:00:02Z", 300, 200),
+            json!({"timestamp":"1970-01-01T00:00:02.100Z","type":"token_usage_record","payload":{"turn_id":"unseen","response_id":"unmapped","usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":5}}}),
+            json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"one"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"resume"}}),
+            json!({"type":"turn_context","payload":{"turn_id":"resume","model":"gpt-6.1-sol"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"继续"}}),
+            json!({"timestamp":"1970-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"resume"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"two"}}),
+            json!({"timestamp":"1970-01-01T00:00:03.500Z","type":"event_msg","payload":{"type":"user_message","message":"Question without recorded usage"}}),
+            json!({"timestamp":"1970-01-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"two"}}),
+        ];
+        let text = records.iter().map(|v| format!("{v}\n")).collect::<String>();
+        std::fs::write(
+            main.with_extension("jsonl.zst"),
+            zstd::stream::encode_all(text.as_bytes(), 1).unwrap(),
+        )
+        .unwrap();
+        let records = [
+            json!({"type":"session_meta","payload":{"id":"child","thread_source":"subagent","parent_thread_id":"main"}}),
+            json!({"type":"turn_context","payload":{"turn_id":"worker","model":"gpt-6-astra"}}),
+            json!({"timestamp":"1970-01-01T00:00:02.200Z","type":"token_usage_record","payload":{"turn_id":"worker","response_id":"child-request","usage":{"input_tokens":900,"cached_input_tokens":450,"output_tokens":90}}}),
+        ];
+        std::fs::write(
+            child,
+            records.iter().map(|v| format!("{v}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let query = Query {
+            from: Some(1500),
+            to: Some(4500),
+            timezone_minutes: Some(0),
+            group: Some("chat".into()),
+            ..Default::default()
+        };
+        index(home, None, &query, |_, _| {}).unwrap();
+        let family = report(home, query.clone()).unwrap();
+        assert_eq!(family.totals.input, 1150);
+        assert_eq!(family.totals.cached, 550);
+        assert_eq!(
+            family
+                .model_totals
+                .iter()
+                .map(|m| m.totals.input)
+                .sum::<u64>(),
+            1150
+        );
+        assert_eq!(
+            family.rows[0]
+                .model_totals
+                .iter()
+                .map(|m| m.totals.input)
+                .sum::<u64>(),
+            1150
+        );
+        assert_eq!(
+            family.trend.len(),
+            1,
+            "all requests belong to one local natural day"
+        );
+        assert_eq!(
+            family.trend[0]
+                .model_totals
+                .iter()
+                .map(|m| m.totals.input)
+                .sum::<u64>(),
+            1150
+        );
+        assert_eq!(
+            family.totals.unpriced_requests, 0,
+            "missing-model usage remains counted and follows the explicit zero-price policy"
+        );
+        let own = report(
+            home,
+            Query {
+                group: Some("round".into()),
+                thread_id: Some("main".into()),
+                source_thread_id: Some("main".into()),
+                agent: Some("main".into()),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(own.totals.input, 250);
+        assert_eq!(
+            own.rows.iter().map(|r| r.totals.input).sum::<u64>(),
+            own.totals.input
+        );
+        let first = own
+            .rows
+            .iter()
+            .find(|r| r.label == "First question")
+            .unwrap();
+        assert_eq!(
+            first.totals.input, 200,
+            "legacy request inherits the same technical turn as conversation details"
+        );
+        assert!(first.partial);
+        let empty = own
+            .rows
+            .iter()
+            .find(|r| r.label == "Question without recorded usage")
+            .unwrap();
+        assert!(!empty.usage_recorded);
+        let unknown = own.rows.iter().find(|r| r.round_number.is_none()).unwrap();
+        assert_eq!(
+            unknown.totals.input, 50,
+            "unmapped requests stay in the reconciliation total"
+        );
+        let agents = report(
+            home,
+            Query {
+                group: Some("agent".into()),
+                agent: Some("subagent".into()),
+                ..query
+            },
+        )
+        .unwrap();
+        assert_eq!(agents.totals.input, 900);
+        assert_eq!(own.totals.input + agents.totals.input, family.totals.input);
+    }
 
     #[test]
     fn chat_consumption_keeps_settled_usage_without_timing_and_excludes_inheritance() {
@@ -1139,6 +1706,55 @@ mod tests {
         );
     }
     #[test]
+    fn current_names_replace_prompt_titles_and_invalidate_cached_reports_without_log_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::context::confirm(dir.path(), Some("title-test")).unwrap();
+        let catalog = Connection::open(dir.path().join("state_5.sqlite")).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,name TEXT,rollout_path TEXT,created_at INTEGER,updated_at INTEGER,thread_source TEXT);
+          INSERT INTO threads VALUES('main','First user message','Actual chat title','missing.jsonl',1,2,'user');").unwrap();
+        assert_eq!(
+            candidates(dir.path(), &Query::default()).unwrap()[0].1,
+            "Actual chat title"
+        );
+        let db = database(dir.path()).unwrap();
+        db.execute("INSERT INTO usage_threads VALUES('main','','First user message','p','Project',NULL,NULL)", []).unwrap();
+        let entry = Entry {
+            model: Some("gpt-5.4".into()),
+            tier: None,
+            input: 100,
+            cached: 90,
+            output: 20,
+            reasoning: Some(5),
+            writes: None,
+        };
+        db.execute(
+            "INSERT INTO usage_requests VALUES('main','one',1000,?1)",
+            [serde_json::to_string(&entry).unwrap()],
+        )
+        .unwrap();
+        let query = Query {
+            group: Some("chat".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            report(dir.path(), query.clone()).unwrap().rows[0].label,
+            "Actual chat title"
+        );
+        catalog
+            .execute("UPDATE threads SET name='Renamed chat'", [])
+            .unwrap();
+        let renamed = report(dir.path(), query.clone()).unwrap();
+        assert_eq!(renamed.rows[0].label, "Renamed chat");
+        assert_eq!(renamed.totals.input, 100);
+        catalog
+            .execute("UPDATE threads SET name='   '", [])
+            .unwrap();
+        assert_eq!(
+            report(dir.path(), query).unwrap().rows[0].label,
+            "First user message"
+        );
+    }
+    #[test]
     fn indexes_only_the_selected_period_until_all_is_requested() {
         let dir = tempfile::tempdir().unwrap();
         super::super::context::confirm(dir.path(), Some("test-account")).unwrap();
@@ -1278,6 +1894,335 @@ mod tests {
         }
     }
     #[test]
+    fn question_rounds_are_lazy_cached_filtered_and_refreshed_after_compressed_log_changes() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        super::super::context::confirm(dir.path(), Some("test-account")).unwrap();
+        let catalog = Connection::open(dir.path().join("state_5.sqlite")).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,rollout_path TEXT,created_at INTEGER,updated_at INTEGER,thread_source TEXT,cwd TEXT,model TEXT,archived INTEGER DEFAULT 0);").unwrap();
+        let path = dir.path().join("main.jsonl");
+        catalog
+            .execute(
+                "INSERT INTO threads(id,title,rollout_path,created_at,updated_at,thread_source) VALUES('main','Main title',?1,0,10,'user')",
+                [path.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        let mut records = vec![
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}),
+            json!({"timestamp":"1970-01-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"First question"}}),
+            json!({"type":"token_usage_record","payload":{"turn_id":"one","response_id":"a"}}),
+            json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"one"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"resume"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"Continue"}}),
+            json!({"type":"token_usage_record","payload":{"turn_id":"resume","response_id":"b"}}),
+            json!({"timestamp":"1970-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"resume"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"two"}}),
+            json!({"timestamp":"1970-01-01T00:00:03.500Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Second question"}]}}),
+            json!({"type":"token_usage_record","payload":{"turn_id":"two","response_id":"c"}}),
+            json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"two"}}),
+        ];
+        let write_log = |records: &[serde_json::Value]| {
+            let text = records.iter().map(|v| format!("{v}\n")).collect::<String>();
+            std::fs::write(
+                path.with_extension("jsonl.zst"),
+                zstd::stream::encode_all(text.as_bytes(), 1).unwrap(),
+            )
+            .unwrap();
+        };
+        write_log(&records);
+        let db = database(dir.path()).unwrap();
+        for (id, title, parent) in [
+            ("main", "Main title", None),
+            ("child", "Worker title", Some("main")),
+        ] {
+            db.execute(
+                "INSERT INTO usage_threads VALUES(?1,'',?2,'p','Project',?3,NULL)",
+                params![id, title, parent],
+            )
+            .unwrap();
+        }
+        for (id, response, at, input, tier) in [
+            ("main", "a", 1000, 100, "default"),
+            ("main", "b", 2000, 200, "priority"),
+            ("main", "c", 4000, 300, "default"),
+            ("child", "child", 2000, 900, "default"),
+        ] {
+            let entry = Entry {
+                model: Some("gpt-6.1-sol".into()),
+                tier: Some(tier.into()),
+                input,
+                cached: input / 2,
+                output: input / 10,
+                reasoning: Some(input / 20),
+                writes: Some(0),
+            };
+            db.execute(
+                "INSERT INTO usage_requests VALUES(?1,?2,?3,?4)",
+                params![id, response, at, serde_json::to_string(&entry).unwrap()],
+            )
+            .unwrap();
+        }
+        let selection = Query {
+            from: Some(0),
+            to: Some(5000),
+            group: Some("chat".into()),
+            ..Default::default()
+        };
+        let chats = report(dir.path(), selection.clone()).unwrap();
+        assert_eq!(chats.rows.len(), 1);
+        assert!(chats.rows.iter().any(|r| r.label == "Main title"
+            && r.totals.input == 1500
+            && r.totals.subagent_requests == 1));
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM usage_round_details", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "chat grouping only reads the existing usage cache"
+        );
+        let query = Query {
+            group: Some("round".into()),
+            source_thread_id: Some("main".into()),
+            ..selection
+        };
+        let details = report(dir.path(), query.clone()).unwrap();
+        assert_eq!(details.rows.len(), 2);
+        assert_eq!(details.rows[0].round_number, Some(2));
+        assert_eq!(details.rows[0].label, "Second question");
+        assert_eq!(details.rows[0].status.as_deref(), Some("interrupted"));
+        assert_eq!(details.rows[1].label, "First question");
+        assert_eq!(
+            details.rows[1].totals.input, 300,
+            "interrupted and resumed internal turns are one question round"
+        );
+        assert_eq!(details.rows[1].completed_at, Some(3000));
+        assert_eq!(details.totals.input, 600);
+        assert_eq!(details.totals.subagent_requests, 0);
+        assert_eq!(
+            details
+                .rows
+                .iter()
+                .map(|r| r.totals.requests)
+                .sum::<usize>(),
+            3
+        );
+        let selected = report(
+            dir.path(),
+            Query {
+                ranges: Some(vec![
+                    Range {
+                        from: 0,
+                        to: Some(1500),
+                    },
+                    Range {
+                        from: 3500,
+                        to: Some(5000),
+                    },
+                ]),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected.totals.input, 400,
+            "unselected intervals never leak into round totals"
+        );
+        let fast = report(
+            dir.path(),
+            Query {
+                fast_only: Some(true),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fast.rows.len(),
+            2,
+            "a question with no matching filtered usage remains visible"
+        );
+        assert_eq!(fast.rows[1].round_number, Some(1));
+        assert_eq!(fast.totals.input, 200);
+        let (mut saved, _) = rounds::read(dir.path(), "main").unwrap();
+        saved.rounds[0].prompt = "Persisted question".into();
+        db.execute(
+            "UPDATE usage_round_details SET data=?1 WHERE thread_id='main'",
+            [serde_json::to_string(&saved).unwrap()],
+        )
+        .unwrap();
+        drop(db);
+        assert_eq!(
+            rounds::read(dir.path(), "main").unwrap().0.rounds[0].prompt,
+            "Persisted question",
+            "the per-chat boundary cache survives reopening without parsing again"
+        );
+        records[2]["payload"]["message"] = json!("Changed question after compression");
+        write_log(&records);
+        let updated = report(dir.path(), query).unwrap();
+        assert_eq!(
+            updated.rows[1].label, "Changed question after compression",
+            "boundary changes invalidate cached reports even when token usage is unchanged"
+        );
+        assert_eq!(updated.totals.input, 600);
+        assert!(Query {
+            group: Some("round".into()),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn chat_families_and_all_other_groups_share_the_same_role_totals() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::context::confirm(dir.path(), Some("test-account")).unwrap();
+        let db = database(dir.path()).unwrap();
+        for (id, title, parent, model) in [
+            ("main", "Main title", None, "gpt-6.1-sol"),
+            ("worker", "Worker title", Some("main"), "gpt-6.1-sol"),
+            ("leaf", "Nested worker", Some("worker"), "unpriced-model"),
+            ("other", "Other chat", None, "gpt-6.1-sol"),
+            ("orphan", "Unknown parent", Some("missing"), "gpt-6.1-sol"),
+        ] {
+            db.execute(
+                "INSERT INTO usage_threads VALUES(?1,'',?2,'p','Project',?3,NULL)",
+                params![id, title, parent],
+            )
+            .unwrap();
+            let entry = Entry {
+                model: Some(model.into()),
+                tier: Some("default".into()),
+                input: 100000,
+                cached: 90000,
+                output: 1000,
+                reasoning: Some(500),
+                writes: Some(0),
+            };
+            db.execute(
+                "INSERT INTO usage_requests VALUES(?1,'request',1000,?2)",
+                params![id, serde_json::to_string(&entry).unwrap()],
+            )
+            .unwrap();
+        }
+        for group in ["chat", "model", "project", "day"] {
+            let value = report(
+                dir.path(),
+                Query {
+                    group: Some(group.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(value.totals.requests, 5);
+            assert_eq!(value.totals.subagent_requests, 3);
+            assert_eq!(value.totals.unpriced_requests, 1);
+            assert_eq!(value.totals.subagent_unpriced_requests, 1);
+            assert_eq!(
+                value.rows.iter().map(|r| r.totals.input).sum::<u64>(),
+                500000
+            );
+            assert_eq!(
+                value.rows.iter().map(|r| r.totals.requests).sum::<usize>(),
+                5
+            );
+            assert!(
+                (value.totals.main_usd + value.totals.subagent_usd - value.totals.cost_usd).abs()
+                    < 1e-9
+            );
+            assert!(
+                (value.rows.iter().map(|r| r.totals.main_usd).sum::<f64>() - value.totals.main_usd)
+                    .abs()
+                    < 1e-9
+            );
+            assert!(
+                (value
+                    .rows
+                    .iter()
+                    .map(|r| r.totals.subagent_usd)
+                    .sum::<f64>()
+                    - value.totals.subagent_usd)
+                    .abs()
+                    < 1e-9
+            );
+            if group == "chat" {
+                assert_eq!(
+                    value.rows.len(),
+                    3,
+                    "known subagents never appear beside their parent"
+                );
+                let family = value.rows.iter().find(|r| r.key == "main").unwrap();
+                assert_eq!(family.label, "Main title");
+                assert_eq!(family.thread_id.as_deref(), Some("main"));
+                assert_eq!(family.totals.requests, 3);
+                assert_eq!(family.totals.subagent_requests, 2);
+                assert!(!family.is_subagent);
+                assert!(
+                    value
+                        .rows
+                        .iter()
+                        .any(|r| r.key == "orphan" && r.is_subagent),
+                    "unresolved parents do not discard cached usage"
+                );
+            }
+        }
+        let children = report(
+            dir.path(),
+            Query {
+                group: Some("agent".into()),
+                thread_id: Some("main".into()),
+                agent: Some("subagent".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            children.rows.len(),
+            2,
+            "nested subagents are each listed once with their own cost"
+        );
+        assert!(children
+            .rows
+            .iter()
+            .any(|r| r.label == "Worker title" && r.totals.requests == 1));
+        assert!(children
+            .rows
+            .iter()
+            .any(|r| r.label == "Nested worker" && r.totals.unpriced_requests == 1));
+        assert_eq!(children.totals.requests, 2);
+        let own = report(
+            dir.path(),
+            Query {
+                group: Some("chat".into()),
+                thread_id: Some("main".into()),
+                agent: Some("main".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(own.totals.requests, 1);
+        assert_eq!(own.totals.subagent_requests, 0);
+        let selected = report(
+            dir.path(),
+            Query {
+                group: Some("chat".into()),
+                search: Some("Nested worker".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.rows.len(), 1);
+        assert_eq!(selected.rows[0].label, "Main title");
+        assert_eq!(selected.totals.requests, 1);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM usage_round_details", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "these summaries never parse round logs"
+        );
+    }
+
+    #[test]
     fn groups_settled_interrupted_requests_and_children_once() {
         let dir = tempfile::tempdir().unwrap();
         super::super::context::confirm(dir.path(), Some("test-account")).unwrap();
@@ -1312,6 +2257,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].thread_id.as_deref(), Some("main"));
+        assert_eq!(result.rows[0].totals.requests, 2);
         assert_eq!(result.totals.requests, 2);
         assert_eq!(result.totals.conversations, 1);
         assert_eq!(result.totals.subagent_requests, 1);

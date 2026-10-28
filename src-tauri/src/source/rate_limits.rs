@@ -20,6 +20,8 @@ pub struct RateWindow {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RateLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_source: Option<String>,
     #[serde(alias = "limitId")]
     pub limit_id: Option<String>,
     pub primary: Option<RateWindow>,
@@ -122,8 +124,17 @@ pub(super) fn read(thread_id: Option<&str>) -> Result<RateLimits, String> {
         .ok_or_else(|| "没有可用的 MCP 对话上下文".to_string())
         .and_then(crate::codex_app_mcp::read_usage_limits)
         .and_then(|value| parse_limits(&value));
-    mcp.or_else(|mcp_error| {
-        read_cli().map_err(|cli_error| format!("MCP：{mcp_error}；CLI：{cli_error}"))
+    mcp.map(|mut value| {
+        value.observation_source = Some("online-mcp".into());
+        value
+    })
+    .or_else(|mcp_error| {
+        read_cli()
+            .map(|mut value| {
+                value.observation_source = Some("cli-fallback".into());
+                value
+            })
+            .map_err(|cli_error| format!("MCP：{mcp_error}；CLI：{cli_error}"))
     })
 }
 

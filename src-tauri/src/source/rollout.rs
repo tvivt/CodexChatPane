@@ -10,6 +10,8 @@ use std::{
     sync::{Mutex, OnceLock},
     time::SystemTime,
 };
+mod generation;
+pub(crate) use generation::Generation;
 
 // Message text is inspected only while parsing; none is retained or sent to the status UI.
 #[derive(Deserialize)]
@@ -24,10 +26,16 @@ struct Record {
 struct Payload {
     #[serde(rename = "type", default)]
     kind: String,
+    id: Option<String>,
+    thread_id: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    thread_settings: Option<Value>,
     role: Option<String>,
     turn_id: Option<String>,
     call_id: Option<String>,
     response_id: Option<String>,
+    compaction_response_id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,
     item: Option<Value>,
@@ -65,6 +73,7 @@ fn content_has_text(value: &Value) -> bool {
 
 #[derive(Default)]
 struct Cursor {
+    generation: generation::State,
     offset: u64,
     length: u64,
     modified: Option<SystemTime>,
@@ -81,6 +90,8 @@ struct Cursor {
 
 impl Cursor {
     fn apply(&mut self, record: Record) {
+        let own = self.generation.owns(&record);
+        self.generation.apply(&record);
         let payload = record.payload;
         let at = record
             .timestamp
@@ -140,6 +151,11 @@ impl Cursor {
             }
         }
         if record.kind == "compacted" {
+            if own {
+                if let Some(id) = &payload.compaction_response_id {
+                    self.metrics_revision = Some(format!("compaction:{id}"));
+                }
+            }
             if let (Some(activity), Some(at)) = (self.activity.as_mut(), at) {
                 if activity.working {
                     activity.last_response_at = activity.last_response_at.max(at);
@@ -278,6 +294,16 @@ impl Cursor {
             return;
         };
         let working = payload.kind == "task_started";
+        if working
+            && self.activity.as_ref().is_some_and(|activity| {
+                self.pending_message && started_at < activity.last_user_message_at
+                    || !activity.working
+                        && self.turn_id == payload.turn_id
+                        && started_at <= activity.activity_at
+            })
+        {
+            return;
+        }
         if !working
             && self.pending_message
             && self.activity.as_ref().is_some_and(|activity| {
@@ -385,6 +411,8 @@ impl Cursor {
             self.offset += read as u64;
             if let Ok(record) = serde_json::from_str(&line) {
                 self.apply(record);
+            } else {
+                self.generation.uncertain();
             }
         }
         Ok(())
@@ -394,8 +422,9 @@ impl Cursor {
 pub(super) fn read_rollout_snapshot(
     path: &Path,
     cutoff: Option<i64>,
+    id: &str,
 ) -> Result<Option<ThreadActivity>, String> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cursor>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), Cursor>>> = OnceLock::new();
     let mut log = match rollout_log::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -407,10 +436,13 @@ pub(super) fn read_rollout_snapshot(
         .get_or_init(Default::default)
         .lock()
         .map_err(|error| error.to_string())?;
-    let cursor = cache.entry(rollout_log::logical_path(path)).or_default();
+    let cursor = cache
+        .entry((rollout_log::logical_path(path), id.into()))
+        .or_default();
     if log.compressed {
         if cursor.source.as_ref() != Some(&source) {
             *cursor = Cursor::default();
+            cursor.generation = generation::State::new(id);
             cursor
                 .read(
                     log.reader_at(0).map_err(|error| error.to_string())?,
@@ -432,6 +464,20 @@ pub(super) fn read_rollout_snapshot(
             let mut window = 65536;
             loop {
                 *cursor = Cursor::default();
+                cursor.generation = generation::State::new(id);
+                let mut header = String::new();
+                BufReader::new(
+                    rollout_log::open(path)
+                        .and_then(|log| log.reader_at(0))
+                        .map_err(|e| e.to_string())?,
+                )
+                .read_line(&mut header)
+                .map_err(|e| e.to_string())?;
+                if let Ok(record) = serde_json::from_str::<Record>(&header) {
+                    if record.kind == "session_meta" {
+                        cursor.generation.apply(&record);
+                    }
+                }
                 cursor.offset = length.saturating_sub(window);
                 let file = rollout_log::open(path)
                     .and_then(|log| log.reader_at(cursor.offset))
@@ -474,6 +520,22 @@ pub(super) fn read_rollout_snapshot(
         activity.questions = cursor.questions.clone();
         activity.metrics_revision = cursor.metrics_revision.clone();
         activity.observed = true;
+        let mut generation = cursor.generation.value.clone();
+        let turn = activity.turn_id.clone().unwrap_or_default();
+        if generation.turn_id != turn {
+            generation.config = Default::default();
+        }
+        generation.turn_id = turn;
+        generation.phase = if activity.execution_status.as_deref() == Some("compacting") {
+            "compacting"
+        } else if activity.working {
+            "running"
+        } else {
+            "idle"
+        }
+        .into();
+        generation.at = Some(activity.last_response_at.max(activity.activity_at));
+        activity.generation = Some(generation);
         if activity.working
             && !cutoff.is_some_and(|cutoff| {
                 activity.execution_started_at.unwrap_or(0) >= seconds_or_millis(cutoff)
@@ -491,7 +553,92 @@ pub(super) fn read_rollout_snapshot(
 mod tests {
     use super::*;
     use std::{fs::File, io::Write};
+    fn read_rollout_snapshot(
+        path: &Path,
+        cutoff: Option<i64>,
+    ) -> Result<Option<ThreadActivity>, String> {
+        super::read_rollout_snapshot(path, cutoff, "main")
+    }
 
+    #[test]
+    fn generation_event_time_survives_compression_without_becoming_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.jsonl");
+        std::fs::write(&path,concat!("{\"type\":\"session_meta\",\"payload\":{\"id\":\"main\"}}\n", "{\"type\":\"event_msg\",\"timestamp\":\"2026-10-28T00:00:01Z\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"one\"}}\n", "{\"type\":\"response_item\",\"timestamp\":\"2026-10-28T00:00:02Z\",\"payload\":{\"type\":\"reasoning\",\"summary\":[{\"text\":\"done\"}]}}\n")).unwrap();
+        let first = read_rollout_snapshot(&path, Some(100))
+            .unwrap()
+            .unwrap()
+            .generation
+            .unwrap();
+        let foreign = super::read_rollout_snapshot(&path, Some(100), "fork")
+            .unwrap()
+            .unwrap()
+            .generation
+            .unwrap();
+        assert!(
+            foreign.config.model.is_none(),
+            "a shared physical path cannot reuse another thread's generation state"
+        );
+        crate::rollout_log::compress_fixture(&path);
+        let migrated = read_rollout_snapshot(&path, Some(100))
+            .unwrap()
+            .unwrap()
+            .generation
+            .unwrap();
+        assert_eq!(first.at, migrated.at);
+        assert_eq!(first.phase, migrated.phase);
+        assert_eq!(
+            first.at,
+            super::super::diagnostics::timestamp("2026-10-28T00:00:02Z")
+        );
+    }
+
+    #[test]
+    fn completed_compaction_refreshes_own_samples_without_using_child_events() {
+        let mut cursor = Cursor {
+            generation: generation::State::new("main"),
+            ..Default::default()
+        };
+        for value in [
+            serde_json::json!({"type":"session_meta","payload":{"id":"main"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn","started_at":120}}),
+            serde_json::json!({"type":"token_usage_record","payload":{"turn_id":"turn","response_id":"compact-request"}}),
+            serde_json::json!({"type":"compacted","payload":{"thread_id":"main","compaction_response_id":"compact-request"}}),
+        ] {
+            cursor.apply(serde_json::from_value(value).unwrap());
+        }
+        assert_eq!(
+            cursor.metrics_revision.as_deref(),
+            Some("compaction:compact-request")
+        );
+        cursor.apply(serde_json::from_value(serde_json::json!({"type":"compacted","payload":{"thread_id":"child","compaction_response_id":"foreign"}})).unwrap());
+        assert_eq!(
+            cursor.metrics_revision.as_deref(),
+            Some("compaction:compact-request")
+        );
+        assert!(cursor.activity.as_ref().unwrap().working);
+    }
+    #[test]
+    fn delayed_start_cannot_revive_a_terminal_turn_but_a_real_resume_can() {
+        let mut cursor = Cursor::default();
+        for payload in [
+            serde_json::json!({"type":"task_started","turn_id":"turn","started_at":120}),
+            serde_json::json!({"type":"task_complete","turn_id":"turn","started_at":120,"completed_at":130}),
+            serde_json::json!({"type":"task_started","turn_id":"turn","started_at":120}),
+        ] {
+            cursor.apply(
+                serde_json::from_value(serde_json::json!({"type":"event_msg","payload":payload}))
+                    .unwrap(),
+            );
+        }
+        assert!(!cursor.activity.as_ref().unwrap().working);
+        cursor.apply(serde_json::from_value(serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn","started_at":140}})).unwrap());
+        assert!(cursor.activity.as_ref().unwrap().working);
+        assert_eq!(
+            cursor.activity.as_ref().unwrap().execution_started_at,
+            Some(140000)
+        );
+    }
     #[test]
     fn question_events_follow_answers_across_turns_and_compression() {
         let dir = tempfile::tempdir().unwrap();
