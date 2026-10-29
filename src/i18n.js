@@ -79,6 +79,7 @@ const english = {
   '额度与消耗':'Quota and usage', '点击查看额度与消耗':'Click for quota and usage',
   '额度提前重置':'Quota reset early', '重置时间':'Reset time', '重置记录':'Reset history', '消耗详情':'Usage details',
   '自然重置':'Scheduled reset', '提前重置':'Early reset', '重置卡':'Reset cards', '到期时间未知':'Expiry unknown',
+  '3 天内到期':'Expires within 3 days', '7 天内到期':'Expires within 7 days',
   '部分卡片到期时间未知':'Some card expiry dates are unavailable', '已到期':'Expired', '到期':'Expires', '张':'cards',
   '套餐变化':'Plan changed', '账号变化':'Account changed', '额度周期':'Quota cycle', '统计范围':'Range', '额度类型':'Quota window',
   '最近7天':'Last 7 days', '最近30天':'Last 30 days', '自定义':'Custom', '每日':'Daily', '分组':'Group by',

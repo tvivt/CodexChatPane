@@ -271,6 +271,7 @@ pub fn codex_home() -> Result<PathBuf, String> {
         .ok_or_else(|| "无法确定 Codex home：CODEX_HOME 和 USERPROFILE 均未设置".to_string())
 }
 
+#[cfg(test)]
 pub fn scan() -> Result<SourceSnapshot, String> {
     let home = codex_home()?;
     scan_path(&home.join("state_5.sqlite"), &home)
@@ -299,10 +300,12 @@ pub fn scan_catalog(previous: Option<&SourceSnapshot>) -> Result<SourceSnapshot,
     scan_path_mode(&home.join("state_5.sqlite"), &home, previous, true)
 }
 
+#[cfg(test)]
 fn scan_path(database: &Path, home: &Path) -> Result<SourceSnapshot, String> {
     scan_path_with_previous(database, home, None)
 }
 
+#[cfg(test)]
 fn scan_path_with_previous(
     database: &Path,
     home: &Path,

@@ -49,6 +49,8 @@ codex://threads/new?path=<project-path>
 
 本地只读协议核对：运行忽略的 `codex_app_mcp::tests::live_app_tool_catalog_matches_action_arguments` 检查实际工具名、必填字段及参数类型；`reads_live_usage_limits_over_mcp` 使用已有线程 ID 验证外部完整调用。这两项不更改真实对话。实际写操作仍需单独验证，目录匹配不能替代状态回读。
 
+写操作上下文选择与成功后的状态回读使用 `scan_catalog`，只读目录元数据，不调用扫描全部对话正文的完整读取器。设置 `CODEX_PANE_VERIFY_THREAD` 后可单独运行忽略的 `codex_app_mcp::tests::action_readback_uses_only_metadata`：读取该对话当前归档标记并验证回读，断言 rollout opens/bytes 均为 0，不发送归档或恢复写操作。
+
 写操作默认关闭，需要用户在设置中明确启用。每次执行都会：
 
 1. 重新发现可用的 Codex App MCP 工具。

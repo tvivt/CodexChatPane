@@ -2,6 +2,7 @@
 import { createDynamicStore } from './dynamic.js';
 import { t, ui, setLanguage, language, configureLanguagePersistence } from './i18n.js';
 import {createUsageView, resetCardsTip, createQuotaNoticeView} from './usage.js';
+import {version as appVersion} from '../package.json';
 const nativeInvoke = window.__TAURI__?.core?.invoke;
 const quotaNoticeView = createQuotaNoticeView({invoke:(...args)=>nativeInvoke(...args),element:()=>document.getElementById('quota-reset-notice')});
 const nativeWindow = window.__TAURI__?.window?.getCurrentWindow();
@@ -803,17 +804,27 @@ function quotaMarkup(now = Date.now()) {
   const quota = state.rateLimits;
   if (!quota) return "";
   const windows = [quota.primary, quota.secondary].filter(window => window && [300, 10080].includes(window.window_minutes) && Number.isFinite(window.used_percent) && !(quota.plan_type === 'pro' && window.window_minutes === 300));
-  return windows.map(window => {
+  if (!windows.length) return '';
+  const hasFiveHour = windows.some(window => window.window_minutes === 300);
+  const tips = [];
+  const markup = windows.map(window => {
     const expired = Number.isFinite(window.resets_at) && now >= window.resets_at * 1000;
     const remaining = expired ? "--" : Math.round(Math.max(0, Math.min(100, 100 - window.used_percent)));
     const tone = expired ? 'unknown' : remaining <= 10 ? 'low' : remaining <= 30 ? 'medium' : 'high';
     const label = window.window_minutes === 300 ? '5h' : 'W';
     const resetAt = Number.isFinite(window.resets_at) ? window.resets_at * 1000 : NaN;
     const exact = Number.isFinite(resetAt) ? fullLocalTime(resetAt).slice(0,16) : t('未知');
-    const tip = (Number.isFinite(resetAt) ? `${exact} (-${quotaCountdown(resetAt,now)})` : exact)
-      + '\n\n' + resetCardsTip(quota,now) + '\n' + t('点击查看额度与消耗');
-    return ui`<span class="quota-window ${expired ? 'quota-expired' : ''}" title="${esc(tip)}"><span>${label}</span><span class="quota-ring ${tone}" style="--remaining:${expired ? 0 : remaining}%" role="img" aria-label="${label}: ${remaining}%"></span><span>${remaining}%</span>${window.window_minutes === 300 ? ui`<span class="quota-reset-time">${quotaResetTime(resetAt,300)}</span>` : ''}</span>`;
+    tips.push(`${label}: ${remaining}% · ` + (Number.isFinite(resetAt) ? `${exact} (-${quotaCountdown(resetAt,now)})` : exact));
+    return ui`<span class="quota-window ${expired ? 'quota-expired' : ''}">${window.window_minutes === 300 || hasFiveHour ? `<span>${label}</span>` : ''}<span class="quota-ring ${tone}" style="--remaining:${expired ? 0 : remaining}%" role="img" aria-label="${label}: ${remaining}%"></span><span>${remaining}%</span>${window.window_minutes === 300 ? ui`<span class="quota-reset-time">${quotaResetTime(resetAt,300)}</span>` : ''}</span>`;
   }).join('');
+  const cards = quota.reset_credits;
+  const count = Number.isInteger(cards?.availableCount) && cards.availableCount >= 0 ? cards.availableCount : null;
+  const nearest = Math.min(...(cards?.credits || []).filter(card => card.status === 'available' && Number.isFinite(card.expiresAt) && card.expiresAt * 1000 > now).map(card => card.expiresAt * 1000));
+  const daysLeft = (nearest - now) / 86400000;
+  const urgency = count > 0 && daysLeft <= 3 ? 'urgent' : count > 0 && daysLeft <= 7 ? 'warning' : '';
+  const alert = urgency ? `<span class="quota-card-alert ${urgency}" role="img" aria-label="${t(urgency === 'urgent' ? '3 天内到期' : '7 天内到期')}">${urgency === 'urgent' ? '❗' : '⚠'}</span>` : '';
+  const tip = [...tips, resetCardsTip(quota,now), t('点击查看额度与消耗')].join('\n\n');
+  return `<span class="quota-content" title="${esc(tip)}">${markup}<span class="quota-card-count"><span aria-hidden="true">|</span><span>${count ?? '—'}${alert}</span></span></span>`;
 }
 
 let hoveredChatId = '';
@@ -1442,7 +1453,7 @@ function renderSettingsPane() {
 function renderTitlebar() {
   const modeLabel = {normal:t('普通窗口'),codex:t('随 Codex 显示'),global:t('全局置顶')}[state.windowMode];
   const modeIcon = {normal:'pin-off',codex:'pane',global:'pin'}[state.windowMode];
-  return ui`<header class="window-titlebar" data-window-drag><div class="window-drag">${icon("pane")}<span class="window-name">CodexChatPane</span>${navigationHeader()}</div><button class="icon-button ${state.settingsOpen ? 'active' : ''}" data-action="toggle-settings" title="${t('设置')}" aria-label="${t('设置')}" aria-pressed="${state.settingsOpen}">${icon('settings')}</button><button class="icon-button window-mode-button ${state.windowMode !== 'normal' ? "active" : ""}" data-action="toggle-window-pin" data-tip="${modeLabel}" aria-label="${modeLabel}" aria-pressed="${state.windowMode !== 'normal'}">${icon(modeIcon)}</button><span class="window-controls-separator"></span><button class="icon-button window-control" data-window-action="toggleMaximize" title="${state.windowMaximized ? t("还原") : t("最大化")}" aria-label="${state.windowMaximized ? t("还原") : t("最大化")}">${icon(state.windowMaximized ? "window-restore" : "window-maximize")}</button><button class="icon-button window-control window-close" data-window-action="close" title="关闭" aria-label="关闭窗口">${icon("x")}</button></header>`;
+  return ui`<header class="window-titlebar" data-window-drag><div class="window-drag">${icon("pane")}<span class="window-name">CodexChatPane</span><span class="window-version">v${esc(appVersion)}</span></div><button class="icon-button ${state.settingsOpen ? 'active' : ''}" data-action="toggle-settings" title="${t('设置')}" aria-label="${t('设置')}" aria-pressed="${state.settingsOpen}">${icon('settings')}</button><button class="icon-button window-mode-button ${state.windowMode !== 'normal' ? "active" : ""}" data-action="toggle-window-pin" data-tip="${modeLabel}" aria-label="${modeLabel}" aria-pressed="${state.windowMode !== 'normal'}">${icon(modeIcon)}</button><span class="window-controls-separator"></span><button class="icon-button window-control" data-window-action="toggleMaximize" title="${state.windowMaximized ? t("还原") : t("最大化")}" aria-label="${state.windowMaximized ? t("还原") : t("最大化")}">${icon(state.windowMaximized ? "window-restore" : "window-maximize")}</button><button class="icon-button window-control window-close" data-window-action="close" title="关闭" aria-label="关闭窗口">${icon("x")}</button></header>`;
 }
 
 async function syncWindowState() {
@@ -1586,7 +1597,7 @@ function projectRecentChats() {
   return chatsByProject(rows, 'recentProjectSort', 'recentChatSort');
 }
 function projectRecentListMarkup(rows = projectRecentChats()) {
-  return projectSortedChatMarkup(rows, 'recentProjectSort', chat => globalChatRow(chat, '', '', true, false)) || ui`<div class="empty-state">${t('没有对话')}</div>`;
+  return projectSortedChatMarkup(rows, 'recentProjectSort', chat => globalChatRow(chat, '', '', true)) || ui`<div class="empty-state">${t('没有对话')}</div>`;
 }
 function setChatDays(value) {
   const days = Number(value);
@@ -2069,22 +2080,11 @@ function chatStarButton(chat) {
 }
 const codexActionButtons = chat => chatStarButton(chat) + codexActionButton(chat, 'pin');
 const chatPreviewIcon = chat => state.previewEnabled ? ui`<button class="chat-preview-icon" data-action="open-conversation-preview" data-id="${chat.id}" aria-label="${t('预览对话')}" title="${t('预览对话')}">${icon('preview')}</button>` : '';
-function chatTypeButton(chat) {
-  const archived = chat.sourceArchived || effectiveReasons(chat).includes('已归档');
-  if (archived) {
-    return ui`<span class="icon-button chat-type-button is-archived" data-tip="${esc(t('已归档'))}" aria-label="${esc(t('已归档'))}">${icon('archive')}</span>`;
-  }
-  const unavailable = codexActionUnavailable(chat, 'archive');
-  const processing = codexActionInFlight && codexActionChatId === chat.id;
-  const label = t('未归档，点击归档');
-  return ui`<button class="icon-button chat-type-button ${processing ? 'processing' : ''} ${unavailable ? 'is-disabled' : ''}" data-action="codex-chat-action" data-codexaction="archive" data-id="${chat.id}" aria-disabled="${Boolean(unavailable || processing)}" data-tip="${esc(processing ? t('Codex 操作进行中') : unavailable || label)}" aria-label="${esc(label)}">${icon(processing ? 'clock' : 'chat')}</button>`;
-}
 
 function chatRow(chat, timeline = false, showProject = timeline, compact = false, showFolder = false, oldDate = false, projectBreak = false, folderInTooltip = false, dynamicScope = '') {
   const project = byProject(chat.projectId);
   const globalTimeline = timeline && showProject && !compact;
   const reasons = effectiveReasons(chat);
-  const archived = reasons.includes("已归档");
   const activity = activitySummary([chat]);
   const issue = chatDiagnostic(chat);
   const visibleReasons = reasons.filter(reason => reason !== '已归档');
@@ -2093,12 +2093,11 @@ function chatRow(chat, timeline = false, showProject = timeline, compact = false
   const actions = ui`<div class="chat-actions">${!timeline && chat.folder ? ui`<button class="icon-button" data-action="move-chat-out" data-id="${chat.id}" title="移到${t(AUTO_CHAT_FOLDER_LABEL)}" aria-label="移到${t(AUTO_CHAT_FOLDER_LABEL)}">${icon("folder-minus")}</button>` : ""}${codexActionButtons(chat)}</div>`;
   const selected = state.selectedChatIds.size ? state.selectedChatIds.has(chat.id) : !state.selectedChatFolder && state.selectedChatId === chat.id;
   const check = state.selectedChatIds.size && !timeline ? rowCheck('chat', chat.id) : '';
-  const typeBtn = timeline ? '' : chatTypeButton(chat);
   const preview = timeline ? '' : chatPreviewIcon(chat);
   const lead = timeline ? '' : (check ? statusLead(check) : chatWorkCell(chat, true));
   return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : oldDate ? "timeline-row with-date" : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt && !chat.waitingForInput ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
-    ${lead}${chatStatusBar(chat)}${timeline ? ui`${!compact && !dynamicScope && oldDate ? timelineDate(chat.timelineAt) : ''}${chatWorkCell(chat)}` : typeBtn}
-    ${globalTimeline ? globalContent : ui`<div class="chat-main"><div class="chat-title-line"><div class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</div></div>${timeline && compact || !meta ? "" : ui`<div class="chat-meta">${meta}</div>`}</div>`}
+    ${lead}${chatStatusBar(chat)}${timeline ? ui`${!compact && !dynamicScope && oldDate ? timelineDate(chat.timelineAt) : ''}${chatWorkCell(chat)}` : ''}
+    ${globalTimeline ? globalContent : ui`<div class="chat-main"><div class="chat-title-line">${!timeline && chat.sourceArchived ? codexActionButton(chat, 'archive') : ''}<div class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</div></div>${timeline && compact || !meta ? "" : ui`<div class="chat-meta">${meta}</div>`}</div>`}
     ${dynamicScope ? ui`<div class="chat-actions">${codexActionButtons(chat)}</div>` : actions}${preview}
   </div>`;
 }
@@ -2306,7 +2305,7 @@ function renderChatGroups(rows) {
   return chatGroupSection(pin,pin.rows) + chatGroupSection(star,star.rows) + chatGroupSection(all,all.rows);
 }
 
-function globalChatRow(chat, scope = '', group = '', linkProject = false, showType = true) {
+function globalChatRow(chat, scope = '', group = '', linkProject = false) {
   const project = byProject(chat.projectId) || { id: chat.projectId, synthetic: true, name: t('无项目对话') };
   const issue = chatDiagnostic(chat);
   const selected = state.selectedChatIds.size ? state.selectedChatIds.has(chat.id) : state.selectedChatId === chat.id;
@@ -2314,8 +2313,8 @@ function globalChatRow(chat, scope = '', group = '', linkProject = false, showTy
   const projectName = projectLabel(project);
   const projectCell = (linkProject || scope) ? ui`<button type="button" class="global-chat-project project-link" data-action="select-project" data-id="${esc(project.id)}" title="${esc(projectName)}" aria-label="${esc(projectName)}">${esc(projectName)}</button>` : ui`<span class="global-chat-project" title="${esc(projectName)}">${esc(projectName)}</span>`;
   const preview = chatPreviewIcon(chat);
-  return ui`<div class="chat-row global-chat-row ${showType ? '' : 'without-type'} ${chat.attentionAt && !chat.waitingForInput ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
-    ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}${showType ? chatTypeButton(chat) : ''}<span class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</span><div class="chat-actions">${codexActionButtons(chat)}</div>${preview}
+  return ui`<div class="chat-row global-chat-row without-type ${chat.attentionAt && !chat.waitingForInput ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
+    ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}<div class="chat-title-line">${chat.sourceArchived ? codexActionButton(chat, 'archive') : ''}<span class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</span></div><div class="chat-actions">${codexActionButtons(chat)}</div>${preview}
   </div>`;
 }
 
@@ -2368,7 +2367,8 @@ function render() {
     return;
   }
   applyChatLeadWidth();
-  const content = state.settingsOpen ? renderSettingsPane() : state.tab === 'timeline' ? renderChatPane() : renderProjectPane();
+  state.tab = 'project';
+  const content = state.settingsOpen ? renderSettingsPane() : renderProjectPane();
   document.getElementById("app").innerHTML = ui`${renderTitlebar()}<div class="layout single-pane">${content}</div>${renderStatusbar()}`;
   if (pickerId) {
     const picker = [...document.querySelectorAll('.picker')].find(element => element.dataset.picker === pickerId);
@@ -2432,7 +2432,7 @@ document.addEventListener('click', event => {
 
 let codexActionInFlight = false;
 let codexActionChatId = '';
-async function runCodexChatAction(chat, action, title = null, confirmed = false) {
+async function runCodexChatAction(chat, action, title = null) {
   const unavailable = codexActionUnavailable(chat, action);
   if (unavailable) { showToast(t('操作不可用'), unavailable, 'error'); return; }
   if (codexActionInFlight) { showToast(t('Codex 操作进行中'), t('请等待当前操作完成。'), 'warning'); return; }
@@ -2451,17 +2451,6 @@ async function runCodexChatAction(chat, action, title = null, confirmed = false)
     return;
   }
   if (action === 'rename' && (!title || title === chat.title)) return;
-  if (action === 'archive' && !chat.sourceArchived && !confirmed) {
-    showAppConfirm({
-      title: t('确认归档'),
-      copy: chat.title,
-      note: t('归档后可在归档列表中查看。'),
-      submit: t('归档'),
-      danger: false,
-      onConfirm() { void runCodexChatAction(chat, action, title, true); }
-    });
-    return;
-  }
   const enabled = action === 'pin' ? !chat.codexPinned : action === 'archive' ? !chat.sourceArchived : null;
   codexActionInFlight = true;
   codexActionChatId = chat.id;

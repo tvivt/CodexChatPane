@@ -5,6 +5,7 @@ import './usage.mjs';
 import './usage-preload.mjs';
 
 const tauriConf = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+const appVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
 assert.equal(tauriConf.app.windows.length, 0, 'Rust creates windows so they can share the CODEX_HOME data directory');
 assert.ok(rust.includes('source::codex_home()?.join(".codex-chat-pane")'), 'app data lives under CODEX_HOME/.codex-chat-pane');
@@ -56,7 +57,6 @@ assert.ok(html.includes('.days-count-label { display:inline-flex; align-items:ce
 assert.ok(html.includes('.days-count-label > span { white-space:nowrap; }') && html.includes('.days-count-tip { position:relative; }') && !html.includes('.days-count-tip::before'), '3 Days keeps the 1:19 title trigger without the custom tooltip');
 assert.ok(html.includes('.global-chat-row[data-dynamic-item] .chat-actions .chat-star-button.active') && html.includes('.global-chat-row[data-dynamic-item] .chat-actions .codex-action-pin.active'), 'dynamic Star and Pin actions have scoped visibility');
 assert.ok(html.includes('.settings-workspace') && html.includes('id="i-settings"'), 'settings page and gear icon exist');
-assert.ok(html.includes('.chat-type-button.is-archived'), 'archived chats use the archive icon color');
 assert.ok(html.includes('.folder-row.drop-before::before') && html.includes('.folder-row.drop-after::after'), 'folder reorder uses an edge insertion line');
 assert.match(html, /\.tree-row\.project-row, \.tree-row\.project-row\.has-check \{ grid-template-columns: 15px var\(--row-bar\)/, 'project rows use the folder chevron slot instead of 8ch');
 assert.ok(html.includes('.chat-work-cell { box-sizing:content-box; width:var(--chat-lead,var(--row-status));') && html.includes('padding:0 2px; display:grid; grid-template-rows:15px 15px;'), 'chat indent uses a fixed lead column with compact padding');
@@ -141,6 +141,7 @@ const nativeWindow = {
 class LogicalSize { constructor(width,height) { this.width=width; this.height=height; } }
 class PhysicalPosition { constructor(x,y) { this.x=x; this.y=y; } }
 const context = vm.createContext({
+  appVersion,
   crypto,
   URLSearchParams,
   location: { search: '' },
@@ -216,7 +217,8 @@ vm.runInContext(`
   assert.ok(initialNavigation.indexOf('>Projects<') < initialNavigation.indexOf('>Chats<'));
   assert.ok(navigationHeader().includes('data-tab="timeline"'));
   assert.ok(!navigationHeader().includes('toggle-chats-dock'),'Chats uses tabs only');
-  assert.ok(renderTitlebar().includes('navigation-tabs'), 'Projects and Chats tabs live in the titlebar');
+  assert.ok(!renderTitlebar().includes('navigation-tabs') && !renderTitlebar().includes('data-tab='), 'main titlebar hides Projects and Chats tabs');
+  assert.ok(renderTitlebar().includes('class="window-version">v' + appVersion + '</span>'), 'titlebar displays the package version');
   assert.ok(!renderProjectPane().includes('navigation-tabs') && !renderChatPane().includes('navigation-tabs'), 'workspace panes do not duplicate the titlebar tabs');
   const fixture = { id: 'fixture', projectId: 'stock', title: 'Fixture', activityAt: 100, lastUserMessageAt: 100, createdAt: 1, updatedAt: 100, executionStatus: 'inProgress', working: true, codexPinned: true, codexUnread: false };
   let chat = nativeChat(fixture, 0, null);
@@ -255,14 +257,13 @@ vm.runInContext(`
   assert.ok(chatRow(chat).includes('codex-action-pin active'));
   assert.ok(chatRow({...chat,codexPinned:false}).includes('codex-action-pin') && !chatRow({...chat,codexPinned:false}).includes('codex-action-pin active'), 'unpinned chats still expose a hover pin');
   assert.ok(!chatRow(chat).includes('data-codexaction="rename"'), 'rename belongs in the context menu only');
-  assert.ok(chatRow(chat).includes('data-codexaction="archive"') && chatRow(chat).includes('chat-type-button'));
-  assert.ok(/chat-type-button[^>]*data-tip="/.test(chatRow(chat)), 'archive tip is a fast custom tooltip');
-  assert.ok(chatTypeButton({...chat, working:false, sourceArchived:false}).includes('未归档，点击归档'), 'session icon tip says click to archive');
-  assert.ok(chatTypeButton({...chat, working:false, sourceArchived:true}).includes('已归档') && !chatTypeButton({...chat, working:false, sourceArchived:true}).includes('data-codexaction="archive"'), 'archived session icon is status-only and does not restore');
-  assert.ok(!/chat-type-button[^>]*title=/.test(chatRow(chat)), 'archive tip does not wait on the native title delay');
+  assert.ok(!chatRow({...chat, sourceArchived:false}).includes('data-codexaction="archive"'), 'active chats archive through the context menu');
+  const archivedRow = chatRow({...chat, sourceArchived:true});
+  assert.ok(archivedRow.includes('data-codexaction="archive"') && archivedRow.includes('#i-restore'), 'archived chats retain a restore button');
+  assert.ok(archivedRow.indexOf('codex-action-archive') < archivedRow.indexOf('class="chat-title"'), 'restore stays before the chat title');
   assert.ok(!chatRow(chat).match(/chat-actions[\s\S]*codex-action-archive/));
   assert.ok(chatRow(chat).indexOf('chat-work-cell') < chatRow(chat).indexOf('chat-status-bar'));
-  assert.ok(chatRow(chat).indexOf('chat-status-bar') < chatRow(chat).indexOf('chat-type-button'));
+  assert.ok(chatRow(chat).indexOf('chat-status-bar') < chatRow(chat).indexOf('chat-main'));
   assert.ok(chatRow(chat).indexOf('chat-work-time') < chatRow(chat).indexOf('chat-title'));
   assert.ok(!chatRow(chat).includes('chat-preview-icon') && !chatRow(chat).includes('with-preview'), 'disabled preview removes both the icon and its grid column');
   state.previewEnabled = true;
@@ -360,8 +361,6 @@ vm.runInContext(`
   setLanguage('zh');
   applyChatLeadWidth();
   assert.equal(document.documentElement.style['--chat-lead'], '6ch', 'Chinese chat lead width is fixed');
-  assert.ok(chatTypeButton({...example,sourceArchived:true}).includes('#i-archive'), 'archived chats show the archive icon');
-  assert.ok(chatTypeButton(example).includes('#i-chat') && !chatTypeButton(example).includes('#i-archive'));
 
   const counts = folderActivityCounts({attention: 2, working: 3, errors: 1}, 12).replace(/<[^>]*>/g, '');
   assert.equal(counts, '2 | 3 | 12');
@@ -433,7 +432,7 @@ vm.runInContext(`
   state.chatsLowerPanel = 'timeline';
   assert.ok(renderChatPane().includes('timeline-view-block'));
   assert.ok(renderChatPane().includes('global-dynamic'));
-  assert.ok(renderTitlebar().includes('data-tab="timeline"'));
+  assert.ok(!renderTitlebar().includes('data-tab="timeline"'));
   syncLiveTimers();
   assert.ok(intervals.some(timer => timer.milliseconds === 600 && timer.callback === updateWorkingFrame));
   for (let frame = 0; frame < 8; frame++) {
@@ -593,12 +592,10 @@ vm.runInContext(`
   assert.equal(confirmations.length, 0, 'restore does not ask to archive');
   assert.equal(reloads, 1, 'successful restore reloads the Codex source state');
   await vm.runInContext("runCodexChatAction({id:'active',sourceArchived:false,title:'Active'}, 'archive')", actionContext);
-  assert.equal(calls.length, 1, 'archive waits for confirmation');
-  assert.equal(confirmations.length, 1);
-  confirmations[0].onConfirm();
-  await new Promise(setImmediate);
+  assert.equal(calls.length, 2, 'archive dispatches immediately');
+  assert.equal(confirmations.length, 0, 'archive does not ask for confirmation');
   assert.equal(calls[1].args.threadId, 'active');
-  assert.equal(calls[1].args.enabled, true, 'confirmed archive requests archived=true');
+  assert.equal(calls[1].args.enabled, true, 'archive requests archived=true');
   assert.equal(reloads, 2);
   assert.equal(actionContext.codexActionInFlight, false);
   assert.deepEqual(errors, []);
@@ -748,7 +745,8 @@ vm.runInContext(`
   assert.ok(quotaMarkup(quotaNow).includes('>91%<'));
   assert.ok(quotaMarkup(quotaNow).includes('>W<'));
   assert.ok(quotaMarkup(quotaNow).includes('>83%<'));
-  assert.ok(quotaMarkup(quotaNow).includes('title="2026-09-01 13:23 (-1d1h)'), 'exact reset and day/hour countdown are both in tips');
+  assert.ok(quotaMarkup(quotaNow).includes('2026-09-01 13:23 (-1d1h)'), 'exact reset and day/hour countdown are both in tips');
+  assert.equal((quotaMarkup(quotaNow).match(/title="/g) || []).length,1,'all quota windows and cards share one tooltip');
   assert.equal((quotaMarkup(quotaNow).match(/class="quota-reset-time"/g) || []).length,1, 'only the 5h window shows a reset time');
   assert.ok(quotaMarkup(quotaNow).includes('class="quota-reset-time">13:23<'));
   assert.equal(quotaCountdown(quotaNow+342*60000,quotaNow),'5h42m');
@@ -761,8 +759,47 @@ vm.runInContext(`
   assert.ok(quotaMarkup(quotaReset).includes('--%'), 'expired snapshots must not invent a reset');
   state.rateLimits = {primary:quotaWeek, secondary:null, observed_at:quotaNow, plan_type:'pro'};
   assert.ok(!quotaMarkup(quotaNow).includes('>5h<'));
-  assert.ok(quotaMarkup(quotaNow).includes('>W<'));
+  assert.ok(!quotaMarkup(quotaNow).includes('>W<'),'a lone weekly window has no W label');
   assert.ok(!quotaMarkup(quotaNow).includes('quota-reset-time'), 'weekly reset remains in tips only');
+  const quotaDay = 86400000;
+  const visibleQuota = markup => markup.replace(/<[^>]*>/g,'');
+  for (const [days,extra,marker] of [[8,0,''],[7,1,''],[7,0,'⚠'],[3,1,'⚠'],[3,0,'❗'],[1,0,'❗']]) {
+    state.rateLimits.reset_credits = {availableCount:2,credits:[{status:'available',expiresAt:(quotaNow+days*quotaDay+extra)/1000}]};
+    const markup = quotaMarkup(quotaNow);
+    assert.ok(visibleQuota(markup).endsWith('|2'+marker),'expiry boundary '+days+'d + '+extra+'ms');
+    assert.equal((markup.match(/title="/g)||[]).length,1,'card count and alert have no separate tooltips');
+    assert.ok(!visibleQuota(markup).includes('重置卡'));
+    assert.ok(markup.includes('重置卡：2 张') && markup.includes('到期：'));
+  }
+  state.rateLimits.reset_credits = {availableCount:2,credits:[
+    {status:'available',expiresAt:(quotaNow+7*quotaDay)/1000},
+    {status:'available',expiresAt:(quotaNow+3*quotaDay)/1000}
+  ]};
+  assert.ok(visibleQuota(quotaMarkup(quotaNow)).endsWith('|2❗'),'the nearest expiry gives urgent priority');
+  state.rateLimits.reset_credits.availableCount = 0;
+  assert.ok(visibleQuota(quotaMarkup(quotaNow)).endsWith('|0'),'zero cards remain visible without a warning');
+  state.rateLimits.reset_credits = {availableCount:2,credits:[
+    {status:'available',expiresAt:null},
+    {status:'available',expiresAt:quotaNow/1000},
+    {status:'used',expiresAt:(quotaNow+quotaDay)/1000},
+    {status:'available',expiresAt:(quotaNow+8*quotaDay)/1000}
+  ]};
+  assert.ok(visibleQuota(quotaMarkup(quotaNow)).endsWith('|2'),'unknown, expired and used cards do not trigger guessed alerts');
+  assert.ok(quotaMarkup(quotaNow).includes('到期时间未知'));
+  state.rateLimits.reset_credits = {availableCount:2,credits:null};
+  assert.ok(visibleQuota(quotaMarkup(quotaNow)).endsWith('|2'));
+  assert.ok(quotaMarkup(quotaNow).includes('到期时间未知'));
+  state.rateLimits.reset_credits = {availableCount:2,credits:[{status:'available',expiresAt:(quotaNow+3*quotaDay+1)/1000}]};
+  assert.ok(visibleQuota(quotaMarkup(quotaNow+1)).endsWith('|2❗'),'existing clock refresh can cross the urgency boundary');
+  state.rateLimits.primary = {used_percent:9,window_minutes:300,resets_at:quotaReset/1000};
+  state.rateLimits.secondary = quotaWeek;
+  assert.ok(!quotaMarkup(quotaNow).includes('>5h<') && !quotaMarkup(quotaNow).includes('>W<'),'suppressed 5h quota does not leave a W label');
+  state.rateLimits.plan_type = 'plus';
+  assert.ok(quotaMarkup(quotaNow).includes('>5h<') && quotaMarkup(quotaNow).includes('>W<'));
+  assert.ok(visibleQuota(quotaMarkup(quotaNow)).endsWith('|2⚠'));
+  assert.ok(quotaMarkup(quotaNow).includes('5h: 91%') && quotaMarkup(quotaNow).includes('W: 83%'),'one tooltip includes both quotas');
+  delete state.rateLimits.reset_credits;
+  assert.ok(visibleQuota(quotaMarkup(quotaNow)).endsWith('|—'),'missing card metadata is not invented as zero');
   state.rateLimits = null;
   assert.equal(quotaMarkup(quotaNow), '');
   let issueChat = nativeChat({...fixture,working:false,executionStatus:'failed',codexUnread:true,diagnostic:{kind:'quota',severity:'error',message:'limit <b> & "reason"',at:600,source:'rollout',resetsAt:quotaReset / 1000}},0,null);
@@ -813,10 +850,10 @@ vm.runInContext(`
   assert.ok(!dynamicRow.includes('timeline-row-time'));
   assert.ok(!dynamicRow.includes('dynamic-pin'));
   assert.ok(dynamicRow.includes('codex-action-pin') && !dynamicRow.includes('codex-action-pin active'), 'Chats tab rows show a hover pin');
-  assert.ok(dynamicRow.includes('#i-chat'));
+  assert.ok(!dynamicRow.includes('#i-chat'), 'active rows omit the conversation icon');
   assert.ok(!dynamicRow.includes('global-chat-project">['));
   assert.ok(dynamicRow.includes('global-chat-project project-link') && dynamicRow.includes('data-action="select-project"'), 'dynamic project names locate the project');
-  const recentRow = globalChatRow(dynamicChat, '', '', true, false);
+  const recentRow = globalChatRow(dynamicChat, '', '', true);
   assert.ok(recentRow.includes('global-chat-project project-link') && recentRow.includes('data-action="select-project"'), 'recent project names locate the project');
   assert.ok(recentRow.includes('global-chat-row without-type'), '3 Days rows use the no-icon grid variant');
   assert.ok(!recentRow.includes('chat-type-button'), '3 Days rows omit the conversation icon');
@@ -847,15 +884,16 @@ vm.runInContext(`
   assert.ok(dynamicRow.includes('chat-status-bar time-'));
   assert.ok(dynamicRow.includes('data-action="open-conversation-preview"'));
   assert.ok(dynamicRow.indexOf('chat-work-cell') < dynamicRow.indexOf('chat-status-bar'));
-  assert.ok(dynamicRow.indexOf('chat-status-bar') < dynamicRow.indexOf('chat-type-button'));
+  assert.ok(dynamicRow.indexOf('chat-status-bar') < dynamicRow.indexOf('global-chat-project'));
   assert.ok(dynamicRow.indexOf('chat-work-time') < dynamicRow.indexOf('chat-title'));
-  assert.ok(dynamicRow.indexOf('global-chat-project') < dynamicRow.indexOf('chat-type-button'), 'session label sits before the session, after the project');
-  assert.ok(dynamicRow.indexOf('chat-type-button') < dynamicRow.indexOf('chat-title'));
+  assert.ok(dynamicRow.indexOf('global-chat-project') < dynamicRow.indexOf('chat-title'), 'project sits before the chat title');
+  assert.ok(!dynamicRow.includes('data-codexaction="archive"'), 'active global rows omit the archive button');
+  const globalArchivedRow = globalChatRow({...dynamicChat,sourceArchived:true});
+  assert.ok(globalArchivedRow.includes('#i-restore') && globalArchivedRow.includes('data-codexaction="archive"'), 'global archived rows retain restore');
   assert.ok(dynamicRow.indexOf('chat-title') < dynamicRow.indexOf('chat-preview-icon'));
   assert.ok(dynamicRow.lastIndexOf('chat-preview-icon') > dynamicRow.lastIndexOf('chat-actions'), 'preview sits at the far right');
   const pinnedRow = globalChatRow({...dynamicChat,codexPinned:true},'global','pin');
-  assert.ok(pinnedRow.includes('chat-type-button') && pinnedRow.includes('data-codexaction="archive"'));
-  assert.ok(pinnedRow.indexOf('chat-type-button') < pinnedRow.indexOf('codex-action-pin'));
+  assert.ok(!pinnedRow.includes('data-codexaction="archive"') && pinnedRow.includes('codex-action-pin'));
   assert.ok(!pinnedRow.match(/chat-actions[\s\S]*codex-action-archive/), 'trailing archive icon is removed');
   assert.ok(!pinnedRow.includes('data-codexaction="rename"'));
   state.chatDays = 3;
@@ -1218,7 +1256,7 @@ vm.runInContext(`
   state.chatsLowerPanel = 'timeline';
   assert.ok(renderChatPane().includes('chats-workspace'));
   assert.ok(renderChatPane().includes('timeline-view-block'));
-  assert.ok(renderTitlebar().includes('data-tab="timeline" role="tab" aria-selected="true">Chats'));
+  assert.ok(!renderTitlebar().includes('data-tab="timeline"'));
   const futureReset = Date.now()/1000 + 3600;
   for (const [used,tone] of [[0,'high'],[75,'medium'],[95,'low']]) {
     state.rateLimits = {primary:{used_percent:used,window_minutes:300,resets_at:futureReset}};
@@ -1482,7 +1520,10 @@ vm.runInContext(`
   assert.ok(document.getElementById('app').innerHTML.includes('single-pane'));
   assert.ok(!document.getElementById('app').innerHTML.includes('class="chat-pane'));
   state.tab = 'timeline'; render();
-  assert.ok(document.getElementById('app').innerHTML.includes('class="workspace-pane chat-pane'));
+  assert.equal(state.tab,'project','main view stays on Projects even with an old Chats selection');
+  assert.ok(document.getElementById('app').innerHTML.includes('projects-workspace'));
+  assert.ok(!document.getElementById('app').innerHTML.includes('class="workspace-pane chat-pane'));
+  assert.ok(renderChatPane().includes('chats-workspace'),'Chats rendering stays available for future restoration');
   assert.ok(!renderChatPane().includes('toggle-chats-dock'));
   const synthetic = {id:'synthetic:test',synthetic:true,name:'无项目对话',folder:'',count:0,order:999,pathValid:false};
   projects.push(synthetic);

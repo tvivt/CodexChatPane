@@ -82,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 
 开发仓库是文档的唯一维护处。公开的 `README.md`、`README.zh-CN.md`、`doc/` 和截图同步到发布仓库；内部设计文档只保留在开发仓库。发布前在开发仓库更新一次，再同步公开子集。
 
-版本字段位于 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json`，本次文档核对版本为 0.5.0；修改版本时同步锁文件中的本包版本。发布任务才同步改版本和附件名，固定本地入口保留 CodexChatPane.exe。文档的历史 v0.2.1 记录只描述当时产物。
+版本字段位于 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json`，本次文档核对版本为 0.5.1；修改版本时同步锁文件中的本包版本。发布任务才同步改版本和附件名，固定本地入口保留 CodexChatPane.exe。文档的历史 v0.2.1 记录只描述当时产物。
 
 ## 5. 修改检查表
 
@@ -112,6 +112,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 - 本机日志、对话导出和真实截图
 
 ## 7. 本次验证记录
+
+v0.5.1 在 2026-10-29 的同步发布检出中通过：默认 Rust 136 passed、25 ignored，前端检查、动态列表检查、Rust 格式、前端生产构建、6 处版本字段一致性、152 个文档相对文件链接和 `git diff --check`。本机 EXE 从同一发布检出构建；GitHub 标签工作流单独构建公开附件，并直接使用对应版本说明作为 Release 正文。未运行原生界面交互及真实归档/恢复写操作。
 
 v0.5.0 在 2026-10-29 的同步发布检出中通过：默认 Rust 136 passed、24 ignored，前端检查、动态列表检查、Rust 格式、前端生产构建、版本与锁文件一致性、文档相对文件链接和 `git diff --check`。可下载 EXE 由标签工作流另行构建；自动检查不替代原生窗口交互验收。
 

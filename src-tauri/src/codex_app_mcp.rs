@@ -99,7 +99,7 @@ pub fn run_project_pin(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| "Codex MCP 操作锁已损坏".to_string())?;
-    let context_thread = crate::source::scan()?
+    let context_thread = crate::source::scan_catalog(None)?
         .chats
         .first()
         .map(|chat| chat.id.clone())
@@ -135,7 +135,7 @@ pub fn run_project_pin(
     }
     let deadline = Instant::now() + VERIFY_TIMEOUT;
     loop {
-        if crate::source::scan()?
+        if crate::source::scan_catalog(None)?
             .projects
             .iter()
             .any(|project| project.id == project_id && project.codex_pinned == enabled)
@@ -309,7 +309,7 @@ fn verify_action(
 ) -> Result<(), String> {
     let deadline = Instant::now() + VERIFY_TIMEOUT;
     loop {
-        if let Ok(snapshot) = crate::source::scan() {
+        if let Ok(snapshot) = crate::source::scan_catalog(None) {
             if let Some(chat) = snapshot.chats.iter().find(|chat| chat.id == thread_id) {
                 let verified = match action {
                     "rename" => title == Some(chat.title.as_str()),
@@ -840,6 +840,39 @@ mod tests {
                 arguments.as_object().unwrap().keys().collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    #[ignore = "read-only action verification; requires CODEX_PANE_VERIFY_THREAD"]
+    fn action_readback_uses_only_metadata() {
+        let target = std::env::var("CODEX_PANE_VERIFY_THREAD").unwrap();
+        let database = crate::source::codex_home().unwrap().join("state_5.sqlite");
+        let db = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let archived = db
+            .query_row(
+                "SELECT archived FROM threads WHERE id=?1",
+                [&target],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            != 0;
+        crate::rollout_log::read_stats(true);
+        let started = std::time::Instant::now();
+        super::verify_action(&target, "archive", None, Some(archived)).unwrap();
+        let stats = crate::rollout_log::read_stats(false);
+        println!(
+            "readback_ms={} rollout={stats:?}",
+            started.elapsed().as_millis()
+        );
+        assert_eq!(
+            stats.opens, 0,
+            "verifying archive state must not open rollouts"
+        );
+        assert_eq!(stats.bytes, 0);
     }
 
     #[cfg(windows)]

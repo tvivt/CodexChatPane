@@ -66,7 +66,7 @@ Supported write operations include:
 
 If a tool is unavailable, the renderer is not active, or Codex returns an error, the UI reports failure instead of showing a false local success.
 
-`codex_app_mcp.rs::run_action/run_project_pin` serialize the supported writes. A renderer-specific failure can activate the target through a deep link, await renderer evidence, retry once, and verify via state readback. This is not an arbitrary external tool proxy. Quota reads never redeem a reset card. Live catalog capability checks do not verify real writes.
+`codex_app_mcp.rs::run_action/run_project_pin` serialize the supported writes. A renderer-specific failure can activate the target through a deep link, await renderer evidence, retry once, and verify via metadata-only state readback. Context selection and write verification use the existing catalog reader rather than scanning conversation logs. The read-only `action_readback_uses_only_metadata` check requires `CODEX_PANE_VERIFY_THREAD` and asserts zero rollout opens/bytes without performing an MCP write. This is not an arbitrary external tool proxy. Quota reads never redeem a reset card. Live catalog capability checks do not verify real writes.
 
 ## 4. Safety boundary
 

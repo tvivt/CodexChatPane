@@ -1,6 +1,6 @@
 # 文档总览 / Documentation index
 
-更新日期：2026-10-29，版本 v0.5.0（[发布说明](releases/v0.5.0.md)）。本文是 CodexChatPane 的全功能入口。功能说明采用本批交付后的行为口径；历史测试、当前检查和实际部署证据单独记录，不以文档更新代表测试通过或 EXE 已更新。
+更新日期：2026-10-29，版本 v0.5.1（[发布说明](releases/v0.5.1.md)）。本文是 CodexChatPane 的全功能入口。功能说明采用本批交付后的行为口径；历史测试、当前检查和实际部署证据单独记录，不以文档更新代表测试通过或 EXE 已更新。
 
 This index covers the complete feature set. Feature descriptions use the delivery behavior; dated test results and actual deployment evidence remain separate. English guides summarize the same behavior; detailed numerical and parser references are in Chinese.
 
@@ -21,6 +21,7 @@ This index covers the complete feature set. Feature descriptions use the deliver
 
 | 功能 | 用户行为与数据边界 | 说明入口 |
 | --- | --- | --- |
+| 源码主界面 | 隐藏 Projects/Chats 切换，仅显示 Projects；保留独立 Chats 页代码；标题名加粗并显示包版本 | [主界面](usage.zh-CN.md#2-主界面) |
 | Project / Chat 目录 | 状态库元数据先显示；真实标题、项目关系、归档及 Pin；无项目对话单独归类 | [产品](product.zh-CN.md#4-project-与-chat-归类)、[启动数据流](architecture.zh-CN.md#3-启动与刷新) |
 | 动态列表 | 最近天数、搜索、手动加入/移出与规则对话框；P 项目分组可与 N 状态/名称排序组合，方向互斥并记忆 | [主界面](usage.zh-CN.md#2-主界面) |
 | 本地组织 | 多层 Folder、交叉 Group、Star、顺序、折叠、多选、拖动及本地回收；不改真实项目目录 | [常用操作](usage.zh-CN.md#3-常用操作)、[菜单](usage.zh-CN.md#6-右键菜单速查) |
@@ -34,7 +35,7 @@ This index covers the complete feature set. Feature descriptions use the deliver
 | Σ 总速度 | 运行中主对话近期加权预测求和；工具等待保留，当前压缩排除，无静默过期；`Σ≈125t/s` / `Σ0t/s` / `Σ—` | [Σ 口径](conversation-metrics.zh-CN.md#45-σ-的近期请求预测2026-10-28) |
 | 对话详情 | 独立窗口、默认最新轮次、每页 50 轮、全会话汇总、活动记录数、工具汇总、消费、历史 Fast 标识；无请求/活动正文 | [详情](conversation-metrics.zh-CN.md#6-详情页可展示内容) |
 | 子代理 | 详情按点击分别读取；消费归入主对话家族并保留主/子构成；主轮次与主速度不混子用量 | [子代理](conversation-metrics.zh-CN.md#34-主对话与子智能体)、[消费](usage-history.zh-CN.md#消耗与计价) |
-| 状态栏额度 | 5h/W 剩余百分比，5h 带重置时刻；tips 含具体时间、倒计时、重置卡数和到期时间 | [额度入口](usage-history.zh-CN.md#入口与显示) |
+| 状态栏额度 | 5h/W 剩余百分比，5h 带重置时刻；无 5h 隐藏 W；右侧卡数量带 7/3 天到期标识，整块共用 tips | [额度入口](usage-history.zh-CN.md#入口与显示) |
 | 重置记录 | W 当前周期置顶、最近 5 次、每次更多 10 条；自然/提前/卡重置、最后剩余、总 Token、展开模型详情 | [额度周期](usage-history.zh-CN.md#额度周期) |
 | 周期识别与稳定边界 | 连续观察确认固定/浮动模式，证据不足保留候选；统一显示/查询边界，历史细化及误周期修正保留关闭状态 | [窗口模式](usage-history.zh-CN.md#窗口模式与候选)、[事件身份](usage-history.zh-CN.md#采用边界与事件身份) |
 | 提前重置通知 | 手动关闭、持久去重；重置时间、上一周期、剩余额度、模型 Token/占比/输入输出/缓存/推理/API 金额 | [通知布局](usage-history.zh-CN.md#入口与显示) |

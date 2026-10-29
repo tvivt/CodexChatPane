@@ -48,6 +48,7 @@ The synthetic project is only a UI placeholder and is not written back to Codex.
 - Recent activity normally follows the selected day range. A chat may be set to always include or exclude through the context menu; the Activity rules dialog lists both overrides and can restore automatic behavior. Include uses a solid purple bar; exclude uses a striped purple bar.
 - Default state priority is waiting/unread/working/read. Structured question answers and later user input resolve waiting; async questions survive turn completion. P project grouping and N status/name ordering are independently single-choice, with mutually exclusive directions.
 - Waiting uses `?` for both projects and chats. The close and upward restore controls on Projects operate both Projects and Chats, retaining their organization; Chats has no separate control.
+- The app opens the Projects view, with a bold title and package version; the standalone Chats view has no visible tab. Active chats archive through the context menu; archived chats retain a restore icon. Both actions execute without another confirmation and verify state from catalog metadata without reading rollout bodies.
 
 ## 6. Local persistence
 

@@ -23,6 +23,10 @@ Running only `npm run dev` starts a browser preview of the frontend. You can ins
 
 ## 2. Main window
 
+Starting with v0.5.1, the app displays only the Projects page and hides the Projects/Chats tabs. The standalone Chats page remains in the code without a visible entry point. The titlebar shows a bold CodexChatPane name followed by the package version.
+
+The quota indicator appends `|` and the available reset-card count, using the same text color as the percentage. An available card expiring within seven days adds ⚠; within three days adds ❗, directly beside the count. Hover anywhere in the quota indicator for quota deadlines and reset-card expiry details. Unknown counts display `—`.
+
 ### Projects
 
 The Projects area shows recent conversations from a project perspective:
@@ -33,6 +37,8 @@ The Projects area shows recent conversations from a project perspective:
 - Chats without a project appear in a synthetic unprojected-chats category rather than a real project.
 
 ### Chats
+
+The following describes the retained standalone Chats page, which is hidden in the current source checkout.
 
 The Chats area provides a global view for browsing and organizing conversations:
 
@@ -69,7 +75,7 @@ The separate consumption section includes all settled requests owned by this cha
 
 Σ sums running main-chat forecasts, each weighted by generation time over at most three recent valid requests with matching configuration. It displays `Σ≈125t/s`, `Σ0t/s` with no eligible chats, or `Σ—` when every eligible chat lacks a sample; there is no space after Σ. Tool execution, tool waits and silent reasoning retain the estimate without a silence timeout. Confirmed current compaction is excluded until it ends; completed, interrupted, failed, idle, waiting-for-answer and child chats are excluded. Tips show `Chat title[model]` on the left and right-aligned `Xt/s` without an approximation sign, or `—` when unknown, showing coverage when partial. Status updates retain the Σ hover/focus node. This predicts generation capacity, not actual Token arrivals per second, and does not replace selected-chat statistics or predict TTFT.
 
-Quotas show `5h ring percentage HH:mm` and `W ring percentage`; only 5h shows its reset time in the status bar. Each tooltip retains its full reset date/time and countdown, such as `2026-10-09 02:30 (-5h42m)`. Countdowns longer than 24 hours use days and whole hours, such as `(-1d2h)`; shorter ones, including exactly 24 hours, retain hours and minutes.
+Quotas show `5h ring percentage HH:mm W ring percentage | card count`. Without 5h, the weekly ring and percentage remain without the W label. The server's available-card count includes zero; missing counts show `—`. Known future expiry within seven days adds `⚠`, or `❗` within three days, including the boundaries. Only available, unexpired cards affect the alert; unknown expiry is not guessed and zero cards never trigger an alert. Only 5h shows its reset time in the status bar. One tooltip covers the entire quota area, including both quotas, full reset times, countdowns and expiry batches. Clicking the count or alert opens the same quota details window. Countdowns longer than 24 hours use days and whole hours; shorter ones retain hours and minutes.
 
 Click quotas for reset history by default: current W plus five ended periods, ten more per load. Period labels include duration; text selects one period, checkboxes select multiple disjoint periods. Calendar day/week/month/all and reset periods are mutually exclusive. Consumption filters project/source/Fast; models are breakdowns, not a separate model filter. The overview shows five models by cost with expansion, the daily model stack defaults to Token and can switch to API-equivalent cost, and project/day/chat rows expand. Chat rows include user-question rounds and agents. Token is input+output; cached input and reasoning output are subsets. Reset details and persistent early-reset notices include period, remaining quota, model tokens/shares and API equivalents. All amounts are local estimates, not subscription charges.
 
@@ -92,7 +98,7 @@ Renaming, pinning, archiving, and project pinning are Codex write operations:
 3. Choose the action from a chat or project menu.
 4. Wait for completion. The app shows a persistent notification if an error or warning occurs.
 
-Archiving asks for another confirmation. An archived chat usually must be restored before it can be renamed or pinned.
+Archive a chat from its context menu; archived chats keep a restore button before the title. Archiving and restoring run immediately without another confirmation. An archived chat usually must be restored before it can be renamed or pinned.
 
 ## 4. Settings
 

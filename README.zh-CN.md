@@ -6,9 +6,9 @@ CodexChatPane 是一个运行在 Windows 上的 Codex Desktop 辅助侧栏：把
 
 这是一个个人项目的实验性源码版本，不是 Codex Desktop 的官方组件，也不上传或托管对话数据。
 
-## v0.5.0
+## v0.5.1
 
-本版包含额度周期修复、对话详情分页、消耗计价、速度 tips 和 Projects/Chats 联动调整，详见[发布说明](doc/releases/v0.5.0.md)。从 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.0) 下载 `CodexChatPane-v0.5.0.exe`。
+本版包含 Projects 单页、标题栏版本号、重置卡数量与到期提示，以及归档回读提速。普通对话通过右键归档，归档对话保留恢复图标，两者均不再二次确认，详见[发布说明](doc/releases/v0.5.1.md)。从 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.1) 下载 `CodexChatPane-v0.5.1.exe`。
 
 ## 功能概览
 
