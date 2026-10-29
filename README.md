@@ -6,15 +6,15 @@ CodexChatPane is a Windows companion sidebar for Codex Desktop. It brings local 
 
 This is an experimental personal project, not an official Codex Desktop component. It does not upload or host your conversations.
 
-## v0.5.1
+## v0.5.2
 
-[Release notes](doc/releases/v0.5.1.md) cover the Projects-only view, titlebar version, reset-card indicators, and faster archive readback. Archive from the context menu or restore with the archived chat's icon, without another confirmation. Download `CodexChatPane-v0.5.1.exe` from [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.1).
+[Release notes](doc/releases/v0.5.2.md) cover independent Projects/Chats close and restore controls, removal of bulk folder arrows from section titles, and a fix for the Windows CI process-exit test. Download `CodexChatPane-v0.5.2.exe` from [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.2).
 
 ## Features
 
 - Browse local Codex data by project, chat, recent activity, and archive status.
 - Organize projects and chats with local folders and groups, including nested folders, search, sorting, selection, and drag and drop.
-- See waiting-for-answer (`?`), unread, running, and error states, execution time, last activity, and usage limits; the Projects control collapses and restores both Projects and Chats.
+- See waiting-for-answer (`?`), unread, running, and error states, execution time, last activity, and usage limits; Projects and Chats each have their own close and restore controls.
 - Select a chat to see first-token latency, estimated token speed, and cache hit rate; Chat details provide paged turn summaries, activity counts, tool totals, consumption, and separate subagent statistics.
 - Σ sums recent weighted forecasts for running main chats, retaining estimates during tool waits and excluding current compaction. It shows `Σ≈125t/s`, `Σ0t/s`, or `Σ—`, without a silence timeout or OpenTelemetry receiver.
 - Click quotas to open reset history: current period plus five ended periods, ten more per page. Consumption includes calendar/period ranges, model stacks, and project/day/chat breakdowns.

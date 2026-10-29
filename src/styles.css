@@ -1300,13 +1300,6 @@ body.usage-window .usage-dialog { position:fixed; inset:0; width:100%; height:10
   content:""; width:7px; height:4px; border:1.8px solid var(--ink); border-top:0; border-right:0;
   transform:rotate(-45deg) translate(0,-.5px);
 }
-.folder-view-label .folder-toggle-all {
-  width:18px; height:22px; flex:0 0 auto; padding:0;
-  color:var(--success); border:0; border-radius:0; background:transparent;
-}
-.folder-view-label .folder-toggle-all .icon { width:15px; height:15px; stroke-width:2.6; }
-.folder-view-label .folder-toggle-all:hover:not(:disabled) { color:var(--text); background:transparent; }
-.folder-view-label .folder-toggle-all[aria-pressed="true"] { color:var(--success); }
 html[data-drag-collapse] .project-structure .project-row,
 html[data-drag-collapse] .project-chat-list .chat-row,
 html[data-drag-collapse] .dynamic-group-items .chat-row,

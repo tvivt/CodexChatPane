@@ -6,15 +6,15 @@ CodexChatPane 是一个运行在 Windows 上的 Codex Desktop 辅助侧栏：把
 
 这是一个个人项目的实验性源码版本，不是 Codex Desktop 的官方组件，也不上传或托管对话数据。
 
-## v0.5.1
+## v0.5.2
 
-本版包含 Projects 单页、标题栏版本号、重置卡数量与到期提示，以及归档回读提速。普通对话通过右键归档，归档对话保留恢复图标，两者均不再二次确认，详见[发布说明](doc/releases/v0.5.1.md)。从 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.1) 下载 `CodexChatPane-v0.5.1.exe`。
+本版恢复 Projects/Chats 各自关闭、各自展开，移除标题前的批量折叠箭头，并修复 Windows CI 进程退出测试，详见[发布说明](doc/releases/v0.5.2.md)。从 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.2) 下载 `CodexChatPane-v0.5.2.exe`。
 
 ## 功能概览
 
 - 按 Project、Chat、最近活动和归档状态浏览本机 Codex 数据。
 - 使用本地 Folder 和 Group 整理 Project、Chat；支持多级文件夹、搜索、排序、多选和拖动。
-- 显示待回答（`?`）、未读、执行中、错误、执行时间、最后活动时间和额度状态；Projects 按钮同时收起或展开 Projects/Chats。
+- 显示待回答（`?`）、未读、执行中、错误、执行时间、最后活动时间和额度状态；Projects 与 Chats 各自关闭、各自展开。
 - 点击对话显示首 token、估算 token 速度和缓存命中率；“对话详情”提供分页轮次摘要、活动记录数、工具汇总、消耗和独立子代理统计。
 - Σ 合计运行中主对话的近期加权预测速度，工具等待时保留预测，当前压缩时排除；显示 `Σ≈125t/s`、`Σ0t/s` 或 `Σ—`，无静默超时归零，不接入 OpenTelemetry。
 - 点击额度默认打开重置记录：当前周期＋最近 5 条历史，每次加载更多 10 条。消耗页提供周期多选、自然时间、模型堆叠趋势和项目/日期/对话拆分。

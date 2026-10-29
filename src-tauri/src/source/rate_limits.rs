@@ -350,6 +350,7 @@ $null = [Console]::ReadLine()
 $null = [Console]::ReadLine()
 [Console]::WriteLine('{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12,"windowDurationMins":300}}}}')
 if ($env:RATE_TEST_MODE -eq 'no_exit') { Start-Sleep -Seconds 60 }
+if ($env:RATE_TEST_MODE -eq 'normal') { Start-Sleep -Milliseconds 300 }
 "#;
         for mode in ["no_reply", "no_exit", "normal"] {
             let pids = root.path().join(format!("{mode}.txt"));
@@ -360,9 +361,9 @@ if ($env:RATE_TEST_MODE -eq 'no_exit') { Start-Sleep -Seconds 60 }
                     .env("RATE_TEST_MODE", mode)
                     .env("RATE_TEST_PIDS", &pids),
                 Duration::from_secs(5),
-                Duration::from_millis(200),
+                Duration::from_secs(2), // Match production; PowerShell teardown can exceed 200 ms on CI.
             );
-            assert!(started.elapsed() < Duration::from_secs(7), "{mode}");
+            assert!(started.elapsed() < Duration::from_secs(9), "{mode}");
             match mode {
                 "no_reply" => assert!(result.unwrap_err().contains("查询超时")),
                 "no_exit" => assert!(result.unwrap_err().contains("退出超时")),

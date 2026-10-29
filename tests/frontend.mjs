@@ -525,36 +525,42 @@ vm.runInContext(`
       state.projectsCollapsed = state.projectChatsCollapsed = false;
       state.projectArchiveOpen = true;
       const expanded = renderProjectPane();
-      assert.ok(expanded.includes('data-action="toggle-project-section" data-kind="project"') && !expanded.includes('data-action="toggle-project-section" data-kind="chat"'));
+      assert.ok(expanded.includes('data-action="toggle-project-section" data-kind="project"') && expanded.includes('data-action="toggle-project-section" data-kind="chat"'));
       for (const kind of ['project','chat']) {
         const header = collapsedFolderSection(kind);
-        assert.equal((header.match(/<button/g)||[]).length,kind === 'project' ? 1 : 0,'only Projects keeps a restore button');
+        assert.equal((header.match(/<button/g)||[]).length,1,'each section keeps its own restore button');
         assert.ok(!header.includes('class="count"') && !header.includes('data-resize'));
-        if (kind === 'project') {
-          assert.ok(header.includes('href="#i-chevrons-up"'));
-          assert.ok(header.includes('title="恢复 Projects / Chats"') && header.includes('aria-label="恢复 Projects / Chats"'));
-        }
+        assert.ok(header.includes('href="#i-chevrons-up"'));
+        const label = '恢复 ' + (kind === 'project' ? 'Projects' : 'Chats');
+        assert.ok(header.includes('title="' + label + '"') && header.includes('aria-label="' + label + '"'));
+        assert.ok(header.includes('data-kind="' + kind + '"'));
       }
       toggle('project');
       assert.equal(state.projectsCollapsed,true);
-      assert.equal(state.projectChatsCollapsed,true);
+      assert.equal(state.projectChatsCollapsed,false,'closing Projects keeps Chats open');
       let markup = renderProjectPane();
       assert.ok(markup.includes(collapsedFolderSection('project')) && !markup.includes('class="scroll tree"'));
-      assert.ok(markup.includes(collapsedFolderSection('chat')) && !markup.includes('class="scroll project-chat-list"'));
-      assert.ok(!markup.includes('project-archive-panel') && state.projectArchiveOpen,'archive visibility is restored with Chats');
+      assert.ok(markup.includes('class="scroll project-chat-list"') && markup.includes('project-archive-panel'),'Chats and its archive stay visible');
       const stored = JSON.parse(localStorage.getItem(PREFERENCES_KEY));
-      assert.equal(stored.projectsCollapsed,true);assert.equal(stored.projectChatsCollapsed,true);
+      assert.equal(stored.projectsCollapsed,true);assert.equal(stored.projectChatsCollapsed,false);
       assert.equal(configurationDocument().layout.projectsCollapsed,true,'collapse flags are part of the existing layout export');
       assert.ok(validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({projectsCollapsed:true,projectChatsCollapsed:false})}}));
       assert.throws(()=>validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({projectsCollapsed:'true'})}}));
+      toggle('chat');
+      assert.equal(state.projectsCollapsed,true);assert.equal(state.projectChatsCollapsed,true);
+      markup = renderProjectPane();
+      assert.ok(markup.includes(collapsedFolderSection('chat')) && !markup.includes('class="scroll project-chat-list"'));
+      assert.ok(!markup.includes('project-archive-panel') && state.projectArchiveOpen,'closing Chats hides its archive without resetting the switch');
       const recent = state.projectRecentHeight;
       resizePanel('project-recent',recent+40);
       assert.equal(state.projectRecentHeight,recent,'both collapsed sections have no active height separator');
       resizePanel('project-structure',999);
       assert.equal(state.projectStructureHeight,saved.projectStructureHeight,'a hidden separator cannot overwrite the saved height');
-      toggle('chat');
-      assert.equal(state.projectsCollapsed,true);assert.equal(state.projectChatsCollapsed,true,'obsolete Chats control cannot separate the sections');
       toggle('project');
+      assert.equal(state.projectsCollapsed,false);assert.equal(state.projectChatsCollapsed,true,'restoring Projects leaves Chats closed');
+      markup = renderProjectPane();
+      assert.ok(markup.includes('class="scroll tree"') && !markup.includes('class="scroll project-chat-list"'));
+      toggle('chat');
       markup = renderProjectPane();
       assert.equal(state.projectsCollapsed,false);assert.equal(state.projectChatsCollapsed,false);
       assert.ok(markup.includes('class="scroll tree"') && markup.includes('class="scroll project-chat-list"') && markup.includes('project-archive-panel'));
@@ -565,9 +571,12 @@ vm.runInContext(`
         state.projectsCollapsed = collapsed;
         state.projectChatsCollapsed = !collapsed;
         markup = renderProjectPane();
-        assert.equal(state.projectChatsCollapsed,collapsed,'legacy independent states follow Projects');
+        assert.equal(state.projectChatsCollapsed,!collapsed,'rendering preserves independent saved states');
         assert.equal(markup.includes('class="scroll tree"'),!collapsed);
-        assert.equal(markup.includes('class="scroll project-chat-list"'),!collapsed);
+        assert.equal(markup.includes('class="scroll project-chat-list"'),collapsed);
+        render();
+        const persisted = JSON.parse(localStorage.getItem(PREFERENCES_KEY));
+        assert.equal(persisted.projectsCollapsed,collapsed);assert.equal(persisted.projectChatsCollapsed,!collapsed);
       }
     } finally { Object.assign(state,saved); }
   }
@@ -1330,17 +1339,9 @@ vm.runInContext(`
   dispatch('pointerup',{button:0,clientX:40,clientY:40,target:holdSource});
   assert.equal(press,null);
   assert.equal(suppressChatOpen,false,'hold without a move still lets the click open the chat');
-  state.localProjectFolders.add('KeepOpen');
-  state.openFolders.add('KeepOpen');
-  toggleAllFolders('project');
-  assert.ok(!state.openFolders.has('KeepOpen') && !state.openFolders.has(AUTO_PROJECT_FOLDER_KEY) && !state.openFolders.has(AUTO_PROJECT_PIN_KEY), 'header toggle collapses project folders');
-  toggleAllFolders('project');
-  assert.ok(state.openFolders.has('KeepOpen') && state.openFolders.has(AUTO_PROJECT_FOLDER_KEY) && state.openFolders.has(AUTO_PROJECT_PIN_KEY), 'header toggle expands project folders');
-  state.localProjectFolders.delete('KeepOpen'); state.openFolders.delete('KeepOpen');
   const paneHtml = renderProjectPane();
-  assert.ok(paneHtml.includes('data-action="toggle-all-folders"'));
-  assert.ok(paneHtml.indexOf('folder-toggle-all') < paneHtml.indexOf('<strong>Projects</strong>'));
-  assert.ok(paneHtml.includes('#i-chevron-down') || paneHtml.includes('#i-chevron-right'), 'expand-all uses a single chevron');
+  assert.ok(!paneHtml.includes('data-action="toggle-all-folders"') && !paneHtml.includes('folder-toggle-all'), 'section headers omit the bulk folder arrows');
+  assert.ok(paneHtml.includes('#i-chevron-down') || paneHtml.includes('#i-chevron-right'), 'folder rows retain their disclosure arrows');
   assert.ok(!paneHtml.includes('toggle-select-mode') && !paneHtml.includes('folder-toggle-mark'));
   assert.ok(!paneHtml.includes('data-drop-project-folder='), 'project pane is not a drop target');
   assert.ok(!paneHtml.includes('class="scroll project-chat-list" data-drop-folder='), 'chat pane is not a drop target');

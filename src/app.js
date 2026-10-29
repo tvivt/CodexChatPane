@@ -1638,22 +1638,21 @@ function projectRecentPanel() {
   return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}${chatSortButton('recentChatSort')}<span class="toolbar-spacer"></span><button class="icon-button" data-action="open-recent-rules" title="${t('动态规则')}" aria-label="${t('动态规则')}">${icon('activity')}</button><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
 }
 
-function projectSectionButton(collapsed = false) {
-  const label = `${t(collapsed ? '恢复' : '关闭')} Projects / Chats`;
-  return ui`<button class="icon-button ${collapsed ? 'section-restore' : 'section-close'}" data-action="toggle-project-section" data-kind="project" title="${esc(label)}" aria-label="${esc(label)}" aria-expanded="${!collapsed}">${icon(collapsed ? 'chevrons-up' : 'x')}</button>`;
+function projectSectionButton(kind = 'project', collapsed = false) {
+  const label = `${t(collapsed ? '恢复' : '关闭')} ${kind === 'project' ? 'Projects' : 'Chats'}`;
+  return ui`<button class="icon-button ${collapsed ? 'section-restore' : 'section-close'}" data-action="toggle-project-section" data-kind="${kind}" title="${esc(label)}" aria-label="${esc(label)}" aria-expanded="${!collapsed}">${icon(collapsed ? 'chevrons-up' : 'x')}</button>`;
 }
 function collapsedFolderSection(kind) {
-  return ui`<div class="view-block folder-view-block ${kind === 'project' ? 'project-structure' : 'project-chat-structure'} section-collapsed"><div class="folder-view-label"><strong>${kind === 'project' ? 'Projects' : 'Chats'}</strong><span class="toolbar-spacer"></span>${kind === 'project' ? projectSectionButton(true) : ''}</div></div>`;
+  return ui`<div class="view-block folder-view-block ${kind === 'project' ? 'project-structure' : 'project-chat-structure'} section-collapsed"><div class="folder-view-label"><strong>${kind === 'project' ? 'Projects' : 'Chats'}</strong><span class="toolbar-spacer"></span>${projectSectionButton(kind, true)}</div></div>`;
 }
 function renderProjectPane() {
-  state.projectChatsCollapsed = state.projectsCollapsed;
   const activeCount = state.projectsCollapsed ? 0 : filteredProjectFolderProjects().length;
   const archivedCount = state.projectChatsCollapsed ? 0 : projectChats().filter(chat => effectiveReasons(chat).length).length;
   const archiveOpen = state.projectArchiveOpen && !state.projectChatsCollapsed;
   return ui`<aside class="workspace-pane project-pane projects-workspace ${archiveOpen ? 'project-archive-open' : ''} ${state.projectsCollapsed ? 'projects-section-collapsed' : ''} ${state.projectChatsCollapsed ? 'chats-section-collapsed' : ''}" style="--project-recent-height:${state.projectRecentHeight}px;--project-structure-height:${state.projectStructureHeight}px;--project-label-width:${projectLabelWidth()}ch;--project-chat-time-width:${state.projectChatTimeWidth > 0 ? `${state.projectChatTimeWidth}px` : 'calc(var(--chat-lead) + 4px)'}" aria-label="Project 管理">
     ${projectRecentPanel()}
-    ${state.projectsCollapsed ? collapsedFolderSection('project') : ui`<div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}">${folderToggleAllButton('project')}<strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button>${projectSectionButton()}</div><div class="scroll tree">${projectTree()}</div></div>`}
-    ${state.projectChatsCollapsed ? collapsedFolderSection('chat') : ui`<div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="${state.projectsCollapsed ? 'project-recent' : 'project-structure'}" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t(state.projectsCollapsed ? '调整动态栏高度' : '调整 Project 与 Chat 文件夹高度')}">${folderToggleAllButton('chat')}<strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>`}
+    ${state.projectsCollapsed ? collapsedFolderSection('project') : ui`<div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}"><strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button>${projectSectionButton()}</div><div class="scroll tree">${projectTree()}</div></div>`}
+    ${state.projectChatsCollapsed ? collapsedFolderSection('chat') : ui`<div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="${state.projectsCollapsed ? 'project-recent' : 'project-structure'}" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t(state.projectsCollapsed ? '调整动态栏高度' : '调整 Project 与 Chat 文件夹高度')}"><strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}${projectSectionButton('chat')}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>`}
     ${archiveOpen ? ui`<div class="view-block project-archive-panel archive-block"><div class="view-head scope-head scope-archive">${icon('archive')}<span>${t('归档对话')}</span><span class="count">${archivedCount}</span><span class="toolbar-spacer"></span><button class="icon-button" data-action="toggle-project-archive" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></div><div class="scroll">${archivedChatList()}</div></div>` : ''}
   </aside>`;
 }
@@ -1852,22 +1851,6 @@ function projectFolderKeys() {
 function chatFolderKeys() {
   const prefix = `${state.projectId}${CHAT_FOLDER_SEPARATOR}`;
   return [autoChatPinKey(state.projectId), autoChatFolderKey(state.projectId), ...[...state.localChatFolders].filter(key => key.startsWith(prefix) && !state.recycledChatFolders.has(key))];
-}
-function foldersAreOpen(kind) {
-  const keys = kind === 'project' ? projectFolderKeys() : chatFolderKeys();
-  const set = kind === 'project' ? state.openFolders : state.openChatFolders;
-  return keys.some(key => set.has(key));
-}
-function toggleAllFolders(kind) {
-  const keys = kind === 'project' ? projectFolderKeys() : chatFolderKeys();
-  const set = kind === 'project' ? state.openFolders : state.openChatFolders;
-  if (keys.some(key => set.has(key))) keys.forEach(key => set.delete(key));
-  else keys.forEach(key => set.add(key));
-}
-function folderToggleAllButton(kind) {
-  const open = foldersAreOpen(kind);
-  const label = open ? t('全部折叠') : t('全部展开');
-  return ui`<button class="icon-button folder-toggle-all" data-action="toggle-all-folders" data-kind="${kind}" title="${label}" aria-label="${label}" aria-pressed="${open}">${icon(open ? 'chevron-down' : 'chevron-right')}</button>`;
 }
 function rowCheck(kind, id) {
   const selected = (kind === 'project' ? state.selectedProjectIds : state.selectedChatIds).has(id);
@@ -3639,7 +3622,6 @@ document.addEventListener("click", async event => {
       if (state[fields[0]]) focusInput(`${scope}-query`,state[fields[1]].length);
       return;
     }
-    if (name === 'toggle-all-folders') toggleAllFolders(action.dataset.kind);
     if (name === 'toggle-row-check') {
       const kind = action.dataset.kind;
       const row = action.closest(kind === 'project' ? '[data-project]' : '[data-chat]');
@@ -3712,8 +3694,9 @@ document.addEventListener("click", async event => {
     if (name === 'toggle-recent-project-column') { state.recentProjectColumnVisible = !state.recentProjectColumnVisible; render(); return; }
     if (name === 'toggle-project-recent-link') { state.projectRecentLinked = !state.projectRecentLinked; savePreferences(); render(); return; }
     if (name === 'toggle-project-section') {
-      if (action.dataset.kind !== 'project') return;
-      state.projectsCollapsed = state.projectChatsCollapsed = !state.projectsCollapsed;
+      if (action.dataset.kind === 'project') state.projectsCollapsed = !state.projectsCollapsed;
+      else if (action.dataset.kind === 'chat') state.projectChatsCollapsed = !state.projectChatsCollapsed;
+      else return;
       render();
       return;
     }
