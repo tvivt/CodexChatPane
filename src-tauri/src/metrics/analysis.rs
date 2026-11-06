@@ -6,7 +6,7 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 
-const VERSION: &str = "usage-analysis-v1";
+const VERSION: &str = "usage-analysis-v4";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Segment {
@@ -70,6 +70,8 @@ struct Payload {
     internal_chat_message_metadata_passthrough: Option<TurnId>,
     turn_attribution: Option<Attribution>,
     item: Option<Item>,
+    compaction_response_id: Option<String>,
+    latest_token_usage_record: Option<Value>,
 }
 #[derive(Serialize, Deserialize)]
 struct TurnId {
@@ -107,6 +109,9 @@ fn record(line: &str) -> Result<Option<Value>, serde_json::Error> {
         || head.payload.item.as_ref().and_then(|i| i.kind.as_deref()) == Some("UserMessage");
     if full {
         return serde_json::from_str(line).map(Some);
+    }
+    if head.kind == "compacted" {
+        return serde_json::to_value(head).map(Some);
     }
     let boundary = matches!(event, "task_started" | "task_complete" | "turn_aborted")
         || head
@@ -203,7 +208,7 @@ pub(crate) fn cached_signature(
             .map(|s| {
                 (
                     s.path.to_string_lossy().to_string(),
-                    format!("usage-v3:{:?}", s.stamp),
+                    format!("usage-v6:{:?}", s.stamp),
                 )
             })
             .collect(),
@@ -448,7 +453,7 @@ fn load(home: &Path, id: &str, db: Option<&Connection>) -> Result<Cursor, String
                 .map(|s| {
                     (
                         s.path.to_string_lossy().to_string(),
-                        format!("usage-v3:{:?}", s.stamp),
+                        format!("usage-v6:{:?}", s.stamp),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -576,8 +581,8 @@ mod tests {
         catalog
             .execute_batch("ALTER TABLE threads ADD COLUMN thread_source TEXT DEFAULT 'user';")
             .unwrap();
-        let request = |id: &str, input: u64| serde_json::json!({"type":"token_usage_record","timestamp":"1970-01-01T00:00:02Z","payload":{"turn_id":"one","response_id":id,"usage":{"input_tokens":input,"cached_input_tokens":input/2,"output_tokens":input/10,"reasoning_output_tokens":input/20}}});
-        let mut text=[serde_json::json!({"type":"session_meta","payload":{"id":"main"}}),serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}),serde_json::json!({"type":"turn_context","payload":{"turn_id":"one","model":"gpt-6.1-sol"}}),serde_json::json!({"type":"event_msg","timestamp":"1970-01-01T00:00:00Z","payload":{"type":"user_message","message":"First question"}}),request("a",100)].iter().map(|v|format!("{v}\n")).collect::<String>();
+        let request = |id: &str, input: u64, total: u64| serde_json::json!({"type":"token_usage_record","timestamp":"1970-01-01T00:00:02Z","payload":{"turn_id":"one","response_id":id,"usage":{"input_tokens":input,"cached_input_tokens":input/2,"output_tokens":input/10,"reasoning_output_tokens":input/20},"thread_token_usage":{"input_tokens":total,"cached_input_tokens":total/2,"output_tokens":total/10}}});
+        let mut text=[serde_json::json!({"type":"session_meta","payload":{"id":"main"}}),serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}),serde_json::json!({"type":"turn_context","payload":{"turn_id":"one","model":"gpt-6.1-sol"}}),serde_json::json!({"type":"event_msg","timestamp":"1970-01-01T00:00:00Z","payload":{"type":"user_message","message":"First question"}}),request("a",100,100)].iter().map(|v|format!("{v}\n")).collect::<String>();
         for _ in 0..70 {
             text.push_str(&format!("{}\n",serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(10_000)}})));
         }
@@ -612,7 +617,7 @@ mod tests {
             0,
             "unchanged analysis reads no source content"
         );
-        let extra = format!("{}\n{}\n", request("b", 200), legacy(500, 400));
+        let extra = format!("{}\n{}\n", request("b", 200, 300), legacy(500, 400));
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -626,7 +631,7 @@ mod tests {
             "append reads only the suffix and small safety guards"
         );
         check();
-        let partial = request("c", 300).to_string();
+        let partial = request("c", 300, 1000).to_string();
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -647,13 +652,15 @@ mod tests {
             .append(true)
             .open(&path)
             .unwrap()
-            .write_all(format!("{}\n{}\n", request("a", 100), request("a", 110)).as_bytes())
+            .write_all(
+                format!("{}\n{}\n", request("a", 100, 100), request("a", 110, 110)).as_bytes(),
+            )
             .unwrap();
         check();
         let rebuilt = format!(
             "{}\n{}\n",
             serde_json::json!({"type":"session_meta","payload":{"id":"main"}}),
-            request("reset", 500)
+            request("reset", 500, 500)
         );
         std::fs::write(&path, &rebuilt).unwrap();
         assert_eq!(valid(&check()).len(), 1);

@@ -6,9 +6,9 @@ CodexChatPane is a Windows companion sidebar for Codex Desktop. It brings local 
 
 This is an experimental personal project, not an official Codex Desktop component. It does not upload or host your conversations.
 
-## v0.5.2
+## v0.5.3
 
-[Release notes](doc/releases/v0.5.2.md) cover independent Projects/Chats close and restore controls, removal of bulk folder arrows from section titles, and a fix for the Windows CI process-exit test. Download `CodexChatPane-v0.5.2.exe` from [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.2).
+[Release notes](doc/releases/v0.5.3.md) cover server reset-card history, delayed request reconciliation, same-millisecond legacy requests and cumulative counter resets. The tag workflow builds `CodexChatPane-v0.5.3.exe` for [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.3).
 
 ## Features
 

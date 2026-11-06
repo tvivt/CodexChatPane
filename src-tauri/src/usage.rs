@@ -33,6 +33,8 @@ fn open_database(path: &Path) -> Result<Connection, String> {
          CREATE TABLE IF NOT EXISTS quota_ack(event_id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS quota_derivations(account TEXT NOT NULL,scope TEXT NOT NULL,version INTEGER NOT NULL,inputs INTEGER NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(account,scope));
          CREATE TABLE IF NOT EXISTS quota_event_alias(account TEXT NOT NULL,minutes INTEGER NOT NULL,old_id TEXT NOT NULL,event_id TEXT NOT NULL,PRIMARY KEY(account,minutes,old_id));
+         CREATE TABLE IF NOT EXISTS quota_card_history(scope TEXT NOT NULL,event_id TEXT NOT NULL,kind TEXT NOT NULL,occurred_at INTEGER NOT NULL,PRIMARY KEY(scope,event_id));
+         CREATE TABLE IF NOT EXISTS quota_card_sync(scope TEXT PRIMARY KEY,checked_at INTEGER NOT NULL,completed_at INTEGER NOT NULL,retry_until INTEGER NOT NULL,pending INTEGER NOT NULL,cursor TEXT,last_limits TEXT);
          CREATE TABLE IF NOT EXISTS usage_threads(id TEXT PRIMARY KEY,signature TEXT NOT NULL,title TEXT NOT NULL,project_id TEXT NOT NULL,project TEXT NOT NULL,parent TEXT,error TEXT);
          CREATE TABLE IF NOT EXISTS usage_requests(thread_id TEXT NOT NULL,response_id TEXT NOT NULL,at INTEGER,data TEXT NOT NULL,PRIMARY KEY(thread_id,response_id));
          CREATE INDEX IF NOT EXISTS usage_time ON usage_requests(at);

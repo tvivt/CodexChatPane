@@ -6,7 +6,9 @@ use std::path::Path;
 
 pub(crate) mod logs;
 mod recognizer;
+mod reset_cards;
 pub use logs::import;
+pub use reset_cards::refresh as refresh_reset_cards;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,8 +143,9 @@ fn history_cached(home: &Path, include_logs: bool) -> Result<History, String> {
         now() / 86_400_000
     );
     let key = format!(
-        "{include_logs}|{:?}|{key}",
-        super::context::identity(home).ok()
+        "{include_logs}|{:?}|{:?}|{key}",
+        super::context::identity(home).ok(),
+        reset_cards::revision(home)?
     );
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<(String, History)>>> =
         std::sync::OnceLock::new();
@@ -220,7 +223,15 @@ fn read_history(home: &Path, include_logs: bool) -> Result<History, String> {
     }
     let account = account.as_deref().unwrap_or("unknown");
     let identity = super::context::identity(home).unwrap_or_else(|_| "unconfirmed".into());
-    let live = recognizer::resolve(&db, account, &format!("{identity}|live"), &samples, None)?;
+    let cards = reset_cards::used(home)?;
+    let live = recognizer::resolve(
+        &db,
+        account,
+        &format!("{identity}|live"),
+        &samples,
+        None,
+        &cards,
+    )?;
     let live_end = samples.last().map(|s| s.until);
     let limits = samples.last().map(|s| s.value.clone());
     let (history_before, mut warnings) = if include_logs {
@@ -236,6 +247,7 @@ fn read_history(home: &Path, include_logs: bool) -> Result<History, String> {
             &format!("{identity}|history"),
             &samples,
             Some(&live),
+            &cards,
         )?
     } else {
         live
@@ -953,9 +965,13 @@ mod tests {
             .iter()
             .find(|c| c.minutes == 10080 && c.ended_at.is_none())
             .unwrap();
-        assert!(current
-            .started_at
-            .is_some_and(|at| at >= 1793169180894 && at <= 1793169420991));
+        let live_current = live
+            .cycles
+            .iter()
+            .find(|c| c.minutes == 10080 && c.ended_at.is_none())
+            .unwrap();
+        assert_eq!(current.started_at, live_current.started_at);
+        assert_eq!(current.id, live_current.id);
         let count: i64 = target
             .query_row("SELECT count(*) FROM quota_ack", [], |r| r.get(0))
             .unwrap();

@@ -282,21 +282,21 @@ fn candidate_mode_and_event_identity_survive_reopening_and_history_refinement() 
         sample(4, 40, 0.0, 2000),
     ];
     let db = crate::usage::database(dir.path()).unwrap();
-    let pending = resolve(&db, "test", "live", &samples[..3], None).unwrap();
+    let pending = resolve(&db, "test", "live", &samples[..3], None, &[]).unwrap();
     assert!(pending.windows[&300].candidate.is_some());
     drop(db);
     let db = crate::usage::database(dir.path()).unwrap();
-    let live = resolve(&db, "test", "live", &samples, None).unwrap();
+    let live = resolve(&db, "test", "live", &samples, None, &[]).unwrap();
     assert_eq!(ended(&live)[0].notice_id.as_deref(), Some("3-300"));
     let mut historical = sample(-25, 25, 0.0, 2000);
     historical.value.observation_source = Some("history-log".into());
     let mut merged = samples.clone();
     merged.push(historical);
-    let history = resolve(&db, "test", "history", &merged, Some(&live)).unwrap();
+    let history = resolve(&db, "test", "history", &merged, Some(&live), &[]).unwrap();
     assert_eq!(ended(&history)[0].notice_id.as_deref(), Some("3-300"));
     assert_eq!(history.events[0].after.at, 25_000);
     assert!(!history.events[0].historical);
-    let again = resolve(&db, "test", "history", &merged, Some(&live)).unwrap();
+    let again = resolve(&db, "test", "history", &merged, Some(&live), &[]).unwrap();
     assert_eq!(ended(&again)[0].notice_id, ended(&history)[0].notice_id);
     assert!(again.windows[&300].candidate.is_none());
 }

@@ -153,7 +153,7 @@ pub(crate) fn database(home: &Path) -> Result<Connection, String> {
     });
     let directory = home.join(".codex-chat-pane");
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let db = super::open_database(&directory.join(format!("usage-cache-{hash:016x}.sqlite")))?;
+    let mut db = super::open_database(&directory.join(format!("usage-cache-{hash:016x}.sqlite")))?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS cache_identity(value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage_reports(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage_indexed_ranges(key TEXT PRIMARY KEY,from_at INTEGER,to_at INTEGER);
@@ -183,6 +183,24 @@ pub(crate) fn database(home: &Path) -> Result<Connection, String> {
     if saved.is_none() {
         db.execute("INSERT INTO cache_identity VALUES(?1)", params![identity])
             .map_err(|e| e.to_string())?;
+    }
+    if db
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        < 3
+    {
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        if tx
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            < 3
+        {
+            // Rebuild consumption lazily with cumulative request identities; quota evidence and dismissals stay intact.
+            tx.execute_batch("DELETE FROM usage_requests; UPDATE usage_threads SET signature=''; DELETE FROM usage_reports; DELETE FROM usage_indexed_ranges; PRAGMA user_version=3;").map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
     }
     Ok(db)
 }
@@ -226,6 +244,61 @@ mod tests {
             assert_eq!(count.load(Ordering::SeqCst), 2);
         }
     }
+    #[test]
+    fn old_request_cache_expires_once_without_touching_quota_evidence() {
+        for old_version in [0, 1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            confirm(dir.path(), Some("account")).unwrap();
+            let db = database(dir.path()).unwrap();
+            db.execute_batch("INSERT INTO usage_threads VALUES('main','old-signature','Title','','Project',NULL,NULL);
+            INSERT INTO usage_requests VALUES('main','legacy-duplicate',1,'{}');
+            INSERT INTO usage_reports VALUES('old','old','{}');
+            INSERT INTO usage_indexed_ranges VALUES('all',NULL,NULL);
+            INSERT INTO quota_ack VALUES('123');
+            INSERT INTO quota_samples VALUES(1,1,1,'account','{}');
+            ").unwrap();
+            db.pragma_update(None, "user_version", old_version).unwrap();
+            drop(db);
+            let db = database(dir.path()).unwrap();
+            for table in ["usage_requests", "usage_reports", "usage_indexed_ranges"] {
+                assert_eq!(
+                    db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+            assert_eq!(
+                db.query_row("SELECT signature FROM usage_threads", [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                ""
+            );
+            for table in ["quota_samples", "quota_ack"] {
+                assert_eq!(
+                    db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+            }
+            db.execute(
+                "INSERT INTO usage_requests VALUES('main','rebuilt',1,'{}')",
+                [],
+            )
+            .unwrap();
+            drop(db);
+            assert_eq!(
+                database(dir.path())
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM usage_requests", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
     #[test]
     fn copied_cache_with_another_machine_identity_is_rejected() {
         let dir = tempfile::tempdir().unwrap();

@@ -4437,6 +4437,7 @@ if (isUsageWindow) {
     await loadToolConfig();
     await window.__TAURI__?.event?.listen?.('usage-index-progress',event => usageView.progress(event.payload));
     await window.__TAURI__?.event?.listen?.('usage-context-changed',() => {void usageView.invalidate();});
+    await window.__TAURI__?.event?.listen?.('quota-history-changed',() => usageView.historyChanged());
     await window.__TAURI__?.event?.listen?.('codex-source-changed',event => usageView.changed(event.payload||{}));
     await usageView.open();
   })();
@@ -4472,6 +4473,7 @@ if (isUsageWindow) {
     });
   }
 } else {
+  void window.__TAURI__?.event?.listen?.('quota-history-changed',()=>{void refreshQuotaNotices().catch(()=>{});});
   void window.__TAURI__?.event?.listen?.('usage-context-changed',()=>{
     quotaNoticeView.invalidate();++metricsContextGeneration;++metricsSelectionRequest;
     metricsRefreshKey='';chatMetrics.clear();runningMetricsKeys.clear();metricsPending.clear();

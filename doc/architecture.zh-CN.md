@@ -36,6 +36,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 - `metrics/details.rs`：完整计量后释放请求/活动正文，仅缓存轮次及全量汇总；4 个线程槽、50 条轮次/页，快照 ID 保持翻页一致，账号/来源/认证变化隔离。冷读或版本变化后的重开仍可能完整解析。
 - `src-tauri/src/source/rollout/generation.rs`：复用活动游标提取本线程轮次和模型配置，输出 `generation`；运行/终止沿用活动状态，不另造一套生命周期或读取任务。
 - `src-tauri/src/metrics/analysis.rs`：自己的请求、旧累计基线、问答边界和额度观察的一次流式分析及持久追加检查点。
+- `metrics/legacy.rs`：详情与持久分析共用的旧累计快照/新版逐请求对账，处理迟到双记录、压缩偏移和累计回退后的计数分段；不以时间邻近判断同一请求。
 - `src-tauri/src/usage/{context,costs,ledger}.rs`：身份隔离、消费索引/计价与额度周期；`costs/rounds.rs`、`ledger/logs.rs` 分别处理问题轮次和按月额度补读。
 - `usage/ledger/recognizer.rs`：只接收紧凑额度观察，统一固定/浮动模式、候选、稳定事件与采用边界；检查点及旧通知别名存既有额度库，独立于 Token 索引。
 - `src-tauri/src/codex_app_mcp.rs`：发现、调用和验证 Codex Desktop 内部 App MCP。
@@ -96,11 +97,12 @@ Chat 的工作状态和诊断来自结构化事件与受限日志读取；rollou
 | --- | --- | --- |
 | `metrics/latest.rs` | 当前轮次 parser、最新有效请求、至多 3 个同配置样本 | 32 个线程槽；追加读完整尾行，截断/创建身份/压缩/依赖变化重建；无预测阶段持久化 |
 | `metrics/details.rs` | 轮次摘要、完整汇总及工具/子代理元数据 | 4 个线程槽；窗口每页 50 轮；翻页零正文读取，快照失效重新打开；不缓存或传输请求/活动明细 |
-| `metrics/analysis.rs` | 验证后的用量、legacy 基线、问答短摘要和紧凑额度观察 | 持久版本 `usage-analysis-v1`；普通 JSONL 安全偏移追加，检查路径/创建时间/长度/mtime、首行及游标前小块；替换或历史链变化重建 |
+| `metrics/analysis.rs` | 验证后的用量、legacy 基线、问答短摘要和紧凑额度观察 | 持久版本 `usage-analysis-v4`；普通 JSONL 安全偏移追加，检查路径/创建时间/长度/mtime、首行及游标前小块；替换或历史链变化重建 |
 | `preview.rs` / `rollout_log.rs` | 分页正文、链元数据、压缩逻辑长度 | 预览 24、链 32、长度 128 项，逐项淘汰；不缓存整份解压正文；扩大压缩预览窗口仍可能重复顺序解码 |
 | `usage/costs.rs` | 逐请求明细、索引覆盖区间、按 UTC 日修订的报告 | `details-v7`；标题/项目/父子/覆盖/价表及相关日期变化失效；部分读取不认证完整范围 |
 | `usage/ledger.rs` | 当前身份下按输入版本构建的额度周期 | 8 项；新快照/导入修订/覆盖月/关闭标记/身份变化失效；分钟通知走 live-only，不合并导入历史 |
 | `usage/ledger/recognizer.rs` | 窗口模式、候选、事件证据、输入前缀与关闭别名 | `quota_derivations` / `quota_event_alias` 持久化；追加续判，历史插入仅重放紧凑观察；同一采用边界驱动显示与缓存分组 |
+| `usage/ledger/reset_cards.rs` | 后台只读兑卡历史、用户/账号缓存、分页限频与卡片消失补证 | `quota_card_history` / `quota_card_sync`；迟到证据只补正已有事件分类，通过 `quota-history-changed` 更新通知与已打开的重置记录，不重建周期或重扫 Token |
 
 追加检查是常规日志写入协议的优化，不是对任意同元数据、旧中段原地篡改的全文件校验；无完整内容哈希或文件系统日志证明。缓存命中可免读源正文，首次大日志/压缩读取仍可能较慢，不能把目录延迟等同整个 App 就绪时间。
 

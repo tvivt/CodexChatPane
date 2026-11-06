@@ -106,7 +106,7 @@ export function quotaNoticeMarkup(cycles, reports = new Map()) {
     const at=c.endedAt, start=c.startedAt;
     const duration=quotaCycleDuration(start,at);
     const remaining=Number.isFinite(c.remaining)?`${Math.round(c.remaining)}%`:'—';
-    return `<section><header class="quota-notice-head"><strong>${usageEscape(t('额度提前重置'))}</strong><time>${usageEscape(quotaNoticeTime(at))}</time><span title="${usageEscape(t('重置前剩余'))}">${usageEscape(t('剩余'))}${remaining}</span><button class="icon-button" data-quota-dismiss="${usageEscape(c.id)}" aria-label="${usageEscape(t('关闭'))}">×</button></header><p class="quota-notice-period"><span>${usageEscape(t('上次重置'))} ${usageEscape(quotaNoticeTime(start))}</span><span>${usageEscape(t('重置周期'))} ${duration}</span></p>${quotaModelList(reports.get(c.id))}</section>`;
+    return `<section><header class="quota-notice-head"><strong>${usageEscape(c.resetType==='card'?usageReset('card'):t('额度提前重置'))}</strong><time>${usageEscape(quotaNoticeTime(at))}</time><span title="${usageEscape(t('重置前剩余'))}">${usageEscape(t('剩余'))}${remaining}</span><button class="icon-button" data-quota-dismiss="${usageEscape(c.id)}" aria-label="${usageEscape(t('关闭'))}">×</button></header><p class="quota-notice-period"><span>${usageEscape(t('上次重置'))} ${usageEscape(quotaNoticeTime(start))}</span><span>${usageEscape(t('重置周期'))} ${duration}</span></p>${quotaModelList(reports.get(c.id))}</section>`;
   }).join('');
 }
 
@@ -636,6 +636,7 @@ export function createUsageView({invoke,nativeWindow}) {
       if(change.full){loaded.length=0;++indexRevision;cycleReports.clear();if(active){if(tab==='consumption')void load(true);else render();}}
       else updates.changed(change.threads||[]);
     },
+    historyChanged(){if(active)void readHistory().catch(()=>{});},
     async open(){const version=contextGeneration;active=true;dialog.show();render();try{if(!await readHistory()||!active)return;let initial;try{initial=JSON.stringify(range());}catch{}await Promise.all([discoverHistory(false,true),tab==='consumption'&&initial?load():Promise.resolve()]);if(active&&version===contextGeneration){if(mode==='cycles'&&!cycles().length){mode='calendar';unit='month';}if(tab==='consumption'&&initial!==JSON.stringify(range()))await load();}}catch(e){if(version===contextGeneration){error=String(e);render();}}},
     async invalidate(){++contextGeneration;++generation;updates.invalidate();clearTimeout(searchTimer);busy=false;historyLoading=false;historyJobs=0;historyLimit=5;report=null;error='';history={cycles:[]};loaded.length=0;indexing.clear();historyReads.clear();expanded.clear();roundReports.clear();expandedGroups.clear();showAllModels=false;trendMetric='tokens';expandedCycles.clear();cycleReports.clear();choices={projects:[],models:[]};filters={};search='';selection=['current'];mode='cycles';unit='day';anchor=usageDate(new Date());draft=null;group='project';tab='resets';render();if(active)await this.open();},
     progress(value){progress=`${t('正在建立消耗索引…')} ${value.done}/${value.total}`;const el=document.getElementById('usage-progress');if(el&&busy)el.textContent=progress;}

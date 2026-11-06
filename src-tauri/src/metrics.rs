@@ -1422,7 +1422,7 @@ mod tests {
                 assert!(result.subagents.iter().any(|agent| {
                     agent.thread_id == "01a109fc-84c3-72a2-a586-a1d939f558b0"
                         && agent.error.is_none()
-                        && agent.summary.is_some()
+                        && agent.summary.is_none()
                 }));
             } else {
                 assert_eq!(turn.metrics.output_tokens, Some(30364));

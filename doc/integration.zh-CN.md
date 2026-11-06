@@ -72,6 +72,8 @@ codex://threads/new?path=<project-path>
 
 ## 4. 安全边界
 
+重置卡历史是独立的只读 HTTP 来源：`usage/ledger/reset_cards.rs` GET `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/history`，以 `cursor` 续页。它是客户端自用接口，可能变化，不是 Codex MCP。仅对已确认且与登录资料一致的账号读取；使用内存中的访问令牌和账号头，交给 Windows 系统 `curl.exe` 的标准输入，不放命令行、缓存或日志，不跟随重定向，也不调用 `/consume`。单次请求限时 8 秒，切号响应弃置；失败保留缓存。用户 subject 只用于缓存隔离，不作为订阅或额度归属的推断依据。
+
 - 普通浏览不需要 MCP 同意。
 - 数据库、历史库、rollout 和日志以只读方式打开。
 - 应用不把对话正文上传到网络服务。

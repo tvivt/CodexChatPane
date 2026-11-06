@@ -70,6 +70,8 @@ If a tool is unavailable, the renderer is not active, or Codex returns an error,
 
 ## 4. Safety boundary
 
+Reset-card history is a separate read-only HTTP source in `usage/ledger/reset_cards.rs`: GET `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/history`, paginated with `cursor`. This client-internal interface may change and is not Codex MCP. Read only for a confirmed account matching the local credentials. Pass the in-memory bearer token and account header through Windows system `curl.exe` standard input, never command-line arguments, caches or logs. Do not follow redirects or call `/consume`. Bound each request to eight seconds, discard responses after identity changes, and retain cached evidence on failure. The token subject isolates user caches; it does not establish quota ownership.
+
 - Normal browsing does not require MCP consent.
 - Databases, history, rollouts, and logs are opened read only.
 - The app does not upload conversation text to a network service.

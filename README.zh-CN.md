@@ -6,9 +6,9 @@ CodexChatPane 是一个运行在 Windows 上的 Codex Desktop 辅助侧栏：把
 
 这是一个个人项目的实验性源码版本，不是 Codex Desktop 的官方组件，也不上传或托管对话数据。
 
-## v0.5.2
+## v0.5.3
 
-本版恢复 Projects/Chats 各自关闭、各自展开，移除标题前的批量折叠箭头，并修复 Windows CI 进程退出测试，详见[发布说明](doc/releases/v0.5.2.md)。从 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.2) 下载 `CodexChatPane-v0.5.2.exe`。
+本版加入服务端重置卡历史，修复迟到双记录、同毫秒旧请求和累计计数回退导致的统计错误，详见[发布说明](doc/releases/v0.5.3.md)。标签工作流构建 `CodexChatPane-v0.5.3.exe` 并上传至 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.3)。
 
 ## 功能概览
 

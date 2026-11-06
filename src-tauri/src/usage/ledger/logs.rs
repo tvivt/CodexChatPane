@@ -530,41 +530,63 @@ mod tests {
     fn months_are_lazy_and_known_other_accounts_are_excluded() {
         let dir = fixture();
         let home = dir.path();
+        let current = month_start(super::super::now()).unwrap();
+        let recent = month_start(current - 1).unwrap();
+        let older = month_start(recent - 1).unwrap();
+        let date = |at: i64| {
+            time::OffsetDateTime::from_unix_timestamp(at / 1000)
+                .unwrap()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let recent_at = recent + 3 * 86_400_000 + 3 * 3_600_000;
+        let older_at = older + 3 * 86_400_000 + 3 * 3_600_000;
         log(
             home,
             "oct",
             "user",
-            "2026-10-04T03:00:00Z",
+            &date(recent_at),
             vec![
                 json!({"type":"session_meta","payload":{"id":"oct"}}),
-                quota("oct", "2026-10-04T03:00:00Z", 50.0, "2026-10-10T00:00:00Z"),
+                quota(
+                    "oct",
+                    &date(recent_at),
+                    50.0,
+                    &date(recent + 9 * 86_400_000),
+                ),
             ],
         );
         log(
             home,
             "sep",
             "user",
-            "2026-09-04T03:00:00Z",
+            &date(older_at),
             vec![
                 json!({"type":"session_meta","payload":{"id":"sep","creator_account_id":"account"}}),
-                quota("sep", "2026-09-04T03:00:00Z", 50.0, "2026-09-10T00:00:00Z"),
+                quota("sep", &date(older_at), 50.0, &date(older + 9 * 86_400_000)),
             ],
         );
         log(
             home,
             "other",
             "user",
-            "2026-10-04T03:00:00Z",
+            &date(recent_at),
             vec![
                 json!({"type":"session_meta","payload":{"id":"other","creator_account_id":"other-account"}}),
-                quota("other", "2026-10-04T04:00:00Z", 0.0, "2026-10-11T00:00:00Z"),
+                quota(
+                    "other",
+                    &date(recent_at + 3_600_000),
+                    0.0,
+                    &date(recent + 10 * 86_400_000),
+                ),
             ],
         );
-        import(home, Some(at("2026-10-20T00:00:00Z"))).unwrap();
+        import(home, None).unwrap();
+        import(home, Some(current)).unwrap();
         let h = super::super::history(home).unwrap();
         assert_eq!(h.cycles.len(), 1);
-        assert_eq!(h.observed_since, Some(at("2026-10-04T03:00:00Z")));
-        assert_eq!(h.history_before, Some(at("2026-10-01T00:00:00Z")));
+        assert_eq!(h.observed_since, Some(recent_at));
+        assert_eq!(h.history_before, Some(recent));
         assert!(h.warnings.iter().any(|w| w.contains("账号归属")));
         assert_eq!(
             database(home)
@@ -579,7 +601,7 @@ mod tests {
         );
         import(home, h.history_before).unwrap();
         let h = super::super::history(home).unwrap();
-        assert_eq!(h.observed_since, Some(at("2026-09-04T03:00:00Z")));
+        assert_eq!(h.observed_since, Some(older_at));
         assert_eq!(h.history_before, None);
         context::confirm(home, Some("other-account")).unwrap();
         assert!(

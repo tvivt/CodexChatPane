@@ -152,6 +152,99 @@ fn initial(point: &Point, minutes: i64) -> Cycle {
 }
 
 impl State {
+    fn mark_card(&mut self, index: usize, ids: Vec<String>, source: &str) {
+        let event = &mut self.events[index];
+        // Reclassification must never turn a previously silent natural reset into a new notice.
+        event.historical |= event.kind == "natural";
+        event.kind = "card".into();
+        for id in ids {
+            if !event.card_ids.contains(&id) {
+                event.card_ids.push(id.clone());
+            }
+            self.redemptions
+                .insert(id, (event.after.at, Some(source.into())));
+        }
+        for cycle in &mut self.completed {
+            if cycle.minutes == event.minutes && cycle.notice_id.as_ref() == Some(&event.id) {
+                cycle.reset_type = Some("card".into());
+            }
+        }
+    }
+    fn classify_cards(&mut self, samples: &[Sample], cards: &[super::reset_cards::CardUse]) {
+        let eligible = |event: &Event| {
+            matches!(event.kind.as_str(), "early" | "natural" | "card")
+                && event.after.used + 1.0 <= event.before.used
+                && event.before.account.is_some()
+                && event.before.account == event.after.account
+        };
+        let matches: Vec<Vec<usize>> = cards
+            .iter()
+            .map(|card| {
+                self.events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, event)| {
+                        (eligible(event)
+                            && event.after.account.as_deref() == Some(&card.account)
+                            && event.before.at <= card.at
+                            && card.at <= event.after.at)
+                            .then_some(index)
+                    })
+                    .collect()
+            })
+            .collect();
+        for (card, indices) in cards.iter().zip(&matches) {
+            if let [index] = indices.as_slice() {
+                if matches.iter().filter(|other| other.contains(index)).count() == 1 {
+                    self.mark_card(
+                        *index,
+                        vec![format!("server:{}", card.id)],
+                        "server-history",
+                    );
+                }
+            }
+        }
+        for i in 1..samples.len().saturating_sub(1) {
+            let (before, after, confirmed) = (&samples[i - 1], &samples[i], &samples[i + 1]);
+            let ids = super::reset_cards::disappeared(before, after, confirmed);
+            if ids.is_empty() {
+                continue;
+            }
+            let from = if i >= 2 && samples[i - 2].value.account_id == before.value.account_id {
+                samples[i - 2].until
+            } else {
+                before.until
+            };
+            let indices: Vec<_> = self
+                .events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    (eligible(event)
+                        && event.after.account == after.value.account_id
+                        && event.before.at >= from
+                        && event.after.at <= confirmed.at)
+                        .then_some(index)
+                })
+                .collect();
+            if let [index] = indices.as_slice() {
+                // A server event with ambiguous window attribution cannot be resolved by guessing a window.
+                if matches
+                    .iter()
+                    .any(|indices| indices.len() > 1 && indices.contains(index))
+                {
+                    continue;
+                }
+                self.mark_card(
+                    *index,
+                    ids.into_iter()
+                        .map(|id| format!("disappeared:{id}"))
+                        .collect(),
+                    "card-disappearance",
+                );
+            }
+        }
+    }
     fn diagnostic(&mut self, message: &str) {
         if !self.diagnostics.iter().any(|old| old == message) {
             self.diagnostics.push(message.into());
@@ -649,6 +742,15 @@ impl State {
             self.rename(minutes, &old, &id);
             self.events[index].historical = historical;
         }
+        for index in 0..self.events.len() {
+            if let Some(known) = previous.events.iter().find(|old| {
+                old.id == self.events[index].id
+                    && old.minutes == self.events[index].minutes
+                    && old.kind == "card"
+            }) {
+                self.mark_card(index, known.card_ids.clone(), "retained-card-evidence");
+            }
+        }
     }
     fn preserve_live(&mut self, live: &Self) {
         if live.events.iter().any(|known| {
@@ -717,6 +819,7 @@ pub(super) fn resolve(
     scope: &str,
     samples: &[Sample],
     live: Option<&State>,
+    cards: &[super::reset_cards::CardUse],
 ) -> Result<State, String> {
     let points = observations(samples);
     let saved:Option<(i64,usize,String,String)>=db.query_row("SELECT version,inputs,fingerprint,state FROM quota_derivations WHERE account=?1 AND scope=?2",params![account,scope],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(|e|e.to_string())?;
@@ -749,6 +852,7 @@ pub(super) fn resolve(
         state.reconcile(live);
         state.preserve_live(live);
     }
+    state.classify_cards(samples, cards);
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     let percentages: HashMap<(i64, i64), f64> = samples
         .iter()

@@ -275,7 +275,7 @@ pub(crate) fn signature(home: &Path, id: &str, path: &Path) -> Result<Signature,
             let log = rollout_log::open(&p).map_err(|e| e.to_string())?;
             Ok((
                 p.to_string_lossy().into_owned(),
-                format!("usage-v3:{:?}", log.stamp),
+                format!("usage-v6:{:?}", log.stamp),
             ))
         })
         .collect()
@@ -288,7 +288,7 @@ pub(super) fn unchanged(saved: &str, root: &Path) -> bool {
         rollout_log::logical_path(Path::new(p)) == rollout_log::logical_path(root)
     }) && stamps.iter().all(|(p, stamp)| {
         rollout_log::open(Path::new(p))
-            .is_ok_and(|log| format!("usage-v3:{:?}", log.stamp) == *stamp)
+            .is_ok_and(|log| format!("usage-v6:{:?}", log.stamp) == *stamp)
     })
 }
 
@@ -1122,6 +1122,67 @@ pub fn reuse(home: &Path, data: &metrics::ChatMetrics) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "reindexes only two original real samples in the app cache; no Codex writes, stop the old Pane before running"]
+    fn live_original_samples_reindex_without_duplicate_usage() {
+        let home = crate::source::codex_home().unwrap();
+        let raw = Connection::open_with_flags(
+            home.join(".codex-chat-pane/usage.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let account: String = raw
+            .query_row(
+                "SELECT account FROM quota_samples ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(account, "unknown");
+        super::super::context::confirm(&home, Some(&account)).unwrap();
+        for (id, turn_id, expected_count, expected_output) in [
+            (
+                "01a109ee-08e0-7e10-a737-a8e2d4cf3b5d",
+                "01a109fc-3e8b-7342-9504-c5b6144be793",
+                82,
+                17341,
+            ),
+            (
+                "01a109fc-84c3-72a2-a586-a1d939f558b0",
+                "01a109fc-864f-79e0-877f-c4f48d00e605",
+                65,
+                30364,
+            ),
+        ] {
+            let query = Query {
+                thread_ids: Some(vec![id.into()]),
+                ..Default::default()
+            };
+            index(&home, None, &query, |_, _| {}).unwrap();
+            let data = crate::metrics::read_own(&home, id).unwrap();
+            let turn = data.turns.iter().find(|t| t.turn_id == turn_id).unwrap();
+            let from = turn
+                .requests
+                .iter()
+                .filter_map(|r| r.settled_at)
+                .min()
+                .unwrap();
+            let to = turn
+                .requests
+                .iter()
+                .filter_map(|r| r.settled_at)
+                .max()
+                .unwrap();
+            let db = database(&home).unwrap();
+            let actual: (i64, i64, i64) = db.query_row("SELECT COUNT(*),COALESCE(SUM(json_extract(data,'$.output')),0),COALESCE(SUM(response_id LIKE 'legacy-%'),0) FROM usage_requests WHERE thread_id=?1 AND at>=?2 AND at<=?3", params![id,from,to], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!(actual, (expected_count, expected_output, 0));
+            crate::rollout_log::read_stats(true);
+            index(&home, None, &query, |_, _| {}).unwrap();
+            assert_eq!(crate::rollout_log::read_stats(false).bytes, 0);
+            println!("id={id} cached_requests={} cached_output={} legacy_duplicates=0 warm_source_bytes=0", actual.0, actual.1);
+        }
+    }
+
+    #[test]
     fn zero_rated_requests_keep_tokens_roles_and_invalidate_old_price_reports() {
         let dir = tempfile::tempdir().unwrap();
         super::super::context::confirm(dir.path(), Some("test")).unwrap();
@@ -1220,6 +1281,170 @@ mod tests {
         assert!(!super::covered(&db, &query).unwrap());
     }
     use super::*;
+
+    #[test]
+    fn same_millisecond_legacy_requests_survive_incremental_cache_and_round_totals() {
+        use serde_json::json;
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        super::super::context::confirm(home, Some("test-account")).unwrap();
+        let path = home.join("main.jsonl");
+        let catalog = Connection::open(home.join("state_5.sqlite")).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,rollout_path TEXT,created_at INTEGER,updated_at INTEGER,thread_source TEXT,cwd TEXT,model TEXT,archived INTEGER DEFAULT 0);").unwrap();
+        catalog.execute("INSERT INTO threads(id,title,rollout_path,created_at,updated_at,thread_source) VALUES('main','Main',?1,0,10,'user')", [path.to_string_lossy().as_ref()]).unwrap();
+        let old = |n: u64| json!({"type":"event_msg","timestamp":"1970-01-01T00:00:01Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":10},"total_token_usage":{"input_tokens":100*n,"cached_input_tokens":60*n,"output_tokens":10*n}}}});
+        let initial = [
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            json!({"type":"event_msg","timestamp":"1970-01-01T00:00:00Z","payload":{"type":"task_started","turn_id":"one"}}),
+            json!({"type":"turn_context","payload":{"turn_id":"one","model":"gpt-6.1-sol"}}),
+            json!({"type":"event_msg","timestamp":"1970-01-01T00:00:00Z","payload":{"type":"user_message","message":"Question"}}),
+            old(1),
+        ];
+        std::fs::write(
+            &path,
+            initial.iter().map(|r| format!("{r}\n")).collect::<String>(),
+        )
+        .unwrap();
+        index(home, None, &Query::default(), |_, _| {}).unwrap();
+        let first_id = crate::metrics::read_own(home, "main").unwrap().turns[0].requests[0]
+            .response_id
+            .clone();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file,"{}\n{}\n{}",old(2),old(2),json!({"type":"event_msg","timestamp":"1970-01-01T00:00:02Z","payload":{"type":"task_complete","turn_id":"one"}})).unwrap();
+        index(home, None, &Query::default(), |_, _| {}).unwrap();
+        let metrics = crate::metrics::read_own(home, "main").unwrap();
+        assert_eq!(
+            (metrics.summary.request_count, metrics.summary.output_tokens),
+            (2, Some(20))
+        );
+        assert_eq!(metrics.turns[0].requests[0].response_id, first_id);
+        assert_ne!(
+            metrics.turns[0].requests[0].response_id,
+            metrics.turns[0].requests[1].response_id
+        );
+        for query in [
+            Query::default(),
+            Query {
+                group: Some("round".into()),
+                thread_id: Some("main".into()),
+                source_thread_id: Some("main".into()),
+                agent: Some("main".into()),
+                ..Default::default()
+            },
+        ] {
+            let result = report(home, query).unwrap();
+            assert_eq!(
+                (
+                    result.totals.requests,
+                    result.totals.input,
+                    result.totals.cached,
+                    result.totals.output
+                ),
+                (2, 200, 120, 20)
+            );
+            assert_eq!(
+                result.rows.iter().map(|r| r.totals.requests).sum::<usize>(),
+                2
+            );
+        }
+        crate::rollout_log::read_stats(true);
+        index(home, None, &Query::default(), |_, _| {}).unwrap();
+        assert_eq!(crate::rollout_log::read_stats(false).bytes, 0);
+    }
+
+    #[test]
+    fn legacy_rollback_keeps_requests_in_incremental_round_and_consumption_caches() {
+        use serde_json::json;
+        use std::io::Write;
+        for known_turn in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path();
+            super::super::context::confirm(home, Some("test-account")).unwrap();
+            let path = home.join("main.jsonl");
+            let catalog = Connection::open(home.join("state_5.sqlite")).unwrap();
+            catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,rollout_path TEXT,created_at INTEGER,updated_at INTEGER,thread_source TEXT,cwd TEXT,model TEXT,archived INTEGER DEFAULT 0);").unwrap();
+            catalog.execute("INSERT INTO threads(id,title,rollout_path,created_at,updated_at,thread_source) VALUES('main','Main',?1,0,10,'user')",[path.to_string_lossy().as_ref()]).unwrap();
+            let old = |end: u64, last: u64| json!({"type":"event_msg","timestamp":"1970-01-01T00:00:01Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":last*10,"cached_input_tokens":last*6,"output_tokens":last},"total_token_usage":{"input_tokens":end*10,"cached_input_tokens":end*6,"output_tokens":end}}}});
+            let mut initial = vec![json!({"type":"session_meta","payload":{"id":"main"}})];
+            if known_turn {
+                initial.push(json!({"type":"event_msg","timestamp":"1970-01-01T00:00:00Z","payload":{"type":"task_started","turn_id":"one"}}));
+            }
+            initial.extend([json!({"type":"event_msg","timestamp":"1970-01-01T00:00:00Z","payload":{"type":"user_message","message":"Question"}}),old(10,10),old(20,10)]);
+            std::fs::write(
+                &path,
+                initial.iter().map(|r| format!("{r}\n")).collect::<String>(),
+            )
+            .unwrap();
+            index(home, None, &Query::default(), |_, _| {}).unwrap();
+            let before = crate::metrics::read_own(home, "main").unwrap();
+            let old_ids = before
+                .turns
+                .iter()
+                .flat_map(|t| &t.requests)
+                .map(|r| r.response_id.clone())
+                .collect::<HashSet<_>>();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{}", old(3, 3)).unwrap();
+            crate::metrics::read_own(home, "main").unwrap();
+            writeln!(file, "{}\n{}\n{}", old(8, 5), old(20, 12), old(20, 12)).unwrap();
+            if known_turn {
+                writeln!(file,"{}",json!({"type":"event_msg","timestamp":"1970-01-01T00:00:02Z","payload":{"type":"task_complete","turn_id":"one"}})).unwrap();
+            }
+            index(home, None, &Query::default(), |_, _| {}).unwrap();
+            let metrics = crate::metrics::read_own(home, "main").unwrap();
+            let requests = metrics
+                .turns
+                .iter()
+                .flat_map(|t| &t.requests)
+                .collect::<Vec<_>>();
+            assert_eq!(requests.len(), 4);
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|r| r.output_tokens.unwrap())
+                    .sum::<u64>(),
+                37
+            );
+            assert!(old_ids
+                .iter()
+                .all(|id| requests.iter().any(|r| &r.response_id == id)));
+            for query in [
+                Query::default(),
+                Query {
+                    group: Some("round".into()),
+                    thread_id: Some("main".into()),
+                    source_thread_id: Some("main".into()),
+                    agent: Some("main".into()),
+                    ..Default::default()
+                },
+            ] {
+                let result = report(home, query).unwrap();
+                assert_eq!(
+                    (
+                        result.totals.requests,
+                        result.totals.input,
+                        result.totals.cached,
+                        result.totals.output
+                    ),
+                    (4, 370, 222, 37)
+                );
+                assert_eq!(
+                    result.rows.iter().map(|r| r.totals.requests).sum::<usize>(),
+                    4
+                );
+            }
+            crate::rollout_log::read_stats(true);
+            index(home, None, &Query::default(), |_, _| {}).unwrap();
+            assert_eq!(crate::rollout_log::read_stats(false).bytes, 0);
+        }
+    }
 
     #[test]
     fn legacy_rounds_keep_empty_questions_partial_usage_and_unknown_requests_reconciled() {

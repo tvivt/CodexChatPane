@@ -432,6 +432,23 @@ async fn get_live_rate_limits(
         if let Err(error) = usage::ledger::record(&home, &limits) {
             quota_logger.warn(format!("quota history write failed error={error}"));
         }
+        let (reset_home, reset_limits, reset_app, reset_logger) = (
+            home.clone(),
+            limits.clone(),
+            app.clone(),
+            quota_logger.clone(),
+        );
+        tauri::async_runtime::spawn_blocking(move || {
+            match usage::ledger::refresh_reset_cards(&reset_home, &reset_limits) {
+                Ok(true) => {
+                    let _ = reset_app.emit("quota-history-changed", ());
+                }
+                Err(error) => {
+                    reset_logger.warn(format!("reset card history read failed error={error}"))
+                }
+                _ => {}
+            }
+        });
         if usage::context::identity(&home).ok() != previous {
             let _ = app.emit("usage-context-changed", ());
         }

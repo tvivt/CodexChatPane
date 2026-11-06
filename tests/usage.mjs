@@ -14,6 +14,10 @@ const start = new Date(2026,9,22,10).getTime(), end = new Date(2026,9,23,10).get
 const cycle = {id:'1-10080',minutes:10080,startedAt:start,observedStart:start,endedAt:end,boundaryFrom:end-60000,boundaryTo:end,scheduledReset:end+86400000,resetType:'early',outcome:'unknown',remaining:60,observedConsumed:40,incomplete:false,acknowledged:false};
 const notice = quotaNoticeMarkup([cycle]);
 assert.ok(notice.includes('额度提前重置'));
+const cardNotice = quotaNoticeMarkup([{...cycle,resetType:'card'}]);
+assert.ok(cardNotice.includes('<strong>重置卡</strong>') && !cardNotice.includes('额度提前重置'));
+assert.ok(cardNotice.includes('data-quota-dismiss="1-10080"'), 'card reclassification retains the notice identity');
+assert.equal(quotaNoticeMarkup([{...cycle,resetType:'card',acknowledged:true}]),'', 'late card evidence does not reopen a dismissed notice');
 assert.ok(notice.includes('<time>10-23 10:00</time>') && !notice.includes('2026-') && !notice.includes('～'), 'reset time uses the adopted query boundary without a year or range');
 assert.ok(notice.includes('剩余60%') && notice.includes('上次重置 10-22 10:00'));
 const longNotice=quotaNoticeMarkup([{...cycle,startedAt:end-60000-(5*24+5)*3600000}]);
@@ -82,6 +86,10 @@ assert.ok(unpricedNotice.includes('quota-notice-total') && unpricedNotice.includ
   assert.ok(element.innerHTML.includes('≈$0.0100'));
   await noticeView.refresh();
   assert.equal(pending.length,1,'settled notification summaries are reused');
+  noticeCycles=noticeCycles.map(c=>({...c,resetType:'card'}));
+  await noticeView.refresh();
+  assert.ok(element.innerHTML.includes('<strong>重置卡</strong>'));
+  assert.equal(pending.length,1,'reclassification reuses the same cycle report without reindexing');
   noticeCycles=[{...cycle,id:'later',noticeId:'later'}];
   await noticeView.refresh();await new Promise(setImmediate);
   noticeCycles=[];await noticeView.refresh();
