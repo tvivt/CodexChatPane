@@ -22,9 +22,13 @@ pub struct Cycle {
     pub boundary_to: Option<i64>,
     pub scheduled_reset: Option<i64>,
     pub reset_type: Option<String>,
+    #[serde(default)]
+    pub start_reset_type: Option<String>,
     pub outcome: String,
     pub exhausted_at: Option<i64>,
     pub remaining: f64,
+    #[serde(default)]
+    pub remaining_known: bool,
     pub observed_consumed: f64,
     pub incomplete: bool,
     pub acknowledged: bool,
@@ -259,7 +263,7 @@ fn read_history(home: &Path, include_logs: bool) -> Result<History, String> {
     let mut cycles = resolved.cycles();
     for cycle in &mut cycles {
         cycle.incomplete |= account == "unknown";
-        cycle.acknowledged = recognizer::historical(&resolved, cycle)
+        cycle.acknowledged |= recognizer::historical(&resolved, cycle)
             || db
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM quota_ack WHERE event_id=?1 OR event_id IN (SELECT old_id FROM quota_event_alias WHERE account=?2 AND minutes=?3 AND event_id=?1))",
@@ -649,19 +653,26 @@ mod tests {
         )
         .unwrap();
         let current = live.cycles.iter().find(|c| c.ended_at.is_none()).unwrap();
+        let current_from = current.started_at.unwrap_or(current.observed_start);
         let query = super::super::costs::Query {
-            from: current.started_at,
+            from: Some(current_from),
             to: current.ended_at,
             ..Default::default()
         };
         super::super::costs::index(home, None, &query, |_, _| {}).unwrap();
         let report = super::super::costs::report(home, query).unwrap();
         let report = serde_json::to_value(report).unwrap();
-        assert_eq!(report["totals"]["requests"], 4);
-        assert_eq!(report["totals"]["input"], 400);
+        assert!(
+            current.started_at.is_none(),
+            "rolling idle snapshots do not prove first use"
+        );
+        let expected = 3;
+        assert_eq!(report["totals"]["requests"], expected);
+        assert_eq!(report["totals"]["input"], expected * 100);
         assert_eq!(
-            report["totals"]["output"], 40,
-            "requests on both sides of the false old boundaries remain counted exactly once"
+            report["totals"]["output"],
+            expected * 10,
+            "requests after the known first use or observed prefix are counted once"
         );
         let ended = live.cycles.iter().find(|c| c.ended_at.is_some()).unwrap();
         let all = super::super::costs::Query {
@@ -683,19 +694,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            before["totals"]["requests"], 1,
-            "settlement immediately before the adopted boundary stays in the preceding period"
+            before["totals"]["requests"], 2,
+            "requests before the first confirmed recovery stay in the preceding period"
         );
+        let gap = if ended.ended_at == Some(current_from) {
+            json!({"totals":{"input":0,"output":0,"requests":0,"costUsd":0.0}})
+        } else {
+            serde_json::to_value(
+                super::super::costs::report(
+                    home,
+                    super::super::costs::Query {
+                        from: ended.ended_at,
+                        to: Some(current_from),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
         assert_eq!(total["totals"]["requests"], 5);
         for field in ["input", "output", "requests"] {
             assert_eq!(
                 before["totals"][field].as_u64().unwrap()
-                    + report["totals"][field].as_u64().unwrap(),
+                    + report["totals"][field].as_u64().unwrap()
+                    + gap["totals"][field].as_u64().unwrap(),
                 total["totals"][field].as_u64().unwrap()
             );
         }
         let cost = before["totals"]["costUsd"].as_f64().unwrap()
-            + report["totals"]["costUsd"].as_f64().unwrap();
+            + report["totals"]["costUsd"].as_f64().unwrap()
+            + gap["totals"]["costUsd"].as_f64().unwrap();
         assert!((cost - total["totals"]["costUsd"].as_f64().unwrap()).abs() < 1e-10);
         let multi = super::super::costs::Query {
             ranges: Some(vec![
@@ -704,17 +733,24 @@ mod tests {
                     to: ended.ended_at,
                 },
                 super::super::costs::Range {
-                    from: current.started_at.unwrap(),
+                    from: current_from,
                     to: None,
                 },
                 super::super::costs::Range {
-                    from: current.started_at.unwrap(),
+                    from: current_from,
                     to: None,
                 },
             ]),
             ..Default::default()
         };
-        assert_eq!(serde_json::to_value(super::super::costs::report(home,multi).unwrap()).unwrap()["totals"],total["totals"],"adjacent and duplicate selections regroup cached settled requests without duplicate consumption");
+        let selected =
+            serde_json::to_value(super::super::costs::report(home, multi).unwrap()).unwrap();
+        assert_eq!(
+            selected["totals"]["requests"].as_u64().unwrap()
+                + gap["totals"]["requests"].as_u64().unwrap(),
+            5,
+            "duplicate selections count once and exclude requests in an idle gap"
+        );
     }
     #[test]
     fn obsolete_sliding_notice_dismissal_aliases_the_retained_event_without_deleting_records() {

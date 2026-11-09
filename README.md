@@ -26,12 +26,13 @@ CodexChatPane is a Windows sidebar for Codex Desktop that helps you find chats, 
 - Switch to Consumption to view Token usage and estimated API-equivalent cost by period, date, project, chat, or model.
 - API-equivalent cost is an estimate, not your subscription bill. See [Usage and consumption](doc/usage-history.zh-CN.md) for definitions.
 
-## What's new in v0.5.3
+## v0.5.4
 
-- Show reset-card history and improve reset labels.
-- Fix duplicated or missing requests and Token usage in some chat statistics.
+- Start each quota period at first use and label it by the reset that ended it.
+- Show unconfirmed natural resets and estimated times clearly when observations are missing.
+- Keep period selection, duration, Token usage, and cost totals aligned when late evidence arrives.
 
-See the [release notes](doc/releases/v0.5.3.md).
+See the [v0.5.4 notes](doc/releases/v0.5.4.md). Windows downloads are available from [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases).
 
 ## Compatibility and status
 
@@ -53,7 +54,7 @@ See the [release notes](doc/releases/v0.5.3.md).
 | Complete feature index | [Documentation](doc/README.md) |
 | Latency, speed, and statistics definitions (Chinese) | [Conversation metrics](doc/conversation-metrics.zh-CN.md) |
 | Quotas, consumption, and cost estimates (Chinese) | [Usage and consumption](doc/usage-history.zh-CN.md) |
-| v0.5.3 changes | [Release notes](doc/releases/v0.5.3.md) |
+| v0.5.4 changes | [Release notes](doc/releases/v0.5.4.md) |
 | Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
 ## Data and safety

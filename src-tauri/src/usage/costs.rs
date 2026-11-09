@@ -1357,6 +1357,345 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "indexes selected real periods only in a marked copied CODEX_HOME"]
+    fn live_precise_period_consumption_from_isolated_catalog() {
+        let home = crate::source::codex_home().unwrap();
+        assert!(
+            home.join(".period-verification-home").is_file(),
+            "requires an isolated copied catalog"
+        );
+        let quota = Connection::open_with_flags(
+            home.join(".codex-chat-pane/usage.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let account: String = quota
+            .query_row(
+                "SELECT account FROM quota_samples ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        super::super::context::confirm(&home, Some(&account)).unwrap();
+        let (a, b, c) = (
+            1_793_288_224_000i64,
+            1_793_893_024_000i64,
+            1_793_990_854_232i64,
+        );
+        let (first_b, first_c) = (1_793_970_200_000i64, 1_793_990_890_000i64);
+        let query = Query {
+            from: Some(a),
+            ..Default::default()
+        };
+        index(&home, None, &query, |_, _| {}).unwrap();
+        let mut pieces = Vec::new();
+        for (from, to) in [(a, Some(b)), (first_b, Some(c)), (first_c, None)] {
+            let result = report(
+                &home,
+                Query {
+                    from: Some(from),
+                    to,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                result.indexed,
+                "selected period must have a complete index certificate; warnings={:?}",
+                result.warnings
+            );
+            println!(
+                "period=[{from},{to:?}) totals={}",
+                serde_json::to_string(&result.totals).unwrap()
+            );
+            pieces.push(result.totals);
+        }
+        for (ranges, indices) in [
+            (
+                vec![
+                    Range {
+                        from: a,
+                        to: Some(b),
+                    },
+                    Range {
+                        from: first_b,
+                        to: Some(c),
+                    },
+                ],
+                vec![0, 1],
+            ),
+            (
+                vec![
+                    Range {
+                        from: a,
+                        to: Some(b),
+                    },
+                    Range {
+                        from: first_c,
+                        to: None,
+                    },
+                    Range {
+                        from: a,
+                        to: Some(b),
+                    },
+                ],
+                vec![0, 2],
+            ),
+            (
+                vec![
+                    Range {
+                        from: a,
+                        to: Some(b),
+                    },
+                    Range {
+                        from: first_b,
+                        to: Some(c),
+                    },
+                    Range {
+                        from: first_c,
+                        to: None,
+                    },
+                ],
+                vec![0, 1, 2],
+            ),
+        ] {
+            let result = report(
+                &home,
+                Query {
+                    ranges: Some(ranges),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result.totals.requests,
+                indices.iter().map(|&i| pieces[i].requests).sum::<usize>()
+            );
+            assert_eq!(
+                result.totals.input,
+                indices.iter().map(|&i| pieces[i].input).sum::<u64>()
+            );
+            assert_eq!(
+                result.totals.output,
+                indices.iter().map(|&i| pieces[i].output).sum::<u64>()
+            );
+            assert!(
+                (result.totals.cost_usd - indices.iter().map(|&i| pieces[i].cost_usd).sum::<f64>())
+                    .abs()
+                    < 1e-6
+            );
+            println!(
+                "selection={indices:?} totals={}",
+                serde_json::to_string(&result.totals).unwrap()
+            );
+        }
+        let gaps = report(
+            &home,
+            Query {
+                ranges: Some(vec![
+                    Range {
+                        from: b,
+                        to: Some(first_b),
+                    },
+                    Range {
+                        from: c,
+                        to: Some(first_c),
+                    },
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let calendar = report(&home, query.clone()).unwrap();
+        assert_eq!(
+            calendar.totals.requests,
+            pieces.iter().map(|p| p.requests).sum::<usize>() + gaps.totals.requests
+        );
+        assert_eq!(
+            calendar.totals.input,
+            pieces.iter().map(|p| p.input).sum::<u64>() + gaps.totals.input
+        );
+        assert_eq!(
+            calendar.totals.output,
+            pieces.iter().map(|p| p.output).sum::<u64>() + gaps.totals.output
+        );
+        assert!(
+            (calendar.totals.cost_usd
+                - pieces.iter().map(|p| p.cost_usd).sum::<f64>()
+                - gaps.totals.cost_usd)
+                .abs()
+                < 1e-6
+        );
+        println!("idle_gaps={}", serde_json::to_string(&gaps.totals).unwrap());
+        crate::rollout_log::read_stats(true);
+        index(&home, None, &query, |_, _| {}).unwrap();
+        let bytes = crate::rollout_log::read_stats(false).bytes;
+        assert_eq!(bytes, 0, "reselection reuses the indexed source snapshots");
+        println!("warm_source_bytes={bytes}");
+    }
+
+    #[test]
+    fn precise_reset_boundaries_partition_cached_requests_and_money_once() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        super::super::context::confirm(home, Some("test-account")).unwrap();
+        let path = home.join("main.jsonl");
+        let catalog = Connection::open(home.join("state_5.sqlite")).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,rollout_path TEXT,created_at INTEGER,updated_at INTEGER,thread_source TEXT,cwd TEXT,model TEXT,archived INTEGER DEFAULT 0);").unwrap();
+        catalog.execute("INSERT INTO threads(id,title,rollout_path,created_at,updated_at,thread_source) VALUES('main','Main',?1,0,10,'user')",[path.to_string_lossy().as_ref()]).unwrap();
+        let (a, b, c) = (
+            1_793_288_113_355i64,
+            1_793_893_024_000i64,
+            1_793_990_854_232i64,
+        );
+        let (first_a, first_b, first_c) = (
+            1_793_288_224_000i64,
+            1_793_970_200_000i64,
+            1_793_990_890_000i64,
+        );
+        let mut lines = vec![
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            json!({"type":"turn_context","payload":{"turn_id":"one","model":"gpt-6.1-sol"}}),
+        ];
+        for (i, at) in [a, first_a, b, first_b, c, first_c]
+            .into_iter()
+            .flat_map(|at| [at - 1, at, at + 1])
+            .into_iter()
+            .enumerate()
+        {
+            let at = time::OffsetDateTime::from_unix_timestamp_nanos(at as i128 * 1_000_000)
+                .unwrap()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap();
+            lines.push(json!({"type":"token_usage_record","timestamp":at,"payload":{"thread_id":"main","turn_id":"one","response_id":format!("request-{i}"),"usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":10,"total_tokens":110}}}));
+        }
+        std::fs::write(
+            &path,
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        index(home, None, &Query::default(), |_, _| {}).unwrap();
+        for (ranges, expected) in [
+            (
+                vec![Range {
+                    from: a - 1000,
+                    to: Some(a),
+                }],
+                1,
+            ),
+            (
+                vec![Range {
+                    from: first_a,
+                    to: Some(b),
+                }],
+                3,
+            ),
+            (
+                vec![Range {
+                    from: first_b,
+                    to: Some(c),
+                }],
+                3,
+            ),
+            (
+                vec![Range {
+                    from: first_c,
+                    to: None,
+                }],
+                2,
+            ),
+            (
+                vec![
+                    Range {
+                        from: a - 1000,
+                        to: Some(a),
+                    },
+                    Range {
+                        from: first_a,
+                        to: Some(b),
+                    },
+                    Range {
+                        from: a - 1000,
+                        to: Some(a),
+                    },
+                ],
+                4,
+            ),
+            (
+                vec![
+                    Range {
+                        from: a - 1000,
+                        to: Some(a),
+                    },
+                    Range {
+                        from: first_b,
+                        to: Some(c),
+                    },
+                ],
+                4,
+            ),
+            (
+                vec![
+                    Range {
+                        from: first_a,
+                        to: Some(b),
+                    },
+                    Range {
+                        from: first_b,
+                        to: Some(c),
+                    },
+                    Range {
+                        from: first_c,
+                        to: None,
+                    },
+                ],
+                8,
+            ),
+            (
+                vec![
+                    Range {
+                        from: a,
+                        to: Some(first_a),
+                    },
+                    Range {
+                        from: b,
+                        to: Some(first_b),
+                    },
+                    Range {
+                        from: c,
+                        to: Some(first_c),
+                    },
+                ],
+                9,
+            ),
+        ] {
+            let data = report(
+                home,
+                Query {
+                    ranges: Some(ranges),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(data.totals.requests, expected);
+            assert_eq!(data.totals.input, expected as u64 * 100);
+            assert_eq!(data.totals.output, expected as u64 * 10);
+            assert!((data.totals.cost_usd - expected as f64 * 0.000205).abs() < 1e-12);
+        }
+        crate::rollout_log::read_stats(true);
+        index(home, None, &Query::default(), |_, _| {}).unwrap();
+        assert_eq!(
+            crate::rollout_log::read_stats(false).bytes,
+            0,
+            "regrouping precise boundaries keeps the warm source cache"
+        );
+    }
+
+    #[test]
     fn legacy_rollback_keeps_requests_in_incremental_round_and_consumption_caches() {
         use serde_json::json;
         use std::io::Write;

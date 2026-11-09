@@ -18,7 +18,7 @@ export function setLanguage(value) {
 
 const english = {
   '活动记录数':'Activity records', '上一页':'Previous page', '下一页':'Next page',
-  '上次重置':'Previous reset', '重置前剩余':'Remaining before reset', 'API 等价':'API equivalent',
+  '含待确认周期，按预计截止统计':'Includes an unconfirmed period; usage uses the estimated deadline', '自然重置(待确认)':'Natural reset (unconfirmed)', '预计':'Estimated', '预计结束':'Estimated end', '预计周期':'Estimated period', '结束时间':'End time', '首次使用':'First use', '上次重置':'Previous reset', '重置前剩余':'Remaining before reset', 'API 等价':'API equivalent',
   '运行中对话总速度':'Combined speed of running chats',
   '估算':'Estimated', '个运行中对话':' running chats',
   '从首次观测计算':'Duration since the first observation',

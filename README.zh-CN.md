@@ -26,12 +26,13 @@ CodexChatPane 是 Codex Desktop 的 Windows 辅助侧栏，帮你找对话、看
 - 切换到“消耗”，按周期、日期、项目、对话或模型查看 Token 用量和 API 等价金额。
 - API 等价金额是估算，不是订阅账单；具体口径见[额度与消耗](doc/usage-history.zh-CN.md)。
 
-## v0.5.3 更新
+## v0.5.4
 
-- 展示重置卡历史，改善重置类型标识。
-- 修正部分对话请求数和 Token 消耗重复或遗漏的问题。
+- 额度周期从首次使用开始，历史行显示结束该周期的重置方式。
+- 缺少观测时，明确显示“自然重置(待确认)”及预计时间。
+- 晚到证据修正后，周期选择、持续时间、Token 和金额合计一起更新。
 
-详见[发布说明](doc/releases/v0.5.3.md)。
+详见 [v0.5.4 说明](doc/releases/v0.5.4.md)；Windows 下载附件见 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases)。
 
 ## 兼容性与当前状态
 
@@ -53,7 +54,7 @@ CodexChatPane 是 Codex Desktop 的 Windows 辅助侧栏，帮你找对话、看
 | 完整功能目录 | [文档总览](doc/README.md) |
 | 首字、速度和统计口径 | [对话指标](doc/conversation-metrics.zh-CN.md) |
 | 额度、消耗和金额估算 | [额度与消耗](doc/usage-history.zh-CN.md) |
-| v0.5.3 改动 | [发布说明](doc/releases/v0.5.3.md) |
+| v0.5.4 改动 | [发布说明](doc/releases/v0.5.4.md) |
 | 源码环境、测试与构建 | [开发与验证](doc/development.zh-CN.md) |
 
 ## 数据与安全边界

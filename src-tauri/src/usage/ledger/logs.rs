@@ -477,14 +477,14 @@ mod tests {
             2,
             "jitter and copied histories cannot invent resets"
         );
-        assert_eq!(cycle.ended_at, Some(at("2026-10-04T03:01:00Z")));
+        assert_eq!(cycle.ended_at, Some(at("2026-10-04T18:00:00Z")));
         assert!(
             cycle.acknowledged,
             "importing old history never emits a notification"
         );
         let query = costs::Query {
-            from: cycle.ended_at,
-            to: None,
+            from: Some(cycle.started_at.unwrap_or(cycle.observed_start)),
+            to: cycle.ended_at,
             group: Some("model".into()),
             ..Default::default()
         };

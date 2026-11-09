@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 const FIXED_MS: i64 = 5_000;
 const FLOAT_MS: i64 = 5_000;
 const WIDE_MS: i64 = 120_000;
-const VERSION: i64 = 2;
+const VERSION: i64 = 5;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum Mode {
@@ -115,6 +115,10 @@ pub(super) struct State {
     redemptions: BTreeMap<String, (i64, Option<String>)>,
     diagnostics: Vec<String>,
     ambiguous: bool,
+    #[serde(default)]
+    card_events: BTreeMap<String, String>,
+    #[serde(default)]
+    projected: Option<Vec<Cycle>>,
 }
 
 fn event_id(id: i64, minutes: i64) -> String {
@@ -136,6 +140,7 @@ fn initial(point: &Point, minutes: i64) -> Cycle {
         boundary_to: None,
         scheduled_reset: point.deadline,
         reset_type: None,
+        start_reset_type: None,
         outcome: if point.used >= 100.0 {
             "exhausted"
         } else {
@@ -144,6 +149,7 @@ fn initial(point: &Point, minutes: i64) -> Cycle {
         .into(),
         exhausted_at: (point.used >= 100.0).then_some(point.at),
         remaining: 100.0 - point.used,
+        remaining_known: true,
         observed_consumed: 0.0,
         incomplete: true,
         acknowledged: false,
@@ -304,6 +310,7 @@ impl State {
         w.cycle = initial(first, minutes);
         w.cycle.id = format!("{id}-{minutes}");
         w.cycle.started_at = Some(adopted);
+        w.cycle.start_reset_type = Some(kind.into());
         w.cycle.incomplete =
             first.at - before.at > WIDE_MS || matches!(kind, "plan_changed" | "account_changed");
         w.cycle.observed_consumed = first.used;
@@ -603,6 +610,14 @@ impl State {
                             before_mode,
                             card,
                         };
+                    } else if !supports
+                        && !candidate.recovery
+                        && !candidate.card
+                        && !conflict
+                        && p.deadline.is_some()
+                    {
+                        candidate.first = p.clone();
+                        self.accept(&mut w, p.clone());
                     }
                     candidate.last = p.clone();
                     w.candidate = Some(candidate);
@@ -642,9 +657,28 @@ impl State {
         }
     }
     pub(super) fn cycles(&self) -> Vec<Cycle> {
+        self.projected
+            .clone()
+            .unwrap_or_else(|| self.observed_cycles())
+    }
+    fn observed_cycles(&self) -> Vec<Cycle> {
         let mut result = self.completed.clone();
+        for cycle in &mut result {
+            cycle.remaining_known = true;
+            cycle.start_reset_type = self
+                .events
+                .iter()
+                .find(|e| cycle.id == format!("{}-{}", e.id, e.minutes))
+                .map(|e| e.kind.clone());
+        }
         result.extend(self.windows.values().map(|w| {
             let mut cycle = w.cycle.clone();
+            cycle.remaining_known = true;
+            cycle.start_reset_type = self
+                .events
+                .iter()
+                .find(|e| cycle.id == format!("{}-{}", e.id, e.minutes))
+                .map(|e| e.kind.clone());
             let display = if w.observed.priority() < w.last.priority()
                 && !w.observed.same_deadline(&w.last)
             {
@@ -683,6 +717,7 @@ impl State {
         }
     }
     fn reconcile(&mut self, previous: &Self) {
+        self.card_events.extend(previous.card_events.clone());
         if self.events.iter().any(|event| {
             previous
                 .events
@@ -741,6 +776,21 @@ impl State {
             let (minutes, old) = (event.minutes, event.id.clone());
             self.rename(minutes, &old, &id);
             self.events[index].historical = historical;
+        }
+        for event in &mut self.events {
+            if !previous
+                .events
+                .iter()
+                .any(|old| old.id == event.id && old.minutes == event.minutes)
+                && previous.windows.get(&event.minutes).is_some_and(|w| {
+                    w.observed.at >= event.after.at
+                        && !w.candidate.as_ref().is_some_and(|c| {
+                            (c.recovery || c.card) && c.before.at == event.before.at
+                        })
+                })
+            {
+                event.historical = true;
+            }
         }
         for index in 0..self.events.len() {
             if let Some(known) = previous.events.iter().find(|old| {
@@ -825,7 +875,6 @@ pub(super) fn resolve(
     let saved:Option<(i64,usize,String,String)>=db.query_row("SELECT version,inputs,fingerprint,state FROM quota_derivations WHERE account=?1 AND scope=?2",params![account,scope],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(|e|e.to_string())?;
     let previous = saved
         .as_ref()
-        .filter(|row| row.0 == VERSION)
         .and_then(|row| serde_json::from_str::<State>(&row.3).ok());
     let resume = previous.as_ref().is_some_and(|state| !state.ambiguous)
         && saved
@@ -853,6 +902,11 @@ pub(super) fn resolve(
         state.preserve_live(live);
     }
     state.classify_cards(samples, cards);
+    state.projected = saved
+        .as_ref()
+        .filter(|row| row.0 >= 4)
+        .and_then(|_| previous.as_ref().and_then(|s| s.projected.clone()));
+    let card_aliases = state.project_boundaries(samples, cards);
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     let percentages: HashMap<(i64, i64), f64> = samples
         .iter()
@@ -886,6 +940,13 @@ pub(super) fn resolve(
             }
         }
     }
+    for (minutes, old, new) in card_aliases {
+        tx.execute(
+            "INSERT OR REPLACE INTO quota_event_alias VALUES(?1,?2,?3,?4)",
+            params![account, minutes, old, new],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.execute("INSERT INTO quota_derivations VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(account,scope) DO UPDATE SET version=excluded.version,inputs=excluded.inputs,fingerprint=excluded.fingerprint,state=excluded.state",params![account,scope,VERSION,points.len(),fingerprint(&points)?,serde_json::to_string(&state).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(state)
@@ -899,3 +960,5 @@ pub(super) fn historical(state: &State, cycle: &Cycle) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+mod boundaries;

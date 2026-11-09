@@ -23,6 +23,301 @@ fn ended(state: &State) -> Vec<Cycle> {
 }
 
 #[test]
+fn weekly_gap_crossing_expiry_is_pending_and_cache_replay_preserves_identity() {
+    let start = 1_000_000;
+    let expiry = start + 604800;
+    let next_start = expiry + 80_000;
+    let point = |id, at, used, deadline| {
+        let mut value = sample(id, at, used, deadline);
+        value.value.primary.as_mut().unwrap().window_minutes = 10080;
+        value
+    };
+    let mut samples = vec![
+        point(1, expiry - 7200, 40.0, expiry),
+        point(2, expiry - 3600, 41.0, expiry),
+        point(3, next_start + 30, 0.0, next_start + 604800),
+        point(4, next_start + 150, 1.0, next_start + 604800),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::usage::database(dir.path()).unwrap();
+    let state = resolve(&db, "test", "pending", &samples, None, &[]).unwrap();
+    let closing = ended(&state).pop().unwrap();
+    assert_eq!(closing.reset_type.as_deref(), Some("natural_pending"));
+    assert_eq!(
+        closing.ended_at,
+        Some(expiry * 1000),
+        "pending end is explicitly the estimate, never the last old sample"
+    );
+    let id = closing.notice_id.clone().unwrap();
+    let mut legacy = state.clone();
+    legacy
+        .projected
+        .as_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|c| c.notice_id.as_ref() == Some(&id))
+        .unwrap()
+        .reset_type = Some("natural".into());
+    db.execute(
+        "UPDATE quota_derivations SET version=4,state=?1 WHERE account='test' AND scope='pending'",
+        [serde_json::to_string(&legacy).unwrap()],
+    )
+    .unwrap();
+    db.execute("INSERT INTO quota_ack VALUES(?1)", [&id])
+        .unwrap();
+    let replayed = resolve(&db, "test", "pending", &samples, None, &[]).unwrap();
+    let closing = ended(&replayed).pop().unwrap();
+    assert_eq!(closing.reset_type.as_deref(), Some("natural_pending"));
+    assert_eq!(closing.notice_id.as_ref(), Some(&id));
+    samples.extend([
+        point(10, expiry - 30, 41.0, expiry),
+        point(11, expiry + 10, 0.0, expiry + 604810),
+        point(12, expiry + 70, 0.0, expiry + 604870),
+    ]);
+    samples.sort_by_key(|s| s.at);
+    let refined = resolve(&db, "test", "pending", &samples, None, &[]).unwrap();
+    let closing = ended(&refined).pop().unwrap();
+    assert_eq!(closing.reset_type.as_deref(), Some("natural"));
+    assert_eq!(closing.notice_id.as_ref(), Some(&id));
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM quota_ack WHERE event_id=?1",
+            [&id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn weekly_early_threshold_compares_original_milliseconds() {
+    let expiry = 2_000_000i64;
+    for (offset, kind) in [(-1, "early"), (0, "early"), (1, "unknown")] {
+        let mut points = vec![
+            sample(1, expiry - 7200, 40.0, expiry),
+            sample(2, expiry - 3600, 41.0, expiry),
+            sample(3, expiry - 1800, 0.0, expiry + 604800),
+            sample(4, expiry - 1800, 0.0, expiry + 604800),
+        ];
+        for (index, p) in points.iter_mut().enumerate() {
+            p.value.primary.as_mut().unwrap().window_minutes = 10080;
+            if index >= 2 {
+                p.at = (expiry - 1800) * 1000 + offset + (index as i64 - 2) * 2;
+                p.until = p.at;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::usage::database(dir.path()).unwrap();
+        let state = resolve(&db, "test", "precise-threshold", &points, None, &[]).unwrap();
+        let end = ended(&state).pop().unwrap();
+        assert_eq!(end.reset_type.as_deref(), Some(kind), "offset={offset}ms");
+        assert_eq!(
+            end.ended_at,
+            Some((expiry - 1800) * 1000 + offset),
+            "old pre-gap observation is not the reset time"
+        );
+    }
+}
+
+#[test]
+fn weekly_first_use_is_independent_of_the_previous_reset_and_labels_the_closing_event() {
+    let width = 604800;
+    let old_start = 1_000_000;
+    let expiry = old_start + width;
+    let first_use = expiry + 77_176;
+    let card_at = first_use * 1000 + 20_654_232;
+    let next_use = card_at / 1000 + 36;
+    let point = |id, at, used, deadline| {
+        let mut value = sample(id, at, used, deadline);
+        value.value.primary.as_mut().unwrap().window_minutes = 10080;
+        value
+    };
+    let samples = vec![
+        point(1, old_start + 60, 40.0, expiry),
+        point(2, old_start + 180, 41.0, expiry),
+        point(3, first_use - 60, 0.0, first_use - 60 + width),
+        point(4, first_use + 40, 0.0, first_use + width),
+        point(5, first_use + 160, 41.0, first_use + width),
+        point(6, card_at / 1000 - 30, 41.0, first_use + width),
+        point(7, next_use + 50, 0.0, next_use + width),
+        point(8, next_use + 180, 2.0, next_use + width),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::usage::database(dir.path()).unwrap();
+    let card = super::super::reset_cards::CardUse {
+        id: "actual-use".into(),
+        account: "test".into(),
+        at: card_at,
+    };
+    let state = resolve(&db, "test", "first-use", &samples, None, &[card]).unwrap();
+    let rows = state.cycles();
+    let middle = rows.iter().find(|c| c.ended_at == Some(card_at)).unwrap();
+    assert_eq!(
+        middle.started_at,
+        Some(first_use * 1000),
+        "idle time after expiry is outside the next period"
+    );
+    assert_eq!(middle.reset_type.as_deref(), Some("card"));
+    assert_eq!(middle.remaining, 59.0);
+    let current = rows.iter().find(|c| c.ended_at.is_none()).unwrap();
+    assert_eq!(current.started_at, Some(next_use * 1000));
+    let previous = rows
+        .iter()
+        .find(|c| c.ended_at == Some(expiry * 1000))
+        .unwrap();
+    assert_eq!(previous.started_at, Some(old_start * 1000));
+    assert_eq!(previous.reset_type.as_deref(), Some("natural_pending"));
+}
+
+#[test]
+fn weekly_early_threshold_is_inclusive_and_a_gap_alone_is_not_natural() {
+    for (advance, expected) in [
+        (1801, "early"),
+        (1800, "early"),
+        (1799, "unknown"),
+        (-600, "natural_pending"),
+    ] {
+        let expiry = 2_000_000;
+        let first_use = expiry - advance;
+        let point = |id, at, used, deadline| {
+            let mut value = sample(id, at, used, deadline);
+            value.value.primary.as_mut().unwrap().window_minutes = 10080;
+            value
+        };
+        let rows = vec![
+            point(1, expiry - 7200, 40.0, expiry),
+            point(2, expiry - 3600, 41.0, expiry),
+            point(3, first_use + 30, 0.0, first_use + 604800),
+            point(4, first_use + 150, 1.0, first_use + 604800),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::usage::database(dir.path()).unwrap();
+        let state = resolve(&db, "test", "threshold", &rows, None, &[]).unwrap();
+        let cycle = ended(&state).pop().unwrap();
+        assert_eq!(
+            cycle.reset_type.as_deref(),
+            Some(expected),
+            "advance={advance}"
+        );
+        assert_eq!(
+            cycle.ended_at,
+            Some(if expected == "natural_pending" {
+                expiry * 1000
+            } else {
+                first_use * 1000
+            })
+        );
+        assert_eq!(cycle.remaining, 59.0);
+    }
+    let point = |id, at, used, deadline| {
+        let mut value = sample(id, at, used, deadline);
+        value.value.primary.as_mut().unwrap().window_minutes = 10080;
+        value
+    };
+    let rows = vec![
+        point(1, 100, 50.0, 1000),
+        point(2, 200, 60.0, 1000),
+        point(3, 2000, 0.0, 606800),
+        point(4, 2100, 0.0, 606900),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::usage::database(dir.path()).unwrap();
+    let state = resolve(&db, "test", "gap", &rows, None, &[]).unwrap();
+    assert_eq!(
+        ended(&state)[0].reset_type.as_deref(),
+        Some("natural_pending")
+    );
+    assert_eq!(
+        state
+            .cycles()
+            .iter()
+            .find(|c| c.ended_at.is_none())
+            .unwrap()
+            .started_at,
+        None,
+        "rolling idle deadlines and first sampling are not first use"
+    );
+}
+
+#[test]
+fn weekly_deadline_jitter_within_three_minutes_keeps_the_known_start_and_no_extra_period() {
+    let start = 1_000_000;
+    let expiry = start + 604800;
+    let point = |id, at, used, deadline| {
+        let mut value = sample(id, at, used, deadline);
+        value.value.primary.as_mut().unwrap().window_minutes = 10080;
+        value
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::usage::database(dir.path()).unwrap();
+    let mut samples = vec![
+        point(1, start + 300, 0.0, expiry),
+        point(2, start + 420, 0.0, expiry),
+    ];
+    let first = resolve(&db, "test", "jitter", &samples, None, &[]).unwrap();
+    assert_eq!(first.cycles()[0].started_at, Some(start * 1000));
+    for i in 0..4 {
+        samples.push(point(3 + i, start + 500 + i * 120, 0.0, expiry + 180));
+    }
+    let revised = resolve(&db, "test", "jitter", &samples, None, &[]).unwrap();
+    assert_eq!(revised.cycles().len(), 1);
+    assert_eq!(
+        revised.cycles()[0].started_at,
+        Some(start * 1000),
+        "three-minute jitter cannot move a confirmed start"
+    );
+    let crossing = vec![
+        point(1, start + 60, 20.0, expiry),
+        point(2, start + 180, 20.0, expiry),
+        point(3, expiry + 1, 20.0, expiry + 180),
+        point(4, expiry + 61, 20.0, expiry + 180),
+    ];
+    let state = resolve(&db, "test", "crossing", &crossing, None, &[]).unwrap();
+    assert!(
+        ended(&state).is_empty(),
+        "a small deadline correction across expiry is not independent reset evidence"
+    );
+}
+
+#[test]
+fn successive_idle_deadlines_can_settle_before_a_later_real_recovery() {
+    let state = derive(&[
+        sample(1, 10, 0.0, 1000),
+        sample(2, 20, 0.0, 1060),
+        sample(3, 30, 0.0, 1090),
+        sample(4, 40, 20.0, 1090),
+        sample(5, 50, 40.0, 1090),
+        sample(6, 60, 0.0, 2000),
+        sample(7, 70, 0.0, 2000),
+    ]);
+    let rows = ended(&state);
+    assert_eq!(
+        rows.len(),
+        1,
+        "idle deadline movements do not reset, but must not freeze consumption"
+    );
+    assert_eq!(rows[0].remaining, 60.0);
+    assert_eq!(rows[0].notice_id.as_deref(), Some("6-300"));
+}
+
+#[test]
+fn replaying_previously_observed_history_does_not_create_a_new_notification() {
+    let values = [
+        sample(1, 10, 80.0, 1000),
+        sample(2, 20, 80.0, 1000),
+        sample(3, 30, 0.0, 2000),
+        sample(4, 40, 0.0, 2000),
+    ];
+    let mut old = derive(&values[..2]);
+    old.windows.get_mut(&300).unwrap().observed.at = 40_000;
+    let mut rebuilt = derive(&values);
+    rebuilt.reconcile(&old);
+    assert!(rebuilt.events[0].historical);
+    assert_eq!(rebuilt.events[0].id, "3-300");
+}
+
+#[test]
 fn fixed_expiry_requires_a_fresh_window_not_a_clock_or_expired_copy() {
     let mut samples = vec![
         sample(1, 10, 80.0, 100),

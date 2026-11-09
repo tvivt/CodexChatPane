@@ -62,6 +62,166 @@ fn ended(state: &recognizer::State) -> Vec<super::super::Cycle> {
 }
 
 #[test]
+fn server_used_closes_the_period_and_first_use_starts_the_next_preserving_dismissal() {
+    let dir = fixture();
+    let home = dir.path();
+    let values = samples(false);
+    insert_samples(home, &values);
+    let before = ledger::history_live(home).unwrap();
+    let notice = before
+        .cycles
+        .iter()
+        .find_map(|c| c.notice_id.clone())
+        .unwrap();
+    ledger::acknowledge(home, &notice).unwrap();
+    refresh_with(home, &values[3].value, values[3].at, |_, _| {
+        Ok(page("used", None))
+    })
+    .unwrap();
+    let history = ledger::history_live(home).unwrap();
+    let ending = history
+        .cycles
+        .iter()
+        .find(|c| c.notice_id.as_ref() == Some(&notice))
+        .unwrap();
+    let starting = history
+        .cycles
+        .iter()
+        .find(|c| c.ended_at.is_none())
+        .unwrap();
+    let used = at("2026-10-29T15:35:13.355956Z");
+    assert_eq!(
+        ending.ended_at,
+        Some(used),
+        "the actual used time closes the prior period"
+    );
+    assert_eq!(
+        starting.started_at,
+        Some(values[2].value.primary.as_ref().unwrap().resets_at.unwrap() * 1000 - 604800000),
+        "the next timer starts at first use, independently of redemption"
+    );
+    assert_eq!(ending.reset_type.as_deref(), Some("card"));
+    assert!(ending.acknowledged);
+}
+
+#[test]
+#[ignore = "replays cached real quota/card evidence in an isolated derivation database"]
+fn live_precise_card_periods() {
+    let source = crate::source::codex_home().unwrap();
+    let raw = rusqlite::Connection::open_with_flags(
+        source.join(".codex-chat-pane/usage.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let account: String = raw
+        .query_row(
+            "SELECT account FROM quota_samples ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    super::super::super::context::confirm(&source, Some(&account)).unwrap();
+    let cards = used(&source).unwrap();
+    assert!(
+        !cards.is_empty(),
+        "cached used evidence must belong to the confirmed signed-in account"
+    );
+    let mut statement = raw
+        .prepare("SELECT id,at,until,account,data FROM quota_samples ORDER BY id")
+        .unwrap();
+    let mut samples = Vec::new();
+    let mut previous = None;
+    for row in statement
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .unwrap()
+    {
+        let (id, at, until, owner, data) = row.unwrap();
+        let boundary = previous.as_ref().is_some_and(|old| old != &owner);
+        previous = Some(owner.clone());
+        if owner != account {
+            continue;
+        }
+        let mut value: RateLimits = serde_json::from_str(&data).unwrap();
+        value.account_id.get_or_insert(owner);
+        samples.push(Sample {
+            id,
+            at,
+            until,
+            value,
+            account_boundary: boundary,
+        });
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(dir.path()).unwrap();
+    let live = recognizer::resolve(&db, &account, "real-live", &samples, None, &cards).unwrap();
+    super::super::logs::merge(&source, samples.last().map(|s| s.until), &mut samples).unwrap();
+    for pass in 1..=2 {
+        let history =
+            recognizer::resolve(&db, &account, "real-history", &samples, Some(&live), &cards)
+                .unwrap();
+        for (name, state) in [("live", &live), ("history", &history)] {
+            let rows = state.cycles();
+            let first = at("2026-10-29T15:35:13.355956Z");
+            let natural = at("2026-11-05T15:37:04Z");
+            let next = at("2026-11-06T18:47:34.232Z");
+            assert!(
+                rows.iter()
+                    .any(|c| c.minutes == 10080 && c.ended_at == Some(first)),
+                "the October card use closes the previous period"
+            );
+            let row = rows
+                .iter()
+                .find(|c| c.minutes == 10080 && c.started_at == Some(at("2026-10-29T15:37:04Z")))
+                .unwrap();
+            assert_eq!(row.ended_at, Some(natural));
+            assert_eq!(row.start_reset_type.as_deref(), Some("card"));
+            assert_eq!(row.reset_type.as_deref(), Some("natural_pending"));
+            assert_eq!(
+                row.observed_consumed, 2.0,
+                "observed progress uses the period high-water mark, independently of the final balance"
+            );
+            let following = rows
+                .iter()
+                .find(|c| c.minutes == 10080 && c.started_at == Some(at("2026-11-06T13:03:20Z")))
+                .unwrap();
+            assert_eq!(following.ended_at, Some(next));
+            assert_eq!(
+                following.start_reset_type.as_deref(),
+                Some("natural_pending")
+            );
+            assert_eq!(
+                following.observed_consumed, 41.0,
+                "live and history use the same period counter high-water mark"
+            );
+            let current = rows
+                .iter()
+                .find(|c| c.minutes == 10080 && c.ended_at.is_none())
+                .unwrap();
+            assert_eq!(current.started_at, Some(at("2026-11-06T18:48:10Z")));
+            assert_eq!(current.start_reset_type.as_deref(), Some("card"));
+            for granted in [
+                at("2026-10-31T20:19:32.157Z"),
+                at("2026-11-01T22:49:44.683Z"),
+            ] {
+                assert!(!rows.iter().any(|c| c.ended_at == Some(granted)));
+            }
+            println!(
+                "pass={pass} scope={name} periods={}",
+                serde_json::to_string(&[row, following, current]).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn server_pages_deduplicate_used_and_granted_and_preserve_late_notice_identity() {
     let dir = fixture();
     let home = dir.path();
@@ -121,7 +281,7 @@ fn server_pages_deduplicate_used_and_granted_and_preserve_late_notice_identity()
         (
             before.id.clone(),
             before.started_at,
-            before.ended_at,
+            Some(at("2026-10-29T15:35:13.355956Z")),
             before.boundary_from,
             before.boundary_to
         )
@@ -133,6 +293,82 @@ fn server_pages_deduplicate_used_and_granted_and_preserve_late_notice_identity()
         |_, _| panic!("unchanged quota must use cache")
     )
     .unwrap());
+}
+
+#[test]
+fn multiple_used_events_split_a_sampling_gap_and_keep_unknown_remaining() {
+    let dir = fixture();
+    let values = samples(false);
+    let db = database(dir.path()).unwrap();
+    let cards = vec![
+        CardUse {
+            id: "first".into(),
+            account: "account".into(),
+            at: values[1].at + 60_123,
+        },
+        CardUse {
+            id: "second".into(),
+            account: "account".into(),
+            at: values[1].at + 120_456,
+        },
+    ];
+    let mut baseline = None;
+    for _ in 0..2 {
+        let state = recognizer::resolve(&db, "account", "gap", &values, None, &cards).unwrap();
+        let rows = state.cycles();
+        assert_eq!(rows.len(), 3);
+        let middle = rows
+            .iter()
+            .find(|c| c.ended_at == Some(cards[1].at))
+            .unwrap();
+        assert_eq!(middle.ended_at, Some(cards[1].at));
+        assert_eq!(
+            middle.started_at, None,
+            "a use time cannot invent a first-use time in an empty gap"
+        );
+        assert_eq!(middle.start_reset_type.as_deref(), Some("card"));
+        assert!(
+            !middle.remaining_known,
+            "no observed balance in the gap must not become a real zero"
+        );
+        let current = rows.iter().find(|c| c.ended_at.is_none()).unwrap();
+        assert_eq!(
+            current.started_at,
+            Some(values[2].value.primary.as_ref().unwrap().resets_at.unwrap() * 1000 - 604800000)
+        );
+        assert_eq!(current.start_reset_type.as_deref(), Some("card"));
+        let result = serde_json::to_value(rows).unwrap();
+        if let Some(before) = &baseline {
+            assert_eq!(&result, before);
+        }
+        baseline = Some(result);
+    }
+}
+
+#[test]
+fn a_used_event_can_split_a_known_window_without_an_existing_recovery_event() {
+    let dir = fixture();
+    let db = database(dir.path()).unwrap();
+    let mut values = samples(false);
+    for value in &mut values {
+        value.value.primary.as_mut().unwrap().used_percent = 20.0;
+    }
+    let cards = vec![CardUse {
+        id: "direct".into(),
+        account: "account".into(),
+        at: values[1].at + 90_321,
+    }];
+    let state = recognizer::resolve(&db, "account", "direct", &values, None, &cards).unwrap();
+    let rows = state.cycles();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter()
+            .find(|c| c.ended_at.is_none())
+            .unwrap()
+            .started_at,
+        Some(values[2].value.primary.as_ref().unwrap().resets_at.unwrap() * 1000 - 604800000)
+    );
+    assert!(rows.iter().any(|c| c.ended_at == Some(cards[0].at)));
 }
 
 #[test]
@@ -240,7 +476,11 @@ fn disappearing_cards_require_complete_unexpired_details_recovery_and_confirmati
     let dir = fixture();
     let db = database(dir.path()).unwrap();
     let state = recognizer::resolve(&db, "account", "fallback", &samples(true), None, &[]).unwrap();
-    assert_eq!(ended(&state)[0].reset_type.as_deref(), Some("card"));
+    assert_eq!(
+        ended(&state)[0].reset_type.as_deref(),
+        Some("early"),
+        "without a corresponding used record the confirmed early recovery is not called a card"
+    );
     for mode in [
         "expired",
         "missing-expiry",
@@ -324,7 +564,7 @@ fn cards_and_quota_may_arrive_one_observation_apart() {
             recognizer::resolve(&db, "account", "asynchronous", &values, None, &[]).unwrap();
         assert_eq!(
             ended(&state)[0].reset_type.as_deref(),
-            Some("card"),
+            Some("early"),
             "card_first={card_first}"
         );
     }
@@ -355,7 +595,7 @@ fn cyclic_pagination_and_conflicting_event_ids_preserve_existing_evidence() {
 
 #[test]
 #[ignore = "GET server reset-card history and update only the app quota cache; no Codex writes"]
-fn live_server_history_corrects_existing_reset_without_moving_boundaries() {
+fn live_cached_server_history_is_idempotent_after_precise_boundary_rebuild() {
     let home = crate::source::codex_home().unwrap();
     let auth: Value =
         serde_json::from_slice(&std::fs::read(home.join("auth.json")).unwrap()).unwrap();
@@ -433,10 +673,7 @@ fn live_server_history_corrects_existing_reset_without_moving_boundaries() {
         .find(|c| c.notice_id.as_deref() == Some("575"))
         .unwrap();
     assert_eq!(target.reset_type.as_deref(), Some("card"));
-    assert_eq!(
-        target.ended_at.map(|value| value / 1000),
-        Some(at("2026-10-29T15:31:01Z") / 1000)
-    );
+    assert_eq!(target.ended_at, Some(at("2026-10-29T15:35:13.355956Z")));
     let state: String = db
         .query_row(
             "SELECT state FROM quota_derivations WHERE account=?1 AND scope LIKE '%|live'",
@@ -456,8 +693,9 @@ fn live_server_history_corrects_existing_reset_without_moving_boundaries() {
                 .iter()
                 .any(|id| id.as_str().unwrap().starts_with("server:"))));
     println!(
-        "server_used={} cycles={} target_notice=575 target_type=card boundary_unchanged=true merged_history_verified=true",
+        "server_used={} cycles={} target_notice=575 target_type=card precise_end={:?} repeated_history_stable=true",
         used(&home).unwrap().len(),
-        after.cycles.len()
+        after.cycles.len(),
+        target.ended_at
     );
 }
