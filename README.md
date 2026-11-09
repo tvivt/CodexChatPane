@@ -2,101 +2,65 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodexChatPane is a Windows companion sidebar for Codex Desktop. It brings local projects, chats, activity, and usage limits into one searchable, organized window.
+CodexChatPane is a Windows sidebar for Codex Desktop that helps you find chats, follow progress, and check usage.
 
-This is an experimental personal project, not an official Codex Desktop component. It does not upload or host your conversations.
+**[Download for Windows](https://github.com/tvivt/CodexChatPane/releases/latest)**
 
-## v0.5.3
+![CodexChatPane beside Codex Desktop; the sidebar is outlined in red](CodexChatPane.png)
 
-[Release notes](doc/releases/v0.5.3.md) cover server reset-card history, delayed request reconciliation, same-millisecond legacy requests and cumulative counter resets. The tag workflow builds `CodexChatPane-v0.5.3.exe` for [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases/tag/v0.5.3).
+## Find chats
 
-## Features
+- Find chats in Recent activity or under Projects and Chats, with search and sorting.
+- Organize projects and chats in folders and groups; use stars, selection, and drag and drop to keep frequent work close at hand.
+- Open or create a chat, or use its context menu to rename, pin, archive, or restore it. Chat previews can be enabled in settings.
 
-- Browse local Codex data by project, chat, recent activity, and archive status.
-- Organize projects and chats with local folders and groups, including nested folders, search, sorting, selection, and drag and drop.
-- See waiting-for-answer (`?`), unread, running, and error states, execution time, last activity, and usage limits; Projects and Chats each have their own close and restore controls.
-- Select a chat to see first-token latency, estimated token speed, and cache hit rate; Chat details provide paged turn summaries, activity counts, tool totals, consumption, and separate subagent statistics.
-- Σ sums recent weighted forecasts for running main chats, retaining estimates during tool waits and excluding current compaction. It shows `Σ≈125t/s`, `Σ0t/s`, or `Σ—`, without a silence timeout or OpenTelemetry receiver.
-- Click quotas to open reset history: current period plus five ended periods, ten more per page. Consumption includes calendar/period ranges, model stacks, and project/day/chat breakdowns.
-- Optionally enable conversation previews in settings (off by default); preview pages are read only when requested.
-- Mark chats as always included in or excluded from recent activity; review both lists in the Activity rules dialog. Local stars are kept separately from Codex pins.
-- Open or create conversations through Codex deep links.
-- With your explicit consent, use Codex Desktop's internal App MCP to rename, pin, archive/restore chats or pin projects.
-- Configure themes, language, font sizes, window mode, log level, and tool settings import/export.
+## Follow progress
 
-## Screenshot
+- See running, waiting-for-answer (`?`), unread, and error states, along with elapsed time and recent activity.
+- Select a chat to view first-token latency, generation speed, and cache hit rate in the bottom status bar. Open Chat details from the metrics or context menu for turn summaries, activity counts, tools, and subagents.
+- Use Σ to view the estimated total speed of currently running chats.
 
-![CodexChatPane screenshot](CodexChatPane.png)
+## Check usage
+
+- Click the quota area at the bottom to open Reset history: the current period plus five recent periods, with ten more available at a time.
+- Switch to Consumption to view Token usage and estimated API-equivalent cost by period, date, project, chat, or model.
+- API-equivalent cost is an estimate, not your subscription bill. See [Usage and consumption](doc/usage-history.zh-CN.md) for definitions.
+
+## What's new in v0.5.3
+
+- Show reset-card history and improve reset labels.
+- Fix duplicated or missing requests and Token usage in some chat statistics.
+
+See the [release notes](doc/releases/v0.5.3.md).
 
 ## Compatibility and status
 
-- Windows only.
-- Requires a working Codex Desktop installation. Its local data formats and internal MCP may change between versions.
-- Windows releases are unsigned, portable executables built by GitHub Actions.
-- The browser preview checks the static frontend; projects, chats, window integration, and Codex actions require the desktop runtime.
+- Requires Windows, Codex Desktop, and WebView2 Runtime.
+- The download is an unsigned portable executable.
+- This is an experimental personal project, not an official Codex Desktop component. Codex updates may affect compatibility.
 
-## Quick start from source
+## Get started
 
-Requirements: Windows, Node.js/npm, Rust stable, and Codex Desktop.
-
-```powershell
-npm ci
-npm run tauri dev
-```
-
-To preview only the frontend:
-
-```powershell
-npm run dev
-```
-
-The development server listens on `127.0.0.1:1420`. On first launch, the app reads local Codex data. Tool settings and folder state are stored in `%CODEX_HOME%\.codex-chat-pane\` (by default `%USERPROFILE%\.codex\.codex-chat-pane\`), outside this repository.
-
-## Get the Windows executable
-
-Pushing a matching `v*` tag in the public release repository builds and publishes `CodexChatPane-v<version>.exe`. A manual run of `Windows portable build` provides the `CodexChatPane-windows-portable` artifact. The executable is unsigned and needs WebView2 Runtime installed.
-
-To build from source on Windows, run this from the repository root:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
-```
-
-The development checkout's incremental script produces `.runtime/bin/CodexChatPane.exe`; the public release checkout's script runs validation and produces `release/CodexChatPane-v<version>.exe`. Installing an artifact and restarting the app are separate delivery steps. See [Development and validation](doc/development.md).
+1. Download the EXE from the [latest release](https://github.com/tvivt/CodexChatPane/releases/latest).
+2. Open Codex Desktop, then run CodexChatPane. The sidebar reads your local projects and chats.
+3. Choose a chat, organize the list, or open Settings to adjust the theme, language, font size, and window mode.
 
 ## Documentation
 
 | Topic | Document |
 | --- | --- |
-| Complete feature index, terminology, and handoff order | [doc/README.md](doc/README.md) |
-| Usage | [doc/usage.md](doc/usage.md) |
-| Product behavior and data ownership | [doc/product.md](doc/product.md) |
-| Code structure and data flow | [doc/architecture.md](doc/architecture.md) |
-| Codex data, deep links, and App MCP | [doc/integration.md](doc/integration.md) |
-| Conversation metrics definitions and implementation (Chinese) | [doc/conversation-metrics.zh-CN.md](doc/conversation-metrics.zh-CN.md) |
-| Quota history, consumption, pricing, and caches (Chinese) | [doc/usage-history.zh-CN.md](doc/usage-history.zh-CN.md) |
-| Development, tests, and builds | [doc/development.md](doc/development.md) |
-
-## Validation
-
-```powershell
-npm run build
-node tests/frontend.mjs
-node tests/dynamic.mjs
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo test --manifest-path src-tauri/Cargo.toml --locked
-```
-
-A few Rust tests that require real local Codex data are explicitly ignored by default.
+| User guide and settings | [Usage](doc/usage.md) |
+| Complete feature index | [Documentation](doc/README.md) |
+| Latency, speed, and statistics definitions (Chinese) | [Conversation metrics](doc/conversation-metrics.zh-CN.md) |
+| Quotas, consumption, and cost estimates (Chinese) | [Usage and consumption](doc/usage-history.zh-CN.md) |
+| v0.5.3 changes | [Release notes](doc/releases/v0.5.3.md) |
+| Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
 ## Data and safety
 
-- Codex state, history, rollout, and log files are opened read only.
-- Conversation text and activity details are read on demand for previews and metrics; they are not stored in this app's snapshots or settings.
-- Folders, groups, themes, and window settings stay local and are not synced to the cloud by this app.
-- Rename, pin, and archive operations require you to enable Codex MCP. The app reloads state after each operation to verify the result.
-- Codex Desktop's internal App MCP is not a stable public API. Changes to it may temporarily disable write operations without affecting read only browsing.
-- Startup renders metadata before deferred activity. Neither startup nor a quota query indexes all Token history. Rebuildable caches stay in the app's own data directory; forecast phases remain in memory.
+- The app does not upload or host your conversations. Browsing does not modify the original Codex conversations.
+- Folders, groups, themes, and window settings stay local.
+- Renaming, pinning, and archiving change Codex state; enable write operations in settings before using them.
 
 ## License
 
