@@ -2,49 +2,42 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodexChatPane is a Windows sidebar for Codex Desktop that helps you find chats, follow progress, and check usage.
+CodexChatPane is a chat sidebar for Codex Desktop on Windows. When you work on several projects at once, see which chats are running, which have finished, and which are waiting for your answer in one place. Click a chat title to return to Codex and continue the conversation.
 
 **[Download for Windows](https://github.com/tvivt/CodexChatPane/releases/latest)**
 
-![CodexChatPane beside Codex Desktop; the sidebar is outlined in red](CodexChatPane.png)
+![Interface screenshot](CodexChatPane.png)
 
-## Find chats
+## Recent activity · See which chats need attention
 
-- Find chats in Recent activity or under Projects and Chats, with search and sorting.
-- Organize projects and chats in folders and groups; use stars, selection, and drag and drop to keep frequent work close at hand.
-- Open or create a chat, or use its context menu to rename, pin, archive, or restore it. Chat previews can be enabled in settings.
+See chats from the last few days across projects. When sorted by status, chats waiting for an answer appear first with `?`, followed by finished chats you have not viewed, running chats, and read chats.
 
-## Follow progress
+Adjust the number of days, manually include or exclude chats, filter multiple projects, group by project, then sort by status or chat title.
 
-- See running, waiting-for-answer (`?`), unread, and error states, along with elapsed time and recent activity.
-- Select a chat to view first-token latency, generation speed, and cache hit rate in the bottom status bar. Open Chat details from the metrics or context menu for turn summaries, activity counts, tools, and subagents.
-- Use Σ to view the estimated total speed of currently running chats.
+## Projects · Organize work by project
 
-## Check usage
+Select a project to show its chats in the Chats pane. Status indicators beside each project help you see whether it has running chats, finished chats to review, or chats waiting for an answer.
 
-- Click the quota area at the bottom to open Reset history: the current period plus five recent periods, with ten more available at a time.
-- Switch to Consumption to view Token usage and estimated API-equivalent cost by period, date, project, chat, or model.
-- API-equivalent cost is an estimate, not your subscription bill. See [Usage and consumption](doc/usage-history.zh-CN.md) for definitions.
+Pin or star projects and organize them in folders. Chats without a project have their own entry.
 
-## v0.5.4
+## Chats · Find and continue a conversation
 
-- Start each quota period at first use and label it by the reset that ended it.
-- Show unconfirmed natural resets and estimated times clearly when observations are missing.
-- Keep period selection, duration, Token usage, and cost totals aligned when late evidence arrives.
+Search the current project's chats by title, organize frequent chats with folders, pins and stars, and use the context menu to rename, archive or restore them. Click a title to open the original chat in Codex. Enable chat previews in Settings when you want to read before opening.
 
-See the [v0.5.4 notes](doc/releases/v0.5.4.md). Windows downloads are available from [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases).
+Collapse and expand the Projects and Chats panes independently to keep the lists you need visible.
 
-## Compatibility and status
+## Chat statistics and quotas
 
-- Requires Windows, Codex Desktop, and WebView2 Runtime.
-- The download is an unsigned portable executable.
-- This is an experimental personal project, not an official Codex Desktop component. Codex updates may affect compatibility.
+- **Selected-chat metrics**: The bottom bar shows values such as `1.8s·62t/s·93%`: first-token latency, estimated generation speed, and input cache hit rate. Σ is the estimated total speed of running chats; hover to see each chat's speed.
+- **Turn details**: Open Chat details from the context menu to inspect each turn's model, input and output Tokens, cache usage and speed, along with activity counts, tools and subagents.
+- **Quotas and periods**: Check remaining 5h/W quota, reset countdowns, reset-card counts and expiry information. Click the quota area for period history and quota remaining before each reset. It opens with the current period plus five recent periods, with ten more available at a time.
+- **Usage and cost**: Trend charts use different colors for each model and switch between Tokens and API-equivalent cost. Summarize by project, chat or date, then expand a chat to inspect turns and subagent usage. API-equivalent cost is an estimate, not your subscription bill.
 
 ## Get started
 
-1. Download the EXE from the [latest release](https://github.com/tvivt/CodexChatPane/releases/latest).
-2. Open Codex Desktop, then run CodexChatPane. The sidebar reads your local projects and chats.
-3. Choose a chat, organize the list, or open Settings to adjust the theme, language, font size, and window mode.
+Requires Windows, Codex Desktop and WebView2 Runtime. The download is an unsigned portable executable. Open Codex Desktop, then run CodexChatPane to see local projects and chats. Use Settings to adjust the theme, language, font size and window mode.
+
+This is an experimental personal project, not an official Codex Desktop component. Codex updates may affect compatibility.
 
 ## Documentation
 
