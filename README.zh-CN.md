@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodexChatPane 是为 Windows 版 Codex Desktop 做的对话侧栏。多个项目同时开工时，可以在一处看到哪些对话还在运行、哪些已经完成、哪些正等你回答。点击对话标题，就能回到 Codex 继续聊。
+CodexChatPane 是为 Windows 版 Codex Desktop 做的对话侧栏。多个项目同时开工时，可以在一处看到哪些对话还在运行、哪些已经完成、哪些正等你回答。点击对话标题，就能回到 Codex 继续聊。面板默认随 Codex 显隐，可贴合 Codex 窗口摆放，把项目、对话和额度放在同一工作界面中。
 
 **[下载 Windows 版](https://github.com/tvivt/CodexChatPane/releases/latest)**
 

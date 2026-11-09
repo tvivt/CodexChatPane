@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodexChatPane is a chat sidebar for Codex Desktop on Windows. When you work on several projects at once, see which chats are running, which have finished, and which are waiting for your answer in one place. Click a chat title to return to Codex and continue the conversation.
+CodexChatPane is a chat sidebar for Codex Desktop on Windows. When you work on several projects at once, see which chats are running, which have finished, and which are waiting for your answer in one place. Click a chat title to return to Codex and continue the conversation. By default, the pane shows and hides with Codex. Position it alongside the Codex window to keep projects, chats, and quotas in the same workspace.
 
 **[Download for Windows](https://github.com/tvivt/CodexChatPane/releases/latest)**
 
