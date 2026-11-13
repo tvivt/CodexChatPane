@@ -357,6 +357,7 @@ svg.icon { width: 15px; height: 15px; display: block; fill: none; stroke: curren
 .project-search-popover .search-wrap { margin: 0; }
 
 .toolbar-spacer { flex: 1; }
+.tree-path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--success); font-size:calc(var(--font-pane) - 1px); font-weight:700; }
 .tabs { height: 31px; display: flex; align-items: end; padding: 0 9px; border-bottom: 1px solid var(--line); background: var(--drawer); }
 .tab {
   height: 30px;

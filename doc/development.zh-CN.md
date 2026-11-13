@@ -82,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-app.ps1
 
 开发仓库是文档的唯一维护处。公开的 `README.md`、`README.zh-CN.md`、`doc/` 和截图同步到发布仓库；内部设计文档只保留在开发仓库。发布前在开发仓库更新一次，再同步公开子集。
 
-版本字段位于 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json`，本次文档核对版本为 0.5.5；修改版本时同步锁文件中的本包版本。发布任务才同步改版本和附件名，固定本地入口保留 CodexChatPane.exe。文档的历史 v0.2.1 记录只描述当时产物。
+版本字段位于 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json`，本次文档核对版本为 0.5.6；修改版本时同步锁文件中的本包版本。发布任务才同步改版本和附件名，固定本地入口保留 CodexChatPane.exe。文档的历史 v0.2.1 记录只描述当时产物。
 
 ## 5. 修改检查表
 

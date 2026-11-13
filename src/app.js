@@ -111,6 +111,7 @@ const state = {
   timelineGroupOverrides: new Set(),
   openFolders: new Set([PROJECT_DYNAMIC_FOLDER_KEY, AUTO_PROJECT_FOLDER_KEY, AUTO_PROJECT_PIN_KEY]),
   selectedProjectFolder: "",
+  projectTreeLocation: null,
   localProjectFolders: new Set(),
   localChatFolders: new Set(),
   recentIncludedChatIds: new Set(),
@@ -1653,7 +1654,7 @@ function renderProjectPane() {
   const archiveOpen = state.projectArchiveOpen && !state.projectChatsCollapsed;
   return ui`<aside class="workspace-pane project-pane projects-workspace ${archiveOpen ? 'project-archive-open' : ''} ${state.projectsCollapsed ? 'projects-section-collapsed' : ''} ${state.projectChatsCollapsed ? 'chats-section-collapsed' : ''}" style="--project-recent-height:${state.projectRecentHeight}px;--project-structure-height:${state.projectStructureHeight}px;--project-label-width:${projectLabelWidth()}ch;--project-chat-time-width:${state.projectChatTimeWidth > 0 ? `${state.projectChatTimeWidth}px` : 'calc(var(--chat-lead) + 4px)'}" aria-label="Project 管理">
     ${projectRecentPanel()}
-    ${state.projectsCollapsed ? collapsedFolderSection('project') : ui`<div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}"><strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}<span class="toolbar-spacer"></span><button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button>${projectSectionButton()}</div><div class="scroll tree">${projectTree()}</div></div>`}
+    ${state.projectsCollapsed ? collapsedFolderSection('project') : ui`<div class="view-block folder-view-block project-structure">${searchOverlay('project',state.projectSearchOpen,state.projectQuery,'搜索 Project、文件夹或 ID')}<div class="folder-view-label resize-label" data-resize="project-recent" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t('调整动态栏高度')}"><strong>Projects</strong><span class="count">${activeCount}</span>${selectionBadge('project')}${nameSortButton('projectNameSort','cycle-project-name-sort')}${projectTreePathMarkup()}<button class="icon-button ${state.projectSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project" title="搜索 Project" aria-label="搜索 Project">${icon('search')}</button><button class="icon-button" data-action="new-project-folder" title="新建虚拟 Project 文件夹" aria-label="新建虚拟 Project 文件夹">${icon('folder-plus','folder-icon')}</button>${projectSectionButton()}</div><div class="scroll tree">${projectTree()}</div></div>`}
     ${state.projectChatsCollapsed ? collapsedFolderSection('chat') : ui`<div class="view-block folder-view-block project-chat-structure">${searchOverlay('project-chat',state.projectChatSearchOpen,state.projectChatQuery,t('搜索对话或 ID'))}<div class="folder-view-label resize-label" data-resize="${state.projectsCollapsed ? 'project-recent' : 'project-structure'}" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="${t(state.projectsCollapsed ? '调整动态栏高度' : '调整 Project 与 Chat 文件夹高度')}"><strong>Chats</strong>${selectionBadge('chat')}${nameSortButton('nameSort','cycle-name-sort')}<span class="toolbar-spacer"></span>${archiveToolbarButton('toggle-project-archive', state.projectArchiveOpen, archivedCount, 'project-archive-fab')}<button class="icon-button ${state.projectChatSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="project-chat" title="${t('搜索 Chat')}" aria-label="${t('搜索 Chat')}">${icon('search')}</button><button class="icon-button" data-action="new-chat-folder" title="新建虚拟 Chat 文件夹" aria-label="新建虚拟 Chat 文件夹">${icon('folder-plus','folder-icon')}</button>${newChatButton()}${projectSectionButton('chat')}</div><div class="scroll project-chat-list" data-project-id="${esc(state.projectId)}">${projectChatList()}</div><div class="chat-column-resizer time-column" data-resize="project-chat-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${t('调整时间列宽')}" title="${t('调整时间列宽')}"></div></div>`}
     ${archiveOpen ? ui`<div class="view-block project-archive-panel archive-block"><div class="view-head scope-head scope-archive">${icon('archive')}<span>${t('归档对话')}</span><span class="count">${archivedCount}</span><span class="toolbar-spacer"></span><button class="icon-button" data-action="toggle-project-archive" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></div><div class="scroll">${archivedChatList()}</div></div>` : ''}
   </aside>`;
@@ -2172,26 +2173,49 @@ function openTimelineGroup(scope, day) {
   day === "dynamic" ? state.timelineGroupOverrides.delete(key) : state.timelineGroupOverrides.add(key);
 }
 
-function expandProjectPath(project) {
-  if (!project || project.synthetic) return;
-  const folders = projectFolders(project).filter(Boolean);
-  if (!folders.length) {
-    state.openFolders.add(AUTO_PROJECT_FOLDER_KEY);
-    return;
+function projectTreeBranch(project, branch) {
+  if (project.synthetic) return '';
+  const folders = projectFolders(project);
+  if (branch === AUTO_PROJECT_FOLDER_KEY && (!folders.length || folders.includes(''))) return branch;
+  return (folders.includes(branch) ? branch : folders[0]) || AUTO_PROJECT_FOLDER_KEY;
+}
+
+function currentProjectBranch(project) {
+  const location = state.projectTreeLocation;
+  return projectTreeBranch(project, location?.id === project.id ? location.branch : undefined);
+}
+
+function projectTreePathMarkup() {
+  const project = selectedProject();
+  if (!project) return '<span class="toolbar-spacer"></span>';
+  const branch = currentProjectBranch(project);
+  const parent = branch === AUTO_PROJECT_FOLDER_KEY ? t(AUTO_PROJECT_FOLDER_LABEL) : branch.split('/').join(' / ');
+  const path = esc([parent, projectLabel(project)].filter(Boolean).join(' / '));
+  return `<span class="tree-path" title="${path}">${path}</span>`;
+}
+
+function expandProjectPath(project, branch) {
+  if (!project) return;
+  const folder = branch === undefined ? currentProjectBranch(project) : projectTreeBranch(project, branch);
+  state.projectTreeLocation = {id:project.id, branch:folder};
+  for (const key of state.openFolders) {
+    if (key !== AUTO_PROJECT_PIN_KEY) state.openFolders.delete(key);
   }
-  for (const folder of folders) {
-    let path = '';
-    for (const part of folder.split('/').filter(Boolean)) {
-      path = path ? `${path}/${part}` : part;
-      state.openFolders.add(path);
-    }
+  let path = '';
+  for (const part of folder.split('/').filter(Boolean)) {
+    path = path ? `${path}/${part}` : part;
+    state.openFolders.add(path);
   }
 }
 
 function expandChatPath(chat) {
   if (!chat) return;
+  const ungrouped = autoChatFolderKey(chat.projectId);
+  for (const key of state.openChatFolders) {
+    if (key === ungrouped || key.startsWith(chat.projectId + CHAT_FOLDER_SEPARATOR)) state.openChatFolders.delete(key);
+  }
   if (!chat.folder) {
-    state.openChatFolders.add(autoChatFolderKey(chat.projectId));
+    state.openChatFolders.add(ungrouped);
     return;
   }
   let path = '';
@@ -2382,7 +2406,8 @@ function render() {
   const targets = pendingLinkedFocus;
   pendingLinkedFocus = [];
   if (targets.length) requestAnimationFrame(() => targets.forEach(target => {
-    const row = [...document.querySelectorAll(ui`${target.container} [data-${target.kind}]`)].find(element => element.dataset[target.kind] === target.id);
+    const row = [...document.querySelectorAll(ui`${target.container} [data-${target.kind}]`)].find(element =>
+      element.dataset[target.kind] === target.id && !element.closest('[data-pin-folder]'));
     if (!row) { queueLinkedFocus(target.container, target.kind, target.id); return; }
     row?.scrollIntoView({ block: "nearest" });
     row?.focus({ preventScroll: true });
@@ -3457,8 +3482,10 @@ document.addEventListener("click", async event => {
     state.selectedChatId = keepChat?.id || "";
     state.tab = "project";
     state.projectChatQuery = "";
+    const branch = projectEl.closest('[data-pin-folder]') ? undefined : projectEl.dataset.projectFolder || AUTO_PROJECT_FOLDER_KEY;
+    expandProjectPath(project, branch);
     if (state.projectRecentLinked) {
-      revealProjectInStructure(project);
+      queueLinkedFocus(".project-pane .project-structure", "project", project.id);
       if (keepChat) revealChatInStructure(keepChat);
       else {
         const latest = [...chats].filter(item => item.projectId === project.id && !effectiveReasons(item).length).sort((a, b) => b.timelineAt - a.timelineAt)[0];
@@ -3765,10 +3792,12 @@ document.addEventListener("click", async event => {
       const project = byProject(chat.projectId);
       revealProjectInStructure(project);
       revealChatInStructure(chat);
-    } else if (chatEl.closest('.project-chat-structure') && state.projectRecentLinked) {
-      revealProjectInStructure(byProject(chat.projectId));
+    } else if (chatEl.closest('.project-chat-structure')) {
       expandChatPath(chat);
-      queueLinkedFocus('.project-chat-structure', 'chat', chat.id);
+      if (state.projectRecentLinked) {
+        revealProjectInStructure(byProject(chat.projectId));
+        queueLinkedFocus('.project-chat-structure', 'chat', chat.id);
+      } else if (state.chatTimelineLinked) revealChatInTimeline(chat);
     } else if (fromGlobalTimeline && state.globalTimelineLinked) {
       const project = byProject(chat.projectId);
       revealProjectInStructure(project);
