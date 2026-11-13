@@ -1,6 +1,6 @@
 # 文档总览 / Documentation index
 
-更新日期：2026-11-10。源码版本 v0.5.4（[说明 / Release notes](releases/v0.5.4.md)）；Windows 附件由对应标签工作流构建并发布，实际可下载版本以 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases) 为准。本文是 CodexChatPane 的全功能入口。功能说明采用本批交付后的行为口径；历史测试、当前检查和实际部署证据单独记录，不以文档更新代表测试通过或 EXE 已更新。
+更新日期：2026-11-14。源码版本 v0.5.5（[说明 / Release notes](releases/v0.5.5.md)）；Windows 附件由对应标签工作流构建并发布，实际可下载版本以 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases) 为准。本文是 CodexChatPane 的全功能入口。功能说明采用本批交付后的行为口径；历史测试、当前检查和实际部署证据单独记录，不以文档更新代表测试通过或 EXE 已更新。
 
 This index covers the complete feature set. Feature descriptions use the delivery behavior; dated test results and actual deployment evidence remain separate. English guides summarize the same behavior; detailed numerical and parser references are in Chinese.
 

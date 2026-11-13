@@ -17,6 +17,7 @@ pub(super) struct State {
     target: String,
     owner: String,
     tier: Option<String>,
+    pub(super) settings_seen: bool,
 }
 
 impl State {
@@ -42,6 +43,7 @@ impl State {
         if record.kind == "session_meta" {
             if p.id.as_deref() != Some(&self.owner) {
                 self.tier = None;
+                self.settings_seen = false;
             }
             self.owner = p.id.clone().unwrap_or_default();
             return;
@@ -57,6 +59,7 @@ impl State {
             self.owner = self.target.clone();
         }
         if record.kind == "event_msg" && p.kind == "thread_settings_applied" {
+            self.settings_seen = true;
             self.tier = p
                 .thread_settings
                 .as_ref()

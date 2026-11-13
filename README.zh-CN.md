@@ -47,7 +47,7 @@ Projects 和 Chats 两个栏可以独立收起、展开，按当前工作保留�
 | 完整功能目录 | [文档总览](doc/README.md) |
 | 首字、速度和统计口径 | [对话指标](doc/conversation-metrics.zh-CN.md) |
 | 额度、消耗和金额估算 | [额度与消耗](doc/usage-history.zh-CN.md) |
-| v0.5.4 改动 | [发布说明](doc/releases/v0.5.4.md) |
+| v0.5.5 改动 | [发布说明](doc/releases/v0.5.5.md) |
 | 源码环境、测试与构建 | [开发与验证](doc/development.zh-CN.md) |
 
 ## 数据与安全边界

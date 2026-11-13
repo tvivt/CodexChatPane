@@ -21,6 +21,7 @@ struct Entry {
 #[derive(Default)]
 struct Recent {
     config: SpeedConfig,
+    changed_known_config: bool,
     requests: Vec<Request>,
     skip: usize,
     excluded: HashSet<String>,
@@ -28,6 +29,7 @@ struct Recent {
 impl Recent {
     fn configure(&mut self, config: SpeedConfig, skip: usize) {
         if self.config != config {
+            self.changed_known_config |= self.config.model.is_some();
             self.config = config;
             self.requests.clear();
             self.skip = skip;
@@ -174,41 +176,87 @@ fn read_cached(home: &Path, id: &str, cache: &mut Option<Entry>) -> Result<ChatM
     let mut entry = if append {
         cache.take().unwrap()
     } else {
-        let (start, end) = last_start(&stamp.path, None, id)?;
-        let (segments, start) = if let Some(start) = start {
-            (vec![(stamp.path.clone(), end)], start)
-        } else {
-            // A continuation can begin in the middle of a turn. Follow its history only
-            // until the current turn's start, never turn inherited usage into own usage.
-            let segments = crate::preview::metrics_segments(home, id, Path::new(&path))?;
-            let mut selected = (0, 0);
-            for (index, (path, end)) in segments.iter().enumerate().rev() {
-                if let Some(start) = last_start(path, Some(*end), id)?.0 {
-                    selected = (index, start);
-                    break;
+        let end = if log.compressed { u64::MAX } else { stamp.len };
+        let mut segments = vec![(stamp.path.clone(), end)];
+        let mut index = 0;
+        let mut window = 64 * 1024;
+        let (parser, recent, offset) = loop {
+            let (first, limit) = &segments[index];
+            let first_log = rollout_log::open(first).map_err(|e| e.to_string())?;
+            let from = if first_log.compressed {
+                0
+            } else {
+                limit.saturating_sub(window)
+            };
+            let mut parser = Parser::new(id);
+            let mut recent = Recent::default();
+            let mut offset = 0;
+            let start = if from == 0 {
+                Some(0)
+            } else {
+                forecast_start(first, from, *limit, id, &mut parser, &mut recent)?
+            };
+            if let Some(start) = start {
+                for (i, (file, end)) in segments[index..].iter().enumerate() {
+                    offset = feed(
+                        &mut parser,
+                        &mut recent,
+                        file,
+                        if i == 0 { start } else { 0 },
+                        *end,
+                    )?;
+                }
+                if let Some(turn) = parser.clone().finish().0.last() {
+                    recent.capture(turn);
+                }
+                if (recent.requests.len() == 3 || recent.changed_known_config)
+                    && from != 0
+                    && parser
+                        .order
+                        .last()
+                        .is_some_and(|id| parser.turns[id].turn.started_at.is_some())
+                {
+                    break (parser, recent, offset);
                 }
             }
-            (
-                segments.into_iter().skip(selected.0).collect::<Vec<_>>(),
-                selected.1,
-            )
-        };
-        let mut parser = Parser::new(id);
-        let mut recent = Recent::default();
-        let mut dependencies = vec![];
-        let mut offset = 0;
-        for (index, (path, end)) in segments.iter().enumerate() {
-            offset = feed(
-                &mut parser,
-                &mut recent,
-                path,
-                if index == 0 { start } else { 0 },
-                *end,
-            )?;
-            if index + 1 < segments.len() {
-                dependencies.push(rollout_log::open(path).map_err(|e| e.to_string())?.stamp);
+            if from > 0 {
+                window = window.saturating_mul(2);
+                continue;
             }
-        }
+            if index == 0 && segments.len() == 1 {
+                let mut header = String::new();
+                BufReader::new(first_log.reader_at(0).map_err(|e| e.to_string())?)
+                    .read_line(&mut header)
+                    .map_err(|e| e.to_string())?;
+                let chained = serde_json::from_str::<Value>(&header)
+                    .ok()
+                    .is_some_and(|v| v["payload"]["history_base"].is_object());
+                if chained {
+                    match crate::preview::metrics_segments(home, id, Path::new(&path)) {
+                        Ok(chain) => {
+                            segments = chain;
+                            segments.last_mut().unwrap().1 = end;
+                            index = segments.len() - 1;
+                        }
+                        Err(error) if parser.order.is_empty() => return Err(error),
+                        Err(_) => {}
+                    }
+                }
+            }
+            if index == 0 {
+                break (parser, recent, offset);
+            }
+            index -= 1;
+            window = 64 * 1024;
+        };
+        let dependencies = segments[index..segments.len() - 1]
+            .iter()
+            .map(|(file, _)| {
+                rollout_log::open(file)
+                    .map(|log| log.stamp)
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<_, _>>()?;
         Entry {
             home: home.into(),
             id: id.into(),
@@ -275,72 +323,63 @@ fn own_start(line: &str, id: &str, active: &mut String) -> bool {
         && (explicit == Some(id) || explicit.is_none() && active == id)
 }
 
-fn last_start(path: &Path, limit: Option<u64>, id: &str) -> Result<(Option<u64>, u64), String> {
+// Start at a complete own turn with a known preceding settings event. A tail
+// beginning mid-turn cannot establish timing or the effective service tier.
+fn forecast_start(
+    path: &Path,
+    from: u64,
+    end: u64,
+    id: &str,
+    parser: &mut Parser,
+    recent: &mut Recent,
+) -> Result<Option<u64>, String> {
     let log = rollout_log::open(path).map_err(|e| e.to_string())?;
-    let mut header = String::new();
-    BufReader::new(
-        rollout_log::open(path)
-            .and_then(|log| log.reader_at(0))
-            .map_err(|e| e.to_string())?,
-    )
-    .read_line(&mut header)
-    .map_err(|e| e.to_string())?;
-    let mut owner = id.to_owned();
-    own_start(&header, id, &mut owner);
-    if !log.compressed && owner == id {
-        let end = limit.unwrap_or(log.stamp.len).min(log.stamp.len);
-        let mut window = 64 * 1024u64;
-        loop {
-            let start = end.saturating_sub(window);
-            let mut bytes = vec![];
-            rollout_log::open(path)
-                .and_then(|log| log.reader_at(start))
-                .and_then(|reader| reader.take(end - start).read_to_end(&mut bytes))
-                .map_err(|e| e.to_string())?;
-            let skip = if start == 0 {
-                0
-            } else {
-                bytes
-                    .iter()
-                    .position(|b| *b == b'\n')
-                    .map_or(bytes.len(), |n| n + 1)
-            };
-            let mut offset = start + skip as u64;
-            let mut found = None;
-            let mut active = owner.clone();
-            for line in bytes[skip..].split_inclusive(|b| *b == b'\n') {
-                if line.ends_with(b"\n")
-                    && std::str::from_utf8(line).is_ok_and(|line| own_start(line, id, &mut active))
-                {
-                    found = Some(offset);
-                }
-                offset += line.len() as u64;
-            }
-            if found.is_some() || start == 0 {
-                return Ok((found, end));
-            }
-            window = window.saturating_mul(2);
-        }
-    }
     let mut reader = BufReader::new(
-        log.reader_at(0)
+        log.reader_at(from)
             .map_err(|e| e.to_string())?
-            .take(limit.unwrap_or(u64::MAX)),
+            .take(end - from),
     );
+    let mut offset = from
+        + reader
+            .read_until(b'\n', &mut Vec::new())
+            .map_err(|e| e.to_string())? as u64;
     let mut line = String::new();
-    let (mut offset, mut found) = (0, None);
+    let mut owner = String::new();
+    let mut settings = None;
     loop {
         line.clear();
         let len = reader.read_line(&mut line).map_err(|e| e.to_string())?;
         if len == 0 || !line.ends_with('\n') {
-            break;
+            return Ok(None);
         }
         if own_start(&line, id, &mut owner) {
-            found = Some(offset);
+            if let Some(tier) = settings {
+                parser.service_tier = tier;
+                recent.config.service_tier = parser.service_tier.clone();
+                return Ok(Some(offset));
+            }
+        } else if line.contains("thread_settings_applied") {
+            if let Ok(record) = serde_json::from_str::<Value>(&line) {
+                let p = &record["payload"];
+                if record["type"] == "event_msg"
+                    && p["type"] == "thread_settings_applied"
+                    && p["thread_id"]
+                        .as_str()
+                        .map_or(owner == id, |thread| thread == id)
+                {
+                    settings = Some(
+                        p["thread_settings"]["service_tier"]
+                            .as_str()
+                            .map(str::to_owned),
+                    );
+                }
+            }
+        }
+        if owner != id {
+            settings = None;
         }
         offset += len as u64;
     }
-    Ok((found, offset))
 }
 
 fn feed(
@@ -394,6 +433,7 @@ fn feed(
                             recent.skip = 0;
                             recent.excluded.clear();
                             *parser = Parser::new(&parser.id);
+                            parser.service_tier = recent.config.service_tier.clone();
                         }
                     }
                 }
@@ -521,6 +561,45 @@ mod tests {
             lines(records)
         )
         .unwrap();
+    }
+
+    #[test]
+    fn cold_forecast_restores_pre_turn_tier_and_switches_to_settled_speed() {
+        let settings = |tier| json!({"type":"event_msg","payload":{"thread_id":"main","type":"thread_settings_applied","thread_settings":{"service_tier":tier}}});
+        let ctx = |id| json!({"type":"turn_context","payload":{"turn_id":id,"model":"model","effort":"high"}});
+        let mut records = vec![
+            json!({"type":"session_meta","payload":{"id":"main"}}),
+            json!({"type":"ignored","padding":"x".repeat(80000)}),
+            settings("default"),
+            started("one"),
+            ctx("one"),
+        ];
+        records.extend(request("one", "r1", 2000, 3000, 20));
+        records.extend(request("one", "r2", 4000, 5000, 30));
+        records.extend(request("one", "r3", 6000, 7000, 40));
+        records.extend([settings("default"), started("two"), ctx("two")]);
+        let (dir, path) = fixture(&records);
+        let mut cache = None;
+        let early = read_cached(dir.path(), "main", &mut cache).unwrap();
+        assert_eq!(early.summary.token_speed, None);
+        let estimate = early.recent_speed.unwrap();
+        assert_eq!(estimate.config.service_tier.as_deref(), Some("default"));
+        assert_eq!((estimate.samples, estimate.token_speed), (3, 30.0));
+        append(&path, &request("two", "first", 8000, 9000, 81));
+        let measured = read_cached(dir.path(), "main", &mut cache).unwrap();
+        assert_eq!(measured.summary.token_speed, Some(80.0));
+        append(
+            &path,
+            &[settings("priority"), started("three"), ctx("three")],
+        );
+        assert!(read_cached(dir.path(), "main", &mut cache)
+            .unwrap()
+            .recent_speed
+            .is_none());
+        assert!(read_cached(dir.path(), "main", &mut None)
+            .unwrap()
+            .recent_speed
+            .is_none());
     }
 
     #[test]
@@ -1013,11 +1092,12 @@ mod tests {
                 output as f64 * 1000.0 / duration as f64
             );
             println!(
-                "forecast_samples={} output={} generation_ms={} forecast_tps={}",
+                "forecast_samples={} output={} generation_ms={} forecast_tps={} config={:?}",
                 requests.len(),
                 output,
                 duration,
-                estimate.token_speed
+                estimate.token_speed,
+                estimate.config
             );
         }
         assert!(latest.turns.len() <= 1 && latest.subagents.is_empty());
@@ -1050,6 +1130,7 @@ mod tests {
                 );
             } else {
                 assert_eq!(latest.summary.token_speed, None);
+                println!("turn={} settled_speed=none", turn.turn_id);
             }
         }
     }

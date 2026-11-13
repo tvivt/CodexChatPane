@@ -848,13 +848,14 @@ const metricValue = value => typeof value === 'number' && Number.isFinite(value)
 const metricNumber = value => metricValue(value) ? value.toLocaleString(language() === 'en' ? 'en-US' : 'zh-CN') : '—';
 const metricSeconds = (value, digits = 1) => metricValue(value) ? `${(value / 1000).toFixed(digits)}s` : '—';
 const metricPercent = (value, digits = 1) => metricValue(value) ? `${(value * 100).toFixed(digits)}%` : '—';
-const metricsCompact = metrics => `${metricSeconds(metrics?.ttftMs)}·${metricValue(metrics?.tokenSpeed) ? Math.round(metrics.tokenSpeed) + 't/s' : '—'}·${metricPercent(metrics?.cacheHitRate, 0)}`;
+const metricsCompact = (metrics, speed = metrics?.tokenSpeed) => `${metricSeconds(metrics?.ttftMs)}·${metricValue(speed) ? Math.round(speed) + 't/s' : '—'}·${metricPercent(metrics?.cacheHitRate, 0)}`;
 const metricStatus = value => t(({completed:'已完成',inProgress:'进行中',running:'进行中',interrupted:'已中断',failed:'失败',pending:'等待中',closed:'已关闭'})[value] || value || '未知');
-function metricsTooltip(metrics, data) {
+function metricsTooltip(metrics, data, forecast = null) {
   if (!data) return t('点击查看对话详情；尚未读取统计');
   const turn = data.turns?.find(turn => turn.metrics === metrics);
   return [t('当前轮次最新有效请求') + (turn ? ' · ' + metricStatus(turn.status) : ''), t(metrics?.ttftEstimated ? '估算首 token：' : '原生首 token：') + metricSeconds(metrics?.ttftMs, 3),
-    t('估算生成速度，含推理：') + (metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'),
+    metricValue(forecast) ? t('近期同配置请求估算速度：') + forecast.toFixed(1) + 't/s' :
+      t('估算生成速度，含推理：') + (metricValue(metrics?.tokenSpeed) ? metrics.tokenSpeed.toFixed(1) + 't/s' : '—'),
     t('token 覆盖率：') + metricPercent(metrics?.coverage) + `；${metricNumber(metrics?.validRequestCount)}/${metricNumber(metrics?.requestCount)} ` + t('次请求'),
     t('缓存命中率：') + metricPercent(metrics?.cacheHitRate, 2),
     t('点击查看对话详情')].join('\n');
@@ -1068,15 +1069,15 @@ function statusLocalTime(at) {
   const day = dateKey(date) === dateKey(now) ? (language() === 'zh' ? '今天' : 'Today') : dateKey(date) === dateKey(yesterday) ? (language() === 'zh' ? '昨天' : 'Yesterday') : dateKey(date);
   return `${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+function matchingForecast(chat) {
+  const activity=chat.generation, sample=chatMetrics.get(chat.id)?.recentSpeed;
+  if (!activity?.turnId || activity.turnId!==chat.turnId || !activity.config?.model || !metricValue(sample?.tokenSpeed)) return null;
+  const matches=['model','effort','serviceTier'].every(key=>(sample.config?.[key]??null)===(activity.config[key]??null));
+  return matches ? sample.tokenSpeed : null;
+}
 function runningMetricsEntries() {
   const running=chats.filter(isRunningMetricsChat).sort((a,b)=>(a.title||'').localeCompare(b.title||''));
-  return running.map(chat=>{
-    const activity=chat.generation,sample=chatMetrics.get(chat.id)?.recentSpeed;
-    const current=Boolean(activity?.turnId&&activity.turnId===chat.turnId);
-    const config=activity?.config,known=sample&&config?.model&&['model','effort','serviceTier'].every(key=>(sample.config?.[key]??null)===(config[key]??null));
-    const speed=current&&known&&metricValue(sample.tokenSpeed)?sample.tokenSpeed:null;
-    return {chat,speed};
-  });
+  return running.map(chat=>({chat,speed:matchingForecast(chat)}));
 }
 function runningMetricsTipMarkup() {
   const entries=runningMetricsEntries(),estimated=entries.filter(entry=>metricValue(entry.speed)).length;
@@ -1099,7 +1100,8 @@ function statusChatCurrentMarkup() {
   if (!chat) return '';
   const duration = executionLabel(chat);
   const data = chatMetrics.get(chat.id), metrics = metricsScope(data, chat.turnId || '');
-  return ui`<span class="status-sent">${statusLocalTime(chat.lastUserMessageAt)}${duration ? ui`[<span class="status-duration">${duration}</span>]` : ''}</span><button class="status-metrics" data-metrics-action="open" data-id="${esc(chat.id)}" title="${esc(metricsTooltip(metrics, data))}" aria-label="${t('对话详情')}">${metricsCompact(metrics)}</button>`;
+  const forecast = !metricValue(metrics?.tokenSpeed) && isRunningMetricsChat(chat) ? matchingForecast(chat) : null;
+  return ui`<span class="status-sent">${statusLocalTime(chat.lastUserMessageAt)}${duration ? ui`[<span class="status-duration">${duration}</span>]` : ''}</span><button class="status-metrics" data-metrics-action="open" data-id="${esc(chat.id)}" title="${esc(metricsTooltip(metrics, data, forecast))}" aria-label="${t('对话详情')}">${metricsCompact(metrics, forecast ?? metrics?.tokenSpeed)}</button>`;
 }
 function syncMarkup() {
   if (!state.syncError) return '';

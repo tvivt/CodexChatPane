@@ -2096,6 +2096,17 @@ await vm.runInContext(`(async () => {
     totalPending.get('b')(forecast(withTurn('b','b-turn',48,'inProgress'),48));await combined;
     const combinedMarkup=runningMetricsMarkup();
     const combinedTip=runningMetricsTipMarkup();
+    state.selectedChatId='a';
+    const settledChatMetrics=chatMetrics.get('a');
+    rememberChatMetrics(forecast(withTurn('a','a-turn',null,'inProgress'),58));
+    assert.ok(statusChatCurrentMarkup().includes('·58t/s·') && statusChatCurrentMarkup().includes('近期同配置请求估算速度'));
+    chats[0].generation.config.serviceTier='priority';
+    assert.ok(!statusChatCurrentMarkup().includes('58t/s'),'tier changes exclude the old forecast');
+    chats[0].generation.config.serviceTier=null;
+    rememberChatMetrics(forecast(settledChatMetrics,58));
+    assert.ok(statusChatCurrentMarkup().includes('·62t/s·') && !statusChatCurrentMarkup().includes('近期同配置请求估算速度'));
+    rememberChatMetrics(settledChatMetrics);
+    state.selectedChatId='';
     assert.ok(combinedMarkup.includes('Σ≈110t/s')&&combinedMarkup.includes('aria-describedby="running-metrics-tip"'));
     assert.ok(combinedTip.includes('Actual renamed title<small class="running-metrics-model">[model]</small></span><span class="running-metrics-speed">62t/s</span>'));
     assert.ok(!combinedTip.includes('≈'),'only the aggregate label retains the approximation sign');

@@ -497,7 +497,13 @@ pub(super) fn read_rollout_snapshot(
                         && cutoff
                             .is_some_and(|cutoff| activity.activity_at < seconds_or_millis(cutoff))
                 });
-                if cursor.has_start || cursor.pending_message || old_terminal || window >= length {
+                let need_tier = cursor.activity.as_ref().is_some_and(|a| a.working)
+                    && cursor.generation.value.config.model.is_some()
+                    && !cursor.generation.settings_seen;
+                if ((cursor.has_start || cursor.pending_message) && !need_tier)
+                    || old_terminal
+                    || window >= length
+                {
                     break;
                 }
                 window = window.saturating_mul(2);

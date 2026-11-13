@@ -106,6 +106,7 @@ const english = {
   '估算首 token：': 'Estimated first token: ', '估算首 token': 'Estimated first token',
   '首 token 缺少原生值，以轮次开始至首条正文输出起点估算。': 'Without a native first-token value, estimate from turn start to the first text output.',
   '当前轮次最新有效请求': 'Latest valid request in the current turn',
+  '近期同配置请求估算速度：': 'Estimated speed from recent requests with the same settings: ',
   '仅采用最近一次有效、已结算请求；不完整记录暂不计入。': 'Only the latest valid, settled request is used; incomplete records are not included.',
   '日志缺少这次请求的可靠首 token 计时。': 'The log has no reliable first-token timing for this request.',
   '响应 ID：': 'Response ID: ',
