@@ -207,6 +207,13 @@ for (const [preferences,expected] of [
   vm.runInContext(filterInitialization,reloaded);
   assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify([state.chatProjectFilter,state.recentProjectFilter])',reloaded)),expected,'project filter migration distinguishes old all from saved none');
 }
+{
+  const saved={recentProjectSort:'custom',recentProjectOrder:['p2','p1','p2']};
+  const reloaded=vm.createContext({...context,localStorage:{getItem:key=>key==='CodexChatPane.preferences-v1'?JSON.stringify(saved):null,setItem(){}}});
+  vm.runInContext(script.slice(0,script.indexOf('const preferenceValue =')),reloaded);
+  assert.equal(vm.runInContext('state.recentProjectSort',reloaded),'custom');
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.recentProjectOrder)',reloaded)),['p2','p1'],'custom project order survives restart and removes duplicate IDs');
+}
 for (const [key,value] of legacyStorage) {
   assert.ok(savedLocal.has(key.replace('codex-chat-pane.', 'CodexChatPane.')), `legacy storage key ${key} migrates before startup reads`);
   assert.equal(savedLocal.get(key), value, 'migration retains the old value for rollback');
@@ -984,7 +991,7 @@ vm.runInContext(`
   assert.deepEqual(sortedIds(), ['sort-z','sort-m','sort-a']);
   state.dynamicChatSort = 'status-asc';
   assert.deepEqual(sortedIds(), ['sort-m','sort-a','sort-z'], 'default status direction preserves pending-first priority');
-  const sameNameProjects = [{id:'sort-p1',name:'Same'}, {id:'sort-p2',name:'Same'}];
+  const sameNameProjects = ['sort-p1','sort-p2'].map(id=>({...projects[1],id,name:'Same',folder:'',folders:[]}));
   projects.push(...sameNameProjects);
   const groupedRows = [
     {...read,id:'p1-z',title:'Zulu',projectId:'sort-p1'},
@@ -996,6 +1003,59 @@ vm.runInContext(`
   assert.deepEqual(chatsByProject(groupedRows, 'dynamicProjectSort', 'dynamicChatSort').map(chat=>chat.id), ['p1-a','p1-z','p2-a','p2-z'], 'same-named Projects stay contiguous with names sorted inside');
   state.dynamicProjectSort = 'desc'; state.dynamicChatSort = 'name-desc';
   assert.deepEqual(chatsByProject(groupedRows, 'dynamicProjectSort', 'dynamicChatSort').map(chat=>chat.id), ['p2-z','p2-a','p1-z','p1-a']);
+  {
+    const savedState={...state}, savedChats=chats;
+    const foldersBefore=JSON.stringify(projects.map(p=>[p.id,p.folder,p.folders,p.order]));
+    chats=groupedRows.map(chat=>({...chat,timelineAt:Date.now(),sourceArchived:false,reasons:[]}));
+    Object.assign(state,{recentProjectSort:'off',recentProjectOrder:[],recentChatSort:'name-asc',recentProjectFilter:null,recentQuery:'',recentStatus:'all',chatDays:3});
+    assert.equal(moveRecentProject('sort-p2','sort-p1','before'),true);
+    assert.equal(state.recentProjectSort,'custom');
+    assert.deepEqual(projectRecentChats().map(c=>c.id),['p2-a','p2-z','p1-a','p1-z'],'dragging moves the whole project, with N sorting within it');
+    assert.deepEqual(state.recentProjectOrder.slice(0,2),['sort-p2','sort-p1']);
+    assert.ok(projectSortButton('recentProjectSort','toggle-recent-project-sort').includes('#i-sort-custom'));
+    assert.ok(globalChatRow(chats[0],'','',true).includes('data-recent-project="sort-p1" draggable="true"'));
+    assert.ok(!globalChatRow(chats[0],'global').includes('data-recent-project='),'other chat lists keep their existing drag behavior');
+    const source={dataset:{recentProject:'sort-p2'},classList:{add(){},remove(){}},closest(selector){return selector==='[data-recent-project]'?this:null;}};
+    press={source,pointer:true,native:false,held:true};
+    beginDrag({target:source});
+    dispatch('dragstart',{target:source,dataTransfer:{setData(){}},preventDefault(){}});
+    assert.equal(press.native,true);
+    dispatch('pointercancel',{target:source});
+    assert.equal(draggedRecentProject,'sort-p2','pointercancel during native drag handoff must retain the project');
+    dispatch('dragend',{target:source});
+    assert.equal(draggedRecentProject,null);
+    press={source,pointer:true,native:false,held:true};
+    beginDrag({target:source});
+    dispatch('pointercancel',{target:source});
+    assert.equal(draggedRecentProject,null,'canceling a pointer-only drag still clears its state');
+    timeouts.filter(timer=>timer.milliseconds===120).forEach(timer=>timer.callback());
+    state.recentChatSort='name-desc';
+    assert.deepEqual(projectRecentChats().map(c=>c.id),['p2-z','p2-a','p1-z','p1-a']);
+    const manual=[...state.recentProjectOrder];
+    for (const next of ['off','asc','desc','custom']) {
+      dispatch('click',{target:{dataset:{action:'toggle-recent-project-sort'},closest(selector){return selector==='[data-action]'?this:null;}}});
+      assert.equal(state.recentProjectSort,next);
+      assert.deepEqual(state.recentProjectOrder,manual,'switching modes retains the manual order');
+    }
+    assert.equal(moveRecentProject('sort-p1','sort-p1','after'),false);
+    state.recentProjectFilter=['sort-p1'];
+    assert.equal(moveRecentProject('sort-p2','sort-p1','before'),false,'filtered-out projects cannot be drag targets or sources');
+    state.recentProjectFilter=null;
+    assert.equal(moveRecentProject('sort-p2','sort-p1','after'),true);
+    assert.deepEqual(state.recentProjectOrder.slice(0,2),['sort-p1','sort-p2']);
+    const persisted=JSON.parse(localStorage.getItem(PREFERENCES_KEY));
+    assert.equal(persisted.recentProjectSort,'custom');
+    assert.deepEqual(persisted.recentProjectOrder,state.recentProjectOrder);
+    const exported={version:1,data:{[PREFERENCES_KEY]:JSON.stringify({recentProjectSort:'custom',recentProjectOrder:state.recentProjectOrder})}};
+    assert.deepEqual(JSON.parse(validateConfiguration(exported)[PREFERENCES_KEY]).recentProjectOrder,state.recentProjectOrder);
+    assert.throws(()=>validateConfiguration({version:1,data:{[PREFERENCES_KEY]:JSON.stringify({recentProjectOrder:{bad:true}})}}));
+    projects.push({id:'new-custom-project',name:'New'});
+    syncRecentProjectOrder();
+    assert.equal(state.recentProjectOrder.at(-1),'new-custom-project','new projects append without changing existing ranks');
+    projects.pop();
+    assert.equal(JSON.stringify(projects.map(p=>[p.id,p.folder,p.folders,p.order])),foldersBefore,'dynamic project reordering does not edit the Projects tree');
+    chats=savedChats;Object.assign(state,savedState);
+  }
   projects.splice(-2);
   state.dynamicProjectSort = 'off';
   state.dynamicChatSort = 'status-asc';
@@ -1070,7 +1130,7 @@ vm.runInContext(`
   const savedFilter = state.recentProjectFilter, savedSort = state.recentProjectSort;
   state.recentProjectFilter = [projects[1].id];
   state.recentProjectSort = 'off';
-  for (const sort of ['asc','desc','off']) {
+  for (const sort of ['asc','desc','custom','off']) {
     dispatch('click',{target:{...projectColumnToggle,dataset:{action:'toggle-recent-project-sort'}}});
     assert.equal(state.recentProjectSort,sort);
     assert.deepEqual(state.recentProjectFilter,[projects[1].id]);
@@ -1113,22 +1173,21 @@ vm.runInContext(`
     const statuses=['waiting','unread','working','read'];
     const pressed=key=>buttons().match(new RegExp('data-status="'+key+'" aria-pressed="([^"]+)"'))[1];
     assert.equal(pressed('all'),'true');
-    for (let mask=0;mask<16;mask++) {
-      if (state.recentStatuses.length!==4) clickStatus('all');
-      for (let index=0;index<4;index++) if (!(mask & 1<<index)) clickStatus(statuses[index]);
-      assert.equal(pressed('all'),mask===15?'true':mask===0?'false':'mixed');
-      assert.deepEqual(ids(),projectRecentChats().filter(chat=>statuses.some((key,index)=>(mask & 1<<index)&&chatRegion(chat)===key)).map(chat=>chat.id).sort());
-      statuses.forEach((key,index)=>assert.equal(pressed(key),String(Boolean(mask & 1<<index))));
+    for (const status of ['all',...statuses]) {
+      clickStatus(status);clickStatus(status);
+      assert.deepEqual(ids(),projectRecentChats().filter(chat=>status==='all'||chatRegion(chat)===status).map(chat=>chat.id).sort());
+      for (const key of ['all',...statuses]) assert.equal(pressed(key),String(key===status));
+      assert.deepEqual(state.recentProjectFilter,[projects[1].id],'status selection preserves project multiselect');
     }
-    clickStatus('all'); assert.deepEqual(ids(),[]);
+    clickStatus('all'); clickStatus('all'); assert.equal(ids().length,5);
     clickStatus('working'); assert.deepEqual(ids(),['work']);
     chats[1].working=false;
     assert.deepEqual(ids(),[]);
-    assert.deepEqual(state.recentStatuses,['working']);
+    assert.equal(state.recentStatus,'working');
     assert.ok(buttons().includes('aria-label="工作中 0"') && buttons().includes('aria-label="待查看 2"'));
     clickStatus('unread'); assert.deepEqual(ids(),['view','work']);
     clickStatus('all'); assert.equal(ids().length,5);
-    clickStatus('all'); assert.deepEqual(ids(),[]);
+    clickStatus('all'); assert.equal(ids().length,5);
     clickStatus('read'); assert.deepEqual(ids(),['done','manual']);
     const recentSearchAction=action=>dispatch('click',{target:{dataset:{action,searchScope:'recent'},closest(selector){return selector==='[data-action]'?this:null;}}});
     recentSearchAction('toggle-search');
@@ -1141,7 +1200,7 @@ vm.runInContext(`
     recentSearchAction('close-search');
     assert.deepEqual(ids(),['done','manual']);
     clickStatus('all'); assert.equal(ids().length,5);
-    assert.ok(!preferenceFields.includes('recentStatuses') && !browserPreferenceFields.includes('recentStatuses'));
+    assert.ok(!preferenceFields.includes('recentStatus') && !browserPreferenceFields.includes('recentStatus'));
     chats=originals; state.recentIncludedChatIds.delete('manual'); state.recentExcludedChatIds.delete('removed');
   }
   assert.ok(projectRecentChats().every(chat => chat.projectId === projects[1].id), '3 Days filter is scoped to recent chats');
@@ -1909,17 +1968,25 @@ await vm.runInContext(`(async () => {
   }
 })()`,context);
 await vm.runInContext(`(async () => {
-  const savedRender = render, savedPort = state.remoteDebuggingPort, savedTheme = state.themeFamily;
+  const savedRender = render, savedPort = state.remoteDebuggingPort, savedTheme = state.themeFamily, savedConfirm=showAppConfirm;
   const calls = [];
+  const confirmations=[];
   const change = handlers.get('change').at(-1);
   const target = value => ({id:'',dataset:{input:'remote-debugging-port'},value});
   try {
     render = () => {};
+    showAppConfirm = options => confirmations.push(options);
     nativeInvoke = async (command,args) => calls.push({command,args});
     await change({target:target('9222')});
     assert.equal(state.remoteDebuggingPort,9222);
     assert.equal(calls[0].command,'save_tool_config');
     assert.equal(calls[0].args.config.remoteDebuggingPort,9222);
+    assert.equal(confirmations.length,1,'a saved port change asks before restarting');
+    assert.equal(confirmations[0].danger,false);
+    assert.ok(confirmations[0].note.includes('重启 Pane 后生效'));
+    await change({target:target('9222')});
+    assert.equal(confirmations.length,1,'unchanged port does not ask or save again');
+    assert.equal(calls.length,1,'cancel or no confirmation keeps the process running');
     assert.equal(configurationDocument().appearance.remoteDebuggingPort,9222);
     for (const value of ['', '-1', '65536', '1.5']) await change({target:target(value)});
     assert.equal(calls.length,1,'invalid ports never reach the backend');
@@ -1928,9 +1995,13 @@ await vm.runInContext(`(async () => {
     nativeInvoke = async () => { throw new Error('settings write failed'); };
     await change({target:target('9333')});
     assert.equal(state.remoteDebuggingPort,9222,'failed saves retain the last saved port');
-    nativeInvoke = async () => {};
+    assert.equal(confirmations.length,1,'failed saves do not offer restart');
+    nativeInvoke = async (command,args) => calls.push({command,args});
     await change({target:target('0')});
     assert.equal(state.remoteDebuggingPort,0);
+    assert.equal(confirmations.length,2,'disabling debugging also asks to restart');
+    await confirmations[1].onConfirm();
+    assert.equal(calls.at(-1).command,'restart_app','only confirmation restarts the app');
     calls.length = 0;
     nativeInvoke = async (command,args) => calls.push({command,args});
     await change({target:{id:'',dataset:{input:'theme-family'},value:'ayu'}});
@@ -1939,7 +2010,7 @@ await vm.runInContext(`(async () => {
     nativeInvoke = async () => { throw new Error('settings write failed'); };
     await change({target:{id:'',dataset:{input:'theme-family'},value:'tokyo'}});
     assert.equal(state.themeFamily,'ayu','failed theme saves restore the selected theme');
-  } finally { render = savedRender; state.remoteDebuggingPort = savedPort; state.themeFamily = savedTheme; nativeInvoke = undefined; }
+  } finally { render = savedRender; showAppConfirm=savedConfirm; state.remoteDebuggingPort = savedPort; state.themeFamily = savedTheme; nativeInvoke = undefined; }
 })()`,context);
 vm.runInContext(`
   const savedQuery = document.querySelector;

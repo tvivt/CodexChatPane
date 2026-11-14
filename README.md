@@ -14,7 +14,7 @@ See chats from the last few days across projects. When sorted by status, chats w
 
 Adjust the number of days, manually include or exclude chats, filter multiple projects, group by project, then sort by status or chat title.
 
-Status icons support multiple selections, initially including all four states. ALL selects or clears them together and indicates a partial selection. Search recent chat titles independently. P toggles the project column, with separate project sorting and filtering controls. Enable folder linkage to locate the selected chat immediately. On narrow panes, additional tools move into More while all five status controls remain visible.
+Status icons use a single selection, with ALL selected by default. Click a state to show it, or ALL to show every state. Project filtering supports multiple selections. Search recent chat titles independently. P toggles the project column, with separate project sorting and filtering controls. Enable folder linkage to locate the selected chat immediately. On narrow panes, additional tools move into More while all five status controls remain visible.
 
 ## Projects · Organize work by project
 

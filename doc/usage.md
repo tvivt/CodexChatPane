@@ -36,9 +36,9 @@ The Projects area shows recent conversations from a project perspective:
 - Selecting a project shows its chats in the adjacent or lower area.
 - Chats without a project appear in a synthetic unprojected-chats category rather than a real project.
 
-The recent toolbar is ordered Days, N, P with project sorting and filtering, status filters, then search and other tools. N cycles status order, title ascending and title descending. P toggles the project column; its underline spans the project controls. Project sorting cycles off, ascending and descending independently. Hiding the column preserves sorting and filtering. The project checklist initially selects every project. Clicking one removes its selection, Clear deselects every project and shows an empty list, and Select all restores all projects. A solid funnel means the selection restricts projects.
+The recent toolbar is ordered Days, N, P with project sorting and filtering, status filters, then search and other tools. N cycles status order, title ascending and title descending. P toggles the project column; its underline spans the project controls. Project sorting cycles off, ascending, descending and custom independently. Custom order uses `≡`. Drag a project name in the project column to move its entire group and switch to custom order, while N keeps sorting chats within each project. The custom order stays local and survives mode or filter changes; new projects append at the end. The Projects tree keeps its own order. Hiding the column preserves sorting and filtering. The project checklist initially selects every project. Clicking one removes its selection, Clear deselects every project and shows an empty list, and Select all restores all projects. A solid funnel means the selection restricts projects.
 
-Status filters support multiple selections and initially include waiting, unread, working and read. Click an icon to toggle it. ALL has a full underline when all four are selected, a short centered underline for a partial selection, and no underline for none. Clicking ALL clears a full selection or selects all from any other state. No selected states produces an empty list. Counts use the day range, manual overrides, project filter and title search before status filtering. Changing chat status updates the results while preserving your selections. The selection resets to all when the app starts.
+Status filters use a single selection, with ALL selected by default. Click a state to show only that state, or ALL to show every state. Repeated clicks keep the current selection. Counts use the day range, manual overrides, project filter and title search before status filtering. Changing chat status updates the results while preserving your selections. The selection resets to all when the app starts.
 
 Status icons retain their colors, with blue ALL, amber question mark, red unread dot, green working dots and muted blue read check. Selected controls use underlines. Search applies to recent chat titles. A divider separates the right-hand search/tools group. Extra tools move into More as the pane narrows, with right-hand tools collected first. The minimum window width accommodates all five status controls and More.
 
@@ -116,7 +116,7 @@ The settings page provides:
 
 - Chinese and English.
 - Light and dark modes and theme families.
-- Tab, pane, and row font sizes.
+- Section title and list text sizes, with visible descriptions and px units. The legacy Tab font setting stays saved but is hidden from settings.
 - Normal window, show with Codex, and always on top modes.
 - Colored date bars.
 - Conversation preview switch (off by default).
@@ -126,7 +126,7 @@ The settings page provides:
 
 Local settings are in `%CODEX_HOME%\.codex-chat-pane\settings.toml`. Folders, groups, stars, and Activity rules are in `folders.json` in the same directory. Without `CODEX_HOME`, the root is `%USERPROFILE%\.codex`. The app creates these files; they are not committed to the repository.
 
-Positions use physical X/Y (including negative coordinates on a second monitor), dimensions use logical units, and restoration checks current monitor intersection. Maximization and auxiliary windows do not overwrite normal main-window geometry. Legacy windowPinned/localStorage keys migrate; invalid imports do not replace valid settings. Exports contain tool organization and settings, not credentials, logs, or statistics databases. Diagnostics offers an optional loopback debug port, off by default and effective after restart; forecasts do not use it.
+Positions use physical X/Y (including negative coordinates on a second monitor), dimensions use logical units, and restoration checks current monitor intersection. Maximization and auxiliary windows do not overwrite normal main-window geometry. Legacy windowPinned/localStorage keys migrate; invalid imports do not replace valid settings. Exports contain tool organization and settings, not credentials, logs, or statistics databases. Diagnostics offers an optional loopback debug port, off by default. Saving a changed port asks whether to restart Pane now. Confirming restarts automatically; canceling keeps the app running and applies the port at the next launch. Forecasts do not use it.
 
 Context menus are target-specific: chats offer activity overrides, rename/archive, folder move, locate project, open directory, copy title/link/diagnostic, and details; projects offer new chat, local folder move, directory, and identity copies. Multi-selection omits single-target actions. Custom folders support nesting/rename/delete; automatic folders only collapse. Group and blank-area menus control expansion, Timeline controls archive inclusion/closing, status menus copy time/quota, and titlebar/status background imports/exports settings. See the [complete menu table](usage.zh-CN.md#6-右键菜单速查) for restrictions. Local folder deletion changes organization, not Codex files or native archive state.
 

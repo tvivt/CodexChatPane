@@ -67,8 +67,9 @@ const state = {
   globalProjectSort: "off",
   dynamicProjectSort: "off",
   recentProjectSort: "off",
+  recentProjectOrder: [],
   recentChatSort: 'status-asc',
-  recentStatuses: ['waiting', 'unread', 'working', 'read'],
+  recentStatus: 'all',
   recentQuery: '',
   recentSearchOpen: false,
   dynamicChatSort: 'status-asc',
@@ -131,7 +132,7 @@ const state = {
 };
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
-const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', ...CHAT_SORT_FIELDS, 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'projectFilterVersion', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
+const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'recentProjectOrder', ...CHAT_SORT_FIELDS, 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'projectFilterVersion', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars', 'previewEnabled'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
@@ -156,7 +157,8 @@ if (!['', 'timeline', 'archive'].includes(state.chatsLowerPanel)) state.chatsLow
 if (!['light', 'dark'].includes(state.theme)) state.theme = 'dark';
 if (!THEME_FAMILIES.some(([id]) => id === state.themeFamily)) state.themeFamily = 'tokyo';
 if (!['off','asc','desc'].includes(state.dynamicProjectSort)) state.dynamicProjectSort = 'off';
-if (!['off','asc','desc'].includes(state.recentProjectSort)) state.recentProjectSort = 'off';
+if (!['off','asc','desc','custom'].includes(state.recentProjectSort)) state.recentProjectSort = 'off';
+state.recentProjectOrder = Array.isArray(state.recentProjectOrder) ? [...new Set(state.recentProjectOrder.filter(id=>typeof id==='string'&&id.length>0&&id.length<=4096))] : [];
 for (const field of CHAT_SORT_FIELDS) if (!CHAT_SORT_VALUES.includes(state[field])) state[field] = 'status-asc';
 if (!['off','asc','desc'].includes(state.nameSort)) state.nameSort = 'off';
 if (!['off','asc','desc'].includes(state.projectNameSort)) state.projectNameSort = 'off';
@@ -420,7 +422,7 @@ let nativeLoaded = false;
 let nativeScanInFlight = false;
 let nativeSourceSignature = "";
 let liveRateLimitsInFlight = false;
-const sourceRefreshBlocked = () => resizeSession || draggedDynamic || draggedFolder || draggedChatIds.length || draggedProjectIds.length;
+const sourceRefreshBlocked = () => resizeSession || draggedDynamic || draggedFolder || draggedRecentProject || draggedChatIds.length || draggedProjectIds.length;
 function acceptRateLimits(limits) {
   if (!limits) return false;
   if (JSON.stringify(state.rateLimits) === JSON.stringify(limits)) return false;
@@ -479,6 +481,7 @@ async function loadNativeSnapshot(catalogOnly = true) {
       const previousById = nativeLoaded;
       projects = snapshot.projects.map((project, index) => nativeProject(project, index, previousById ? previousProjects.get(project.id) : folderPreferences.projects?.[project.id]));
       chats = snapshot.chats.map((chat, index) => nativeChat(chat, index, previousById ? previousChats.get(chat.id) : folderPreferences.chats?.[chat.id]));
+      if (state.recentProjectSort === 'custom' || state.recentProjectOrder.length) syncRecentProjectOrder();
       state.selectedProjectIds = new Set([...state.selectedProjectIds].filter(id => projects.some(project => project.id === id)));
       state.selectedChatIds = new Set([...state.selectedChatIds].filter(id => chats.some(chat => chat.id === id)));
       state.projectId = projects.some(project => project.id === state.projectId) ? state.projectId : projects[0]?.id || '';
@@ -1477,8 +1480,8 @@ document.addEventListener('focusout', event => {
 function settingsChoice(action, valueAttr, value, selected, label) {
   return ui`<button type="button" class="settings-choice ${selected ? 'active' : ''}" data-action="${action}" ${valueAttr}="${esc(value)}" aria-pressed="${selected}">${label}</button>`;
 }
-function fontStep(key, label, value) {
-  return ui`<div class="font-step"><span class="font-step-label">${label}</span><button class="icon-button" data-action="nudge-font" data-font="${key}" data-delta="${-FONT_STEP}" title="${t('减小字号')}" aria-label="${t('减小字号')} ${label}">−</button><span class="font-step-value" data-font-value="${key}">${formatFont(value)}</span><button class="icon-button" data-action="nudge-font" data-font="${key}" data-delta="${FONT_STEP}" title="${t('增大字号')}" aria-label="${t('增大字号')} ${label}">+</button></div>`;
+function fontStep(key, label, value, description) {
+  return ui`<div class="font-step"><span class="font-step-label"><span>${label}</span><small class="font-step-description">${description}</small></span><button class="icon-button" data-action="nudge-font" data-font="${key}" data-delta="${-FONT_STEP}" title="${t('减小字号')}" aria-label="${t('减小字号')} ${label}">−</button><span class="font-step-value"><span data-font-value="${key}">${formatFont(value)}</span> px</span><button class="icon-button" data-action="nudge-font" data-font="${key}" data-delta="${FONT_STEP}" title="${t('增大字号')}" aria-label="${t('增大字号')} ${label}">+</button></div>`;
 }
 function renderSettingsPane() {
   return ui`<aside class="workspace-pane settings-workspace" aria-label="${t('设置')}">
@@ -1488,7 +1491,7 @@ function renderSettingsPane() {
         <div class="settings-row"><span>${t('语言')}</span><div class="settings-choices">${settingsChoice('set-language','data-language','zh',language()==='zh','中文')}${settingsChoice('set-language','data-language','en',language()==='en','EN')}</div></div>
         <div class="settings-row"><span>${t('亮色 / 暗色')}</span><div class="settings-choices">${settingsChoice('set-theme','data-theme','light',state.theme==='light',t('亮色'))}${settingsChoice('set-theme','data-theme','dark',state.theme==='dark',t('暗色'))}</div></div>
         <div class="settings-row"><span>${t('主题')}</span><select class="settings-choice" data-input="theme-family" aria-label="${t('主题')}">${THEME_FAMILIES.map(([id,label]) => ui`<option value="${id}"${state.themeFamily === id ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></div>
-        <div class="settings-fonts">${fontStep('tab','Tab',state.fontTab)}${fontStep('pane',t('栏'),state.fontPane)}${fontStep('row',t('文件夹与项目'),state.fontRow)}</div>
+        <div class="settings-fonts">${fontStep('pane',t('栏目标题字号'),state.fontPane,t('Projects、Chats 等栏目标题'))}${fontStep('row',t('列表文字字号'),state.fontRow,t('文件夹名、项目名、对话标题及日期时间'))}</div>
         <div class="settings-row settings-row-wrap"><span>${t('日期颜色竖条')}</span><div class="settings-choices">${settingsChoice('set-date-bars','data-date-bars','on',state.showDateBars,t('显示'))}${settingsChoice('set-date-bars','data-date-bars','off',!state.showDateBars,t('隐藏'))}</div></div>
       </section>
       <section class="settings-section"><h2>${t('窗口')}</h2>
@@ -1499,7 +1502,7 @@ function renderSettingsPane() {
         <div class="settings-row settings-row-wrap"><span>${t('日志级别')}</span><div class="settings-choices">${settingsChoice('set-log-level','data-log-level','error',state.logLevel==='error',t('错误'))}${settingsChoice('set-log-level','data-log-level','warn',state.logLevel==='warn',t('警告'))}${settingsChoice('set-log-level','data-log-level','info',state.logLevel==='info',t('信息'))}${settingsChoice('set-log-level','data-log-level','debug',state.logLevel==='debug',t('调试'))}</div></div>
         <p class="settings-note">${t('日志文件位于本机 CodexChatPane 数据目录；Debug 会记录窗口事件与状态细节。')}</p>
         <div class="settings-row"><span>${t('调试端口')}</span><input class="settings-choice" style="width:8em" type="number" min="0" max="65535" step="1" data-input="remote-debugging-port" value="${state.remoteDebuggingPort}" aria-label="${t('调试端口')}"></div>
-        <p class="settings-note">${t('0 表示关闭；仅允许本机连接。修改后从托盘退出并重新启动。')}</p>
+        <p class="settings-note">${t('0 表示关闭；仅允许本机连接。修改后可立即重启，或下次启动时生效。')}</p>
       </section>
       <section class="settings-section"><h2>Codex</h2>
         <div class="settings-row settings-row-wrap"><span>${t('对话预览')}</span><button type="button" class="settings-choice ${state.previewEnabled ? 'active' : ''}" data-action="toggle-conversation-preview" aria-pressed="${state.previewEnabled}">${t(state.previewEnabled ? '已开启' : '已关闭')}</button></div>
@@ -1672,13 +1675,12 @@ function recentStatusButtons(rows) {
   const counts = {all:rows.length, waiting:0, unread:0, working:0, read:0};
   for (const chat of rows) counts[chatRegion(chat)]++;
   return recentStatusOptions.map(([key,label,glyph]) => {
-    const partial = key === 'all' && state.recentStatuses.length > 0 && state.recentStatuses.length < 4;
-    const selected = key === 'all' ? state.recentStatuses.length === 4 : state.recentStatuses.includes(key);
-    return `<button type="button" class="icon-button${selected || partial ? ' active' : ''}${partial ? ' partial' : ''}" data-action="filter-recent-status" data-status="${key}" aria-pressed="${partial ? 'mixed' : selected}" aria-label="${t(label)} ${counts[key]}" title="${t(label)}">${glyph}<span class="recent-count">${counts[key]}</span></button>`;
+    const selected = key === state.recentStatus;
+    return `<button type="button" class="icon-button${selected ? ' active' : ''}" data-action="filter-recent-status" data-status="${key}" aria-pressed="${selected}" aria-label="${t(label)} ${counts[key]}" title="${t(label)}">${glyph}<span class="recent-count">${counts[key]}</span></button>`;
   }).join('');
 }
 function projectRecentListMarkup(rows = projectRecentChats()) {
-  const visible = rows.filter(chat => state.recentStatuses.includes(chatRegion(chat)));
+  const visible = state.recentStatus === 'all' ? rows : rows.filter(chat => chatRegion(chat) === state.recentStatus);
   return projectSortedChatMarkup(visible, 'recentProjectSort', chat => globalChatRow(chat, '', '', true)) || ui`<div class="empty-state">${t('没有对话')}</div>`;
 }
 
@@ -1754,7 +1756,7 @@ function setChatDays(value) {
 }
 function projectRecentColumnStyle() {
   const time = state.projectRecentTimeWidth > 0 ? `${state.projectRecentTimeWidth}px` : 'var(--chat-lead)';
-  const project = state.projectRecentProjectWidth > 0 ? `${state.projectRecentProjectWidth}px` : 'var(--project-label-width,10ch)';
+  const project = state.projectRecentProjectWidth > 0 ? `${state.projectRecentProjectWidth}px` : 'max(24px,var(--project-label-width,10ch))';
   return `--project-recent-time-width:${time};--project-recent-project-width:${project};`;
 }
 function chatColumnStyle() {
@@ -1836,8 +1838,8 @@ function projectFilterPicker(pickerId = 'chat-project') {
 const sortArrow = direction => icon(direction === 'asc' ? 'arrow-up' : direction === 'desc' ? 'arrow-down' : 'sort', 'sort-arrow');
 function projectSortButton(field, action) {
   const value = state[field];
-  const title = value === 'off' ? t('按项目升序') : value === 'asc' ? t('项目升序，点击改为降序') : t('项目降序，点击关闭排序');
-  const glyph = field === 'recentProjectSort' ? sortArrow(value) : `<span class="sort-glyph">P${value === 'desc' ? '↓' : '↑'}</span>`;
+  const title = value === 'off' ? t('按项目升序') : value === 'asc' ? t('项目升序，点击改为降序') : value === 'custom' ? t('自定义项目排序，点击关闭排序') : t(field === 'recentProjectSort' ? '项目降序，点击改为自定义排序' : '项目降序，点击关闭排序');
+  const glyph = value === 'custom' ? icon('sort-custom', 'sort-arrow') : field === 'recentProjectSort' ? sortArrow(value) : `<span class="sort-glyph">P${value === 'desc' ? '↓' : '↑'}</span>`;
   return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}">${glyph}</button>`;
 }
 const nameSortGlyph = direction => `<span class="sort-glyph name-sort-glyph">N${sortArrow(direction)}</span>`;
@@ -1853,12 +1855,30 @@ function nameSortButton(field, action) {
   const title = value === 'off' ? t('按名称升序') : value === 'asc' ? t('名称升序，点击改为降序') : t('名称降序，点击恢复活动时间顺序');
   return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}">${nameSortGlyph(value)}</button>`;
 }
+function syncRecentProjectOrder() {
+  const seed = projectRecentChats().map(chat=>chat.projectId);
+  state.recentProjectOrder = [...new Set([...state.recentProjectOrder,...seed,...projects.map(project=>project.id)].filter(id=>typeof id==='string'&&id.length>0&&id.length<=4096))];
+}
+function moveRecentProject(id, targetId, mode) {
+  if (id === targetId || !['before','after'].includes(mode)) return false;
+  const available = new Set(projectRecentChats().map(chat=>chat.projectId));
+  if (!available.has(id) || !available.has(targetId)) return false;
+  syncRecentProjectOrder();
+  const order = state.recentProjectOrder.filter(projectId=>projectId!==id);
+  order.splice(order.indexOf(targetId)+(mode==='after'?1:0),0,id);
+  state.recentProjectOrder = order;
+  state.recentProjectSort = 'custom';
+  savePreferences();
+  return true;
+}
 function chatsByProject(rows, sortField, chatSortField) {
   const sort = state[sortField];
   const [mode, direction] = state[chatSortField].split('-');
   const order = direction === 'desc' ? -1 : 1;
+  const projectRanks = sort === 'custom' ? new Map([...new Set([...state.recentProjectOrder,...rows.map(chat=>chat.projectId)])].map((id,index)=>[id,index])) : null;
   return [...rows].sort((a,b) => {
     if (sort !== 'off' && a.projectId !== b.projectId) {
+      if (sort === 'custom') return projectRanks.get(a.projectId) - projectRanks.get(b.projectId);
       return (sort === 'desc' ? -1 : 1) * (projectLabel(byProject(a.projectId)).localeCompare(projectLabel(byProject(b.projectId)), language()) || a.projectId.localeCompare(b.projectId));
     }
     return mode === 'status' ? statusTimeCompare(a,b) : order * a.title.localeCompare(b.title, language()) || a.id.localeCompare(b.id);
@@ -2474,7 +2494,8 @@ function globalChatRow(chat, scope = '', group = '', linkProject = false) {
   const selected = state.selectedChatIds.size ? state.selectedChatIds.has(chat.id) : state.selectedChatId === chat.id;
   const check = state.selectedChatIds.size && scope ? rowCheck('chat', chat.id) : '';
   const projectName = projectLabel(project);
-  const projectCell = (linkProject || scope) ? ui`<button type="button" class="global-chat-project project-link" data-action="select-project" data-id="${esc(project.id)}" title="${esc(projectName)}" aria-label="${esc(projectName)}">${esc(projectName)}</button>` : ui`<span class="global-chat-project" title="${esc(projectName)}">${esc(projectName)}</span>`;
+  const projectTip = linkProject ? projectName+'\n'+t('拖动调整项目顺序') : projectName;
+  const projectCell = (linkProject || scope) ? ui`<button type="button" class="global-chat-project project-link" data-action="select-project" data-id="${esc(project.id)}" ${linkProject ? `data-recent-project="${esc(project.id)}" draggable="true"` : ''} title="${esc(projectTip)}" aria-label="${esc(projectName)}">${esc(projectName)}</button>` : ui`<span class="global-chat-project" title="${esc(projectName)}">${esc(projectName)}</span>`;
   const preview = chatPreviewIcon(chat);
   return ui`<div class="chat-row global-chat-row without-type ${chat.attentionAt && !chat.waitingForInput ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
     ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}<div class="chat-title-line">${chat.sourceArchived ? codexActionButton(chat, 'archive') : ''}<span class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</span></div><div class="chat-actions">${codexActionButtons(chat)}</div>${preview}
@@ -3342,7 +3363,7 @@ function validateConfiguration(input) {
     if (key === 'CodexChatPane.language') { if (!['zh','en'].includes(value)) throw new Error(t('工具配置格式无效')); result[key] = value; continue; }
     const parsed = JSON.parse(value);
     let valid = true;
-    if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter'].includes(field) ? v === null || strings(v) : ['openFolders','openChatFolders'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','projectChatTimeWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
+    if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter'].includes(field) ? v === null || strings(v) : ['openFolders','openChatFolders','recentProjectOrder'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','projectChatTimeWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
     if (key === FOLDERS_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => ['projects','chats'].includes(field) ? object(v) && Object.values(v).every(item => object(item) && typeof item.folder === 'string' && Object.entries(item).every(([k,x]) => k === 'folder' ? x.length <= 4096 : k === 'folders' ? strings(x) : ['recycled','starred'].includes(k) ? typeof x === 'boolean' : k === 'region' ? typeof x === 'string' && x.length <= 32 : ['order','manualOrder','regionEnteredAt'].includes(k) && Number.isFinite(x))) : ['localProjectFolders','localChatFolders','recentIncludedChatIds','recentExcludedChatIds','recycledChatFolders','openFolders','openChatFolders','starredProjectIds','pinnedProjectIds'].includes(field) && strings(v));
     if (key === 'CodexChatPane.dynamic-v1') valid = object(parsed) && ['projects','chats'].every(kind => Array.isArray(parsed.groups?.[kind]) && parsed.groups[kind].every(g=>object(g) && typeof g.id==='string' && typeof g.name==='string' && g.name.length<=4096) && object(parsed.members?.[kind]) && Object.values(parsed.members[kind]).every(g=>typeof g==='string' || strings(g))) && object(parsed.views) && Object.values(parsed.views).every(v=>object(v) && strings(v.order) && strings(v.groups) && strings(v.collapsed) && (v.orders === undefined || object(v.orders) && Object.values(v.orders).every(strings)));
     if (key === PREFERENCES_KEY && CHAT_SORT_FIELDS.some(field => parsed[field] != null && parsed[field] !== 'status-desc' && !CHAT_SORT_VALUES.includes(parsed[field]))) valid = false;
@@ -3766,10 +3787,8 @@ document.addEventListener("click", async event => {
     }
     if (name === 'filter-recent-status') {
       const status = action.dataset.status;
-      if (recentStatusOptions.some(([key]) => key === status)) {
-        state.recentStatuses = status === 'all'
-          ? state.recentStatuses.length === 4 ? [] : recentStatusOptions.slice(1).map(([key]) => key)
-          : state.recentStatuses.includes(status) ? state.recentStatuses.filter(key => key !== status) : [...state.recentStatuses, status];
+      if (status !== state.recentStatus && recentStatusOptions.some(([key]) => key === status)) {
+        state.recentStatus = status;
         render();
       }
       return;
@@ -3794,6 +3813,7 @@ document.addEventListener("click", async event => {
       return;
     }
     if (name === 'select-project') {
+      if (suppressChatOpen) return;
       const project = byProject(action.dataset.id);
       if (!project) return;
       state.selectedProjectIds.clear();
@@ -3925,7 +3945,11 @@ document.addEventListener("click", async event => {
       state[action.dataset.kind === 'project' ? 'selectedProjectIds' : 'selectedChatIds'].clear();
     }
     if (name === 'toggle-dynamic-project-sort') state.dynamicProjectSort = state.dynamicProjectSort === 'off' ? 'asc' : state.dynamicProjectSort === 'asc' ? 'desc' : 'off';
-    if (name === 'toggle-recent-project-sort') state.recentProjectSort = state.recentProjectSort === 'off' ? 'asc' : state.recentProjectSort === 'asc' ? 'desc' : 'off';
+    if (name === 'toggle-recent-project-sort') {
+      if (state.recentProjectSort === 'desc') syncRecentProjectOrder();
+      const values = ['off','asc','desc','custom'];
+      state.recentProjectSort = values[(values.indexOf(state.recentProjectSort)+1)%values.length];
+    }
     if (name === 'nudge-folder') nudgeFolder(action.dataset.kind, action.dataset.folderKey, action.dataset.delta);
     if (name === 'new-project-folder') showFolderEditor('project',action.dataset.parent || '');
     if (name === "toggle-chat-timeline") state.chatTimelineOpen = !state.chatTimelineOpen;
@@ -4096,9 +4120,20 @@ document.addEventListener("change", async event => {
       return;
     }
     const previous = state.remoteDebuggingPort;
+    if (port === previous) return;
     state.remoteDebuggingPort = port;
     try { if (nativeInvoke) await nativeInvoke('save_tool_config',{config:toolConfig()}); }
-    catch (error) { state.remoteDebuggingPort = previous; showToast(t('无法保存工具配置'),String(error),'error'); }
+    catch (error) { state.remoteDebuggingPort = previous; render(); showToast(t('无法保存工具配置'),String(error),'error'); return; }
+    render();
+    if (nativeInvoke) showAppConfirm({
+      title:t('重启 Pane'), note:t('调试端口已保存，重启 Pane 后生效。是否立即重启？'),
+      submit:t('立即重启'), danger:false,
+      async onConfirm() {
+        try { savePreferences(); await nativeInvoke('restart_app'); }
+        catch (error) { showToast(t('重启失败'),String(error),'error'); }
+      }
+    });
+    return;
   }
   if (event.target.dataset.input === 'chat-days') setChatDays(event.target.value);
   render();
@@ -4173,6 +4208,7 @@ document.addEventListener("keydown", event => {
   const projectFolderRow = event.target.closest('.folder-row[data-drag-folder]');
   if (projectFolderRow && event.key === "Delete") { event.preventDefault(); showFolderConfirm('project', projectFolderRow.dataset.dragFolder); }
   if (event.key === "Escape") {
+    if (draggedRecentProject) { event.preventDefault(); endDrag(); return; }
     const more = document.querySelector('.recent-more[open]');
     if (more) { more.open = false; more.querySelector('summary').focus(); return; }
     if (state.recentSearchOpen && event.target.closest('.project-recent-panel')) {
@@ -4197,6 +4233,7 @@ let draggedChatIds = [];
 let draggedProjectIds = [];
 let draggedDynamic = null;
 let draggedFolder = null;
+let draggedRecentProject = null;
 let suppressChatOpen = false;
 function markDropTarget(target, mode = 'into') {
   document.querySelectorAll('.drop-target, .drop-before, .drop-after').forEach(element => {
@@ -4262,7 +4299,28 @@ function chatDropTarget(event, fromPath = null, projectId = null) {
   }
   return null;
 }
+function recentProjectDropTarget(event) {
+  if (!state.recentProjectColumnVisible) return null;
+  const point = pointerDropEvent(event);
+  const row = point.target?.closest?.('.project-recent-list .global-chat-row');
+  const id = row?.querySelector('[data-recent-project]')?.dataset.recentProject;
+  if (!id || id === draggedRecentProject || !Number.isFinite(point.clientY)) return null;
+  const rows = state.recentProjectSort === 'off' ? [row] : [...row.closest('.project-recent-list').querySelectorAll('.global-chat-row')]
+    .filter(item=>item.querySelector('[data-recent-project]')?.dataset.recentProject===id);
+  const first = rows[0], last = rows[rows.length-1];
+  const mode = point.clientY < (first.getBoundingClientRect().top + last.getBoundingClientRect().bottom)/2 ? 'before' : 'after';
+  return {id, mode, element:mode==='before'?first:last};
+}
 function updateDragHover(event) {
+  if (draggedRecentProject) {
+    const target = recentProjectDropTarget(event);
+    if (target) {
+      event.preventDefault();
+      dragTransfer(event).dropEffect = 'move';
+    }
+    markDropTarget(target?.element, target?.mode);
+    return Boolean(target);
+  }
   let target = null;
   if (draggedFolder?.kind === 'project') target = projectDropTarget(event, draggedFolder.path);
   else if (draggedFolder?.kind === 'chat') target = chatDropTarget(event, chatFolderName(draggedFolder.key), draggedFolder.projectId);
@@ -4318,6 +4376,15 @@ function dragTransfer(event) {
 }
 function beginDrag(event) {
   const transfer = dragTransfer(event);
+  const recentProject = event.target.closest('[data-recent-project]');
+  if (recentProject && state.recentProjectColumnVisible) {
+    draggedRecentProject = recentProject.dataset.recentProject;
+    suppressChatOpen = true;
+    recentProject.classList.add('dragging');
+    transfer.effectAllowed = 'move';
+    transfer.setData?.('text/plain', draggedRecentProject);
+    return true;
+  }
   const markStarted = () => { suppressChatOpen = true; setDragCollapse(true); };
   const dynamicItem = event.target.closest('[data-dynamic-item]');
   const heading = event.target.closest('[data-dynamic-heading][draggable="true"]');
@@ -4370,8 +4437,9 @@ function setDragCollapse(on) {
   else delete document.documentElement.dataset.dragCollapse;
 }
 function endDrag(event) {
-  const source = event?.target?.closest?.(".chat-row, .project-row, .folder-row, .chat-folder-head") || press?.source;
+  const source = event?.target?.closest?.("[data-recent-project], .chat-row, .project-row, .folder-row, .chat-folder-head") || press?.source;
   source?.classList.remove("dragging", "drag-ready");
+  press?.source?.classList.remove("dragging", "drag-ready");
   disarmDragHold();
   markDropTarget(null);
   setDragCollapse(false);
@@ -4379,27 +4447,30 @@ function endDrag(event) {
   draggedProjectIds = [];
   draggedDynamic = null;
   draggedFolder = null;
+  draggedRecentProject = null;
   press = null;
   setTimeout(() => { suppressChatOpen = false; }, 120);
 }
 function pointerEventAt(clientX, clientY) {
   const target = document.elementFromPoint?.(clientX, clientY);
-  return { target: target || document.body, preventDefault() {}, dataTransfer: { dropEffect: 'move', effectAllowed: 'move', setData() {} } };
+  return { target: target || document.body, clientX, clientY, preventDefault() {}, dataTransfer: { dropEffect: 'move', effectAllowed: 'move', setData() {} } };
 }
 document.addEventListener("pointerdown", event => {
-  if (event.button !== 0 || resizeSession || event.target.closest('[data-resize], [data-window-drag], button, input, a, .folder-head-actions')) {
+  const recentProject = event.target.closest('[data-recent-project]');
+  if (event.button !== 0 || resizeSession || !recentProject && event.target.closest('[data-resize], [data-window-drag], button, input, a, .folder-head-actions')) {
     press = null;
     return;
   }
-  const source = event.target.closest('[data-dynamic-item], [data-dynamic-heading][draggable="true"], .project-structure .folder-row[data-drag-folder], .folder-view-block .chat-folder-head[data-drag-chat-folder], .project-structure .project-row[draggable="true"], .folder-view-block .chat-row[draggable="true"]');
-  press = source ? { x: event.clientX, y: event.clientY, source, pointer: false, native: false, held: false } : null;
+  const source = recentProject || event.target.closest('[data-dynamic-item], [data-dynamic-heading][draggable="true"], .project-structure .folder-row[data-drag-folder], .folder-view-block .chat-folder-head[data-drag-chat-folder], .project-structure .project-row[draggable="true"], .folder-view-block .chat-row[draggable="true"]');
+  press = source ? { x: event.clientX, y: event.clientY, source, pointer: false, native: false, held: Boolean(recentProject) } : null;
+  if (recentProject) { disarmDragHold(); return; }
   if (press) {
     setNativeDrag(source, false);
     armDragHold();
   } else disarmDragHold();
 });
 document.addEventListener("dragstart", event => {
-  if (event.target.closest('button, input, a, .folder-head-actions')) {
+  if (!event.target.closest('[data-recent-project]') && event.target.closest('button, input, a, .folder-head-actions')) {
     event.preventDefault();
     return;
   }
@@ -4430,7 +4501,7 @@ document.addEventListener("pointerup", event => {
   press = null;
 });
 document.addEventListener("pointercancel", () => {
-  if (press?.pointer) endDrag();
+  if (press?.pointer && !press.native) endDrag();
   else {
     if (press && !press.native) setNativeDrag(press.source, true);
     disarmDragHold();
@@ -4446,6 +4517,15 @@ document.addEventListener("drop", event => {
   void performDrop(event);
 });
 async function performDrop(event) {
+  if (draggedRecentProject) {
+    const target = recentProjectDropTarget(event);
+    if (!target) return;
+    event.preventDefault();
+    moveRecentProject(draggedRecentProject,target.id,target.mode);
+    endDrag(event);
+    render();
+    return;
+  }
   if (draggedFolder?.kind === 'project') {
     const target = projectDropTarget(event, draggedFolder.path);
     if (!target || target.pin) return;

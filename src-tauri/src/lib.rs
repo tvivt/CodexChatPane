@@ -265,6 +265,11 @@ fn get_tool_config(app: tauri::AppHandle) -> Result<Option<ToolConfig>, String> 
 }
 
 #[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.request_restart();
+}
+
+#[tauri::command]
 fn save_tool_config(
     app: tauri::AppHandle,
     logger: tauri::State<'_, diagnostics::Logger>,
@@ -1285,6 +1290,7 @@ pub fn run() {
                     .resizable(true)
                     .decorations(false)
                     .drag_and_drop(false)
+                    .disable_drag_drop_handler()
                     .data_directory(data_dir.clone());
             if let Some(args) = debug_browser_args(debug_port) {
                 builder = builder.additional_browser_args(&args);
@@ -1334,6 +1340,7 @@ pub fn run() {
             update_current_usage,
             get_tool_config,
             save_tool_config,
+            restart_app,
             open_chat,
             run_codex_action,
             new_chat,
