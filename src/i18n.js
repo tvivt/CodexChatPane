@@ -101,6 +101,8 @@ const english = {
   'Fast 按相应 API 价格、长上下文按请求输入长度计价；推理包含在输出内。未记录价格档时按 Standard，缓存写入缺失时按普通输入，有写入但缺少 TTL 时按 30m 价格估算。不含工具、图片、音频等独立费用。':'Uses API Fast and long-context rates; reasoning is included in output. Missing tiers use Standard. Missing cache writes use regular input rates; known writes without TTL use 30m rates. Separate tool, image and audio charges are excluded.',
   '工具': 'Tool', '模型': 'Model', '状态': 'Status', '已完成': 'Completed', '进行中': 'In progress', '已中断': 'Interrupted', '等待中': 'Pending', '已关闭': 'Closed',
   '待回答': 'Awaiting reply', ' 个对话待回答': ' chats awaiting reply',
+  '对话状态筛选': 'Filter by chat status', '全部': 'All', '待查看': 'Unread', '已读': 'Read', '更多':'More',
+  '搜索动态栏对话标题': 'Search recent chat titles',
   '对话详情': 'Conversation details', '点击查看对话详情；尚未读取统计': 'Click for conversation details; metrics have not been loaded',
   '最新轮次': 'Latest turn', '首 token 均值：': 'Mean first token: ', '原生首 token：': 'Native first token: ', '估算生成速度，含推理：': 'Estimated generation speed, including reasoning: ',
   '估算首 token：': 'Estimated first token: ', '估算首 token': 'Estimated first token',

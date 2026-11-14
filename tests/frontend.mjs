@@ -53,15 +53,15 @@ assert.ok(html.includes('.auto-folder > .folder-row .row-name'), 'auto 项目/�
 assert.match(html, /\.folder-editor \{ width:min\(260px,90vw\); height:fit-content/, 'folder editor stays compact instead of filling the viewport');
 assert.ok(!html.includes('id="close-prompt"') && !html.includes('.close-remember'), 'close action has no choice dialog');
 assert.match(html, /\.project-picker-menu \{[^}]*font-size:11px/, 'project filter menus use 11px on both tabs');
-assert.ok(html.includes('.days-count-label { display:inline-flex; align-items:center; gap:2px; margin-left:4px; color:var(--success); }') && html.includes('.days-count-input { width:3ch; min-width:3ch;') && html.includes('text-align:center;') && html.includes('appearance:textfield;'), '3 Days count is green and centered in a compact input without spinners');
+assert.ok(html.includes('.days-count-label { display:inline-flex; align-items:center; gap:2px; color:var(--success); }') && html.includes('.days-count-input { width:3ch; min-width:3ch;') && html.includes('text-align:center;') && html.includes('appearance:textfield;'), '3 Days count is green and centered in a compact input without spinners');
 assert.ok(html.includes('.days-count-label > span { white-space:nowrap; }') && html.includes('.days-count-tip { position:relative; }') && !html.includes('.days-count-tip::before'), '3 Days keeps the 1:19 title trigger without the custom tooltip');
 assert.ok(html.includes('.global-chat-row[data-dynamic-item] .chat-actions .chat-star-button.active') && html.includes('.global-chat-row[data-dynamic-item] .chat-actions .codex-action-pin.active'), 'dynamic Star and Pin actions have scoped visibility');
 assert.ok(html.includes('.settings-workspace') && html.includes('id="i-settings"'), 'settings page and gear icon exist');
 assert.ok(html.includes('.folder-row.drop-before::before') && html.includes('.folder-row.drop-after::after'), 'folder reorder uses an edge insertion line');
-assert.match(html, /\.tree-row\.project-row, \.tree-row\.project-row\.has-check \{ grid-template-columns: 15px var\(--row-bar\)/, 'project rows use the folder chevron slot instead of 8ch');
+assert.match(html, /\.tree-row\.project-row \{ grid-template-columns: var\(--row-bar\)/, 'ordinary project rows start with the time bar');
 assert.ok(html.includes('.chat-work-cell { box-sizing:content-box; width:var(--chat-lead,var(--row-status));') && html.includes('padding:0 2px; display:grid; grid-template-rows:15px 15px;'), 'chat indent uses a fixed lead column with compact padding');
 assert.ok(html.includes('.chat-work-day { width:var(--chat-lead,var(--row-status)); overflow:hidden; text-overflow:ellipsis; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }') && html.includes('.chat-work-time { width:var(--chat-lead,var(--row-status)); font:600 9px/15px "Cascadia Mono",Consolas,monospace; text-align:center; color:color-mix(in srgb, var(--text) 80%, var(--muted)); }'), 'left time status retains monospace text and soft gray-white color');
-assert.match(html, /\.project-row > \.row-status, \.project-row > \.project-state-slot \{[^}]*width:15px/s, 'project indent stays 15px');
+assert.match(html, /\.tree-row\.project-row\.has-check \{ grid-template-columns: 15px var\(--row-bar\)/, 'multi-select keeps space for the checkbox');
 assert.match(html, /\.project-recent-list \.global-chat-row\.without-type\s*\{[^}]*var\(--project-recent-time-width/);
 assert.ok(html.includes('.project-recent-column-resizer.time-column') && html.includes('.project-recent-column-resizer.project-column'), '3 Days columns have vertical resize handles');
 assert.ok(html.includes('.project-recent-column-resizer::before { content:""; position:absolute; inset:0 3px; background:transparent; opacity:0; }'), '3 Days column lines stay hidden until hovered');
@@ -333,6 +333,14 @@ vm.runInContext(`
   const readNow = {...example, working:false, executionStatus:'completed', executionMs:5000, codexUnread:false, attentionAt:0, lastUserMessageAt:Date.now()};
   const daysAgoAt = n => { const now = new Date(); return new Date(now.getFullYear(), now.getMonth(), now.getDate() - n, 15, 4).getTime(); };
   const dated = (at) => ({...readNow, lastUserMessageAt:at, completedAt:at, activityAt:at, timelineAt:at});
+  const nowLocal = new Date(), month = (nowLocal.getMonth()+6)%12;
+  const statusDate = year => new Date(year,month,12,19,49).getTime();
+  const monthDayTime = String(month+1).padStart(2,'0')+'-12 19:49';
+  assert.equal(statusLocalTime(statusDate(nowLocal.getFullYear())),monthDayTime);
+  assert.equal(statusLocalTime(statusDate(nowLocal.getFullYear()-1)),(nowLocal.getFullYear()-1)+'-'+monthDayTime);
+  assert.ok(statusLocalTime(nowLocal.getTime()).startsWith('今天 '));
+  nowLocal.setDate(nowLocal.getDate()-1);
+  assert.ok(statusLocalTime(nowLocal.getTime()).startsWith('昨天 '));
   assert.ok(chatRow(readNow).includes('chat-work-day">今天</span>'), 'clicked chats show 今天 in Chinese');
   assert.ok(chatRow(readNow).includes('chat-work-cell date-cell'));
   assert.ok(!chatWorkCell(readNow,true).includes('chat-work-time'), 'shared date leads omit clock time in all lists');
@@ -372,7 +380,6 @@ vm.runInContext(`
   assert.ok(chatMenu.includes('context-submenu-popup') && chatMenu.includes('data-menu-action="recent-auto"') && chatMenu.includes('data-menu-action="recent-include"') && chatMenu.includes('data-menu-action="recent-exclude"'));
   const recentPanelMarkup = projectRecentPanel();
   assert.ok(recentPanelMarkup.includes('data-action="open-recent-rules"'), 'activity rules have a toolbar button');
-  assert.ok(recentPanelMarkup.indexOf('open-recent-rules') < recentPanelMarkup.indexOf('toggle-recent-project-column'), 'activity rules button sits left of the project-column button');
   assert.ok(recentRulesDialogMarkup().includes('role="tablist"') && recentRulesDialogMarkup().includes('data-rule-tab="include"') && recentRulesDialogMarkup().includes('data-rule-tab="exclude"'), 'activity rules dialog has include and exclude tabs');
   assert.ok(!chatMenu.includes('在 Codex 打开') && !chatMenu.includes('data-menu-action="toggle-chat-star"') && !chatMenu.includes('data-codexaction="pin"') && !chatMenu.includes('复制 ID'), 'conversation menus only keep shared actions');
   const projectMenu = itemMenu(null, project, '');
@@ -389,9 +396,8 @@ vm.runInContext(`
   assert.ok(!archivedMenu.includes('data-codexaction="rename"'), 'restore replaces the unavailable rename action');
   assert.ok(!archivedMenu.includes('data-codexaction="pin"'));
   const projectMarkup = projectRow(project, 0);
-  assert.ok(projectMarkup.indexOf('row-status') < projectMarkup.indexOf('chat-status-bar'), 'folder-aligned lead comes before the color bar');
+  assert.ok(!projectMarkup.includes('row-status'), 'single-select has no leading status cell');
   assert.ok(projectMarkup.indexOf('chat-status-bar') < projectMarkup.indexOf('project-icon'), 'color bar sits immediately left of the icon');
-  assert.ok(projectMarkup.includes('project-state-slot'));
   assert.ok(/special-project[^>]*style="--depth:0"/.test(projectTree()), 'unprojected chats sit at the first folder indent');
   const uncat = projects.find(item => item.synthetic);
   const previousProjectId = state.projectId;
@@ -944,7 +950,7 @@ vm.runInContext(`
   const waitingRows = chats;
   chats = [waiting];
   assert.equal(projectRegion(waitingProject),'waiting');
-  assert.ok(projectRow(waitingProject,0).includes('aria-label="待回答"'));
+  assert.ok(projectRow(waitingProject,0).includes('project-count-badge waiting-input'));
   chats = waitingRows;
   assert.deepEqual(activityOrder([read,working,unread]).map(chat=>chat.id),['unread','working','read']);
   const earlierWorking = {...working,id:'earlier-working',regionEnteredAt:1000};
@@ -993,7 +999,7 @@ vm.runInContext(`
   assert.equal(savedSorts.recentChatSort, 'name-desc');
   assert.equal(savedSorts.dynamicChatSort, 'name-asc', 'each dynamic area persists its independent sort');
   assert.ok(chatSortButton('dynamicChatSort').includes('sort-glyph">N↑'));
-  assert.ok(chatSortButton('recentChatSort').includes('sort-glyph">N↓'));
+  assert.ok(chatSortButton('recentChatSort').includes('href="#i-arrow-down"'));
   assert.ok(!chatSortButton('recentChatSort').includes('picker'), 'sort toggles directly without a dropdown');
   clickChatSort('dynamicChatSort');
   assert.equal(state.dynamicChatSort, 'name-desc');
@@ -1032,15 +1038,16 @@ vm.runInContext(`
   assert.ok(globalDynamicPanel().includes('data-resize="chat-time"') && globalDynamicPanel().includes('data-resize="chat-project"'));
   assert.ok(!globalDynamicPanel().includes('<select'));
   const recentPanel = projectRecentPanel();
-  assert.ok(recentPanel.includes('data-picker="recent-project"') && recentPanel.includes('filter-letter">P<'));
-  assert.ok(recentPanel.includes('data-action="toggle-recent-project-sort"') && recentPanel.includes('sort-glyph">P'));
   const recentHeader = recentPanel.slice(recentPanel.indexOf('<div class="folder-view-label">'), recentPanel.indexOf('<div class="scroll project-recent-list">'));
   const recentFilterAt = recentHeader.indexOf('data-picker="recent-project"');
   const recentSortAt = recentHeader.indexOf('toggle-recent-project-sort');
   const recentDaysAt = recentHeader.indexOf('class="days-count-label"');
-  const recentCountAt = recentHeader.indexOf('class="count"');
-  assert.ok(recentDaysAt < recentCountAt && recentCountAt < recentFilterAt && recentFilterAt < recentSortAt, '3 Days and count lead the header before project controls');
-  assert.ok(recentSortAt < recentHeader.indexOf('data-field="recentChatSort"'), 'chat sorting is immediately right of Project sorting');
+  const columnAt = recentHeader.indexOf('toggle-recent-project-column');
+  const nameAt = recentHeader.indexOf('data-field="recentChatSort"');
+  assert.ok(recentDaysAt < nameAt && nameAt < columnAt && columnAt < recentSortAt && recentSortAt < recentFilterAt);
+  assert.equal(recentHeader.lastIndexOf('toggle-recent-project-column'), columnAt);
+  assert.ok(!recentHeader.includes('filter-letter') && recentHeader.includes('sort-glyph">P</span>'));
+  assert.ok(!recentHeader.slice(recentDaysAt,recentFilterAt).includes('class="count"'), 'Days has no duplicate total');
   const chatSortHeader = globalDynamicPanel();
   assert.ok(chatSortHeader.indexOf('toggle-dynamic-project-sort') < chatSortHeader.indexOf('data-field="dynamicChatSort"'));
   assert.ok(recentHeader.indexOf('toggle-recent-project-column') < recentHeader.indexOf('toggle-project-recent-link'), 'project column toggle sits before link');
@@ -1049,7 +1056,19 @@ vm.runInContext(`
   assert.equal(state.recentProjectColumnVisible,false);
   assert.ok(projectRecentPanel().includes('project-column-hidden'));
   assert.equal(JSON.parse(localStorage.getItem(PREFERENCES_KEY)).recentProjectColumnVisible,false);
+  const savedFilter = state.recentProjectFilter, savedSort = state.recentProjectSort;
+  state.recentProjectFilter = [projects[1].id];
+  state.recentProjectSort = 'off';
+  for (const sort of ['asc','desc','off']) {
+    dispatch('click',{target:{...projectColumnToggle,dataset:{action:'toggle-recent-project-sort'}}});
+    assert.equal(state.recentProjectSort,sort);
+    assert.deepEqual(state.recentProjectFilter,[projects[1].id]);
+    assert.ok(projectRecentPanel().includes('project-filter-trigger active'));
+    assert.ok(projectRecentChats().every(chat=>chat.projectId===projects[1].id));
+  }
   dispatch('click',{target:projectColumnToggle});
+  assert.deepEqual(state.recentProjectFilter,[projects[1].id]);
+  state.recentProjectFilter = savedFilter; state.recentProjectSort = savedSort;
   assert.equal(state.recentProjectColumnVisible,true);
   assert.ok(recentPanel.includes('data-resize="project-recent-time"') && recentPanel.includes('data-resize="project-recent-project"'), '3 Days exposes time and project column handles');
   assert.ok(!recentPanel.includes('data-picker="chat-project"'), '3 Days uses its own project filter');
@@ -1067,6 +1086,53 @@ vm.runInContext(`
   assert.ok(!projectRecentBaseChats().some(chat => chat.id === manualRecent.id), '移出动态 wins over manual inclusion');
   state.recentIncludedChatIds.delete(manualRecent.id); state.recentExcludedChatIds.delete(manualRecent.id); chats.pop();
   state.recentProjectFilter = [projects[1].id];
+  {
+    const originals=chats;
+    const makeChat=(id,overrides={})=>({...example,id,title:id,projectId:projects[1].id,timelineAt:Date.now(),waitingForInput:false,working:false,codexUnread:false,...overrides});
+    chats=[makeChat('ask',{waitingForInput:true,working:true}),makeChat('work',{working:true,codexUnread:true}),
+      makeChat('view',{codexUnread:true}),makeChat('done'),makeChat('other-project',{projectId:'other'}),
+      makeChat('too-old',{timelineAt:0}),makeChat('manual',{timelineAt:0}),makeChat('removed')];
+    state.recentIncludedChatIds.add('manual');
+    state.recentExcludedChatIds.add('removed');
+    const clickStatus=status=>dispatch('click',{target:{dataset:{action:'filter-recent-status',status},closest(selector){return selector==='[data-action]'?this:null;}}});
+    const ids=()=>Array.from(projectRecentListMarkup().matchAll(/data-chat="([^"]+)"/g),m=>m[1]).sort();
+    assert.deepEqual(ids(),['ask','done','manual','view','work']);
+    const buttons=()=>recentStatusButtons(projectRecentChats());
+    assert.ok(buttons().includes('aria-label="全部 5"') && buttons().includes('aria-label="已读 2"'));
+    const statuses=['waiting','unread','working','read'];
+    const pressed=key=>buttons().match(new RegExp('data-status="'+key+'" aria-pressed="([^"]+)"'))[1];
+    assert.equal(pressed('all'),'true');
+    for (let mask=0;mask<16;mask++) {
+      if (state.recentStatuses.length!==4) clickStatus('all');
+      for (let index=0;index<4;index++) if (!(mask & 1<<index)) clickStatus(statuses[index]);
+      assert.equal(pressed('all'),mask===15?'true':mask===0?'false':'mixed');
+      assert.deepEqual(ids(),projectRecentChats().filter(chat=>statuses.some((key,index)=>(mask & 1<<index)&&chatRegion(chat)===key)).map(chat=>chat.id).sort());
+      statuses.forEach((key,index)=>assert.equal(pressed(key),String(Boolean(mask & 1<<index))));
+    }
+    clickStatus('all'); assert.deepEqual(ids(),[]);
+    clickStatus('working'); assert.deepEqual(ids(),['work']);
+    chats[1].working=false;
+    assert.deepEqual(ids(),[]);
+    assert.deepEqual(state.recentStatuses,['working']);
+    assert.ok(buttons().includes('aria-label="工作中 0"') && buttons().includes('aria-label="待查看 2"'));
+    clickStatus('unread'); assert.deepEqual(ids(),['view','work']);
+    clickStatus('all'); assert.equal(ids().length,5);
+    clickStatus('all'); assert.deepEqual(ids(),[]);
+    clickStatus('read'); assert.deepEqual(ids(),['done','manual']);
+    const recentSearchAction=action=>dispatch('click',{target:{dataset:{action,searchScope:'recent'},closest(selector){return selector==='[data-action]'?this:null;}}});
+    recentSearchAction('toggle-search');
+    assert.ok(projectRecentPanel().includes('data-input="recent-query"'));
+    dispatch('input',{target:{dataset:{input:'recent-query'},value:'  MANU  ',selectionStart:6}});
+    assert.deepEqual(ids(),['manual']);
+    assert.ok(buttons().includes('aria-label="全部 1"') && buttons().includes('aria-label="待查看 0"'));
+    chats.find(chat=>chat.id==='manual').title='renamed';
+    assert.deepEqual(ids(),[], 'search checks the title only');
+    recentSearchAction('close-search');
+    assert.deepEqual(ids(),['done','manual']);
+    clickStatus('all'); assert.equal(ids().length,5);
+    assert.ok(!preferenceFields.includes('recentStatuses') && !browserPreferenceFields.includes('recentStatuses'));
+    chats=originals; state.recentIncludedChatIds.delete('manual'); state.recentExcludedChatIds.delete('removed');
+  }
   assert.ok(projectRecentChats().every(chat => chat.projectId === projects[1].id), '3 Days filter is scoped to recent chats');
   state.recentChatSort = 'name-asc';
   const filteredNames = projectRecentChats().map(chat => chat.title);
@@ -1238,6 +1304,31 @@ vm.runInContext(`
   state.openChatFolders.clear();
   revealChatInStructure(locateChat);
   assert.ok(state.openChatFolders.has(autoChatFolderKey('stock')), 'ungrouped chats open 对话');
+  {
+    const toggleLink=()=>dispatch('click',{target:{dataset:{action:'toggle-project-recent-link'},closest(selector){return selector==='[data-action]'?this:null;}}});
+    state.projectRecentLinked=false;
+    state.selectedChatId=locateChat.id;
+    state.projectId='another-project';
+    locateChat.folder='A/B';
+    state.openFolders.clear();
+    state.openChatFolders.clear();
+    toggleLink();
+    assert.equal(state.projectRecentLinked,true);
+    assert.equal(state.projectId,locateChat.projectId,'enabling link immediately locates the current chat project');
+    assert.ok(state.openChatFolders.has(chatFolderKey('stock','A/B')),'enabling link opens the selected chat path immediately');
+    assert.ok(state.openFolders.has(currentProjectBranch(byProject('stock'))),'enabling link opens the project path');
+    assert.equal(JSON.parse(localStorage.getItem(PREFERENCES_KEY)).projectRecentLinked,true);
+    state.openFolders.clear(); state.openChatFolders.clear();
+    toggleLink();
+    assert.equal(state.projectRecentLinked,false);
+    assert.equal(state.openFolders.size,0);
+    assert.equal(state.openChatFolders.size,0,'disabling link does not open folders');
+    state.selectedChatId='missing-chat';
+    toggleLink();
+    assert.equal(state.openChatFolders.size,0,'no current chat leaves folders alone');
+    toggleLink();
+    state.selectedChatId=locateChat.id;
+  }
   locateChat.folder = locatePrev || '';
   assert.ok(projectRecentPanel().includes('data-action="toggle-project-recent-link"'), '3 Days keeps the link control');
   assert.equal((renderProjectPane().match(/toggle-project-recent-link/g) || []).length, 1, 'Projects and Chats headers do not repeat the link control');

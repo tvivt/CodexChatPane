@@ -36,6 +36,14 @@ The Projects area shows recent conversations from a project perspective:
 - Selecting a project shows its chats in the adjacent or lower area.
 - Chats without a project appear in a synthetic unprojected-chats category rather than a real project.
 
+The recent toolbar is ordered Days, N, P with project sorting and filtering, status filters, then search and other tools. N cycles status order, title ascending and title descending. P toggles the project column; its underline spans the project controls. Project sorting cycles off, ascending and descending independently. Hiding the column preserves sorting and filtering. A solid funnel means a project filter is active.
+
+Status filters support multiple selections and initially include waiting, unread, working and read. Click an icon to toggle it. ALL has a full underline when all four are selected, a short centered underline for a partial selection, and no underline for none. Clicking ALL clears a full selection or selects all from any other state. No selected states produces an empty list. Counts use the day range, manual overrides, project filter and title search before status filtering. Changing chat status updates the results while preserving your selections. The selection resets to all when the app starts.
+
+Status icons retain their colors, with blue ALL, amber question mark, red unread dot, green working dots and muted blue read check. Selected controls use underlines. Search applies to recent chat titles. A divider separates the right-hand search/tools group. Extra tools move into More as the pane narrows, with right-hand tools collected first. The minimum window width accommodates all five status controls and More.
+
+Enabling folder linkage immediately locates the currently selected chat in the Projects and Chats trees. With linkage enabled, selecting a recent chat reveals its project and chat folder paths.
+
 ### Chats
 
 The following describes the retained standalone Chats page, which is hidden in the current source checkout.
@@ -51,7 +59,7 @@ Status order is waiting for an answer, unread/completed awaiting review, working
 
 Waiting chats use the same `?` as projects, with “Waiting for answer” on hover. Projects and Chats each have their own close control. A collapsed section retains its name and upward restore icon; closing or restoring it does not change the other section. Folder expansion, saved heights and independent collapse states are preserved. The chat archive panel is hidden while Chats is collapsed and returns with Chats if its archive setting is still enabled. Section titles have no bulk expand/collapse arrow; folder rows keep their arrows, and the folder-area background menu still offers expand/collapse all.
 
-P cycles project grouping off/ascending/descending; N cycles status/name ascending/name descending. One direction is active per control; status has no reverse mode. With P enabled, N orders chats within each project. Folder name sorting is independent. Groups may overlap and preserve view-specific order; Ctrl/Meta and Shift support multi-selection. Folder disclosure arrows and section restore controls preserve existing expansion state. Local stars differ from Codex pins.
+On the retained standalone Chats page, P cycles project grouping off/ascending/descending and N cycles status/name ascending/name descending. Project sorting and N ordering are independent, with no reversed status mode. Folder name sorting cycles activity order, ascending and descending. The recent N, folder N and recent project-sort controls share double arrows for the default state and a single arrow for ascending or descending. Groups may overlap and preserve view-specific order; Ctrl/Meta and Shift support multi-selection. Folder disclosure arrows and section restore controls preserve existing expansion state. Local stars differ from Codex pins.
 
 ## 3. Common actions
 
@@ -66,6 +74,8 @@ Conversation preview is off by default. Enable it in settings to show the previe
 To override the recent activity filter, right-click a chat and choose **Activity display → Auto, Include, or Exclude**. The Activity rules dialog shows both override lists and lets you return a chat to Auto.
 
 ### View chat metrics
+
+The selected chat's bottom-bar time keeps Today/Yesterday labels. Other dates omit the year when they fall in the current local calendar year, for example `09-20 19:49[59s]`; earlier years retain it, for example `2025-09-20 19:49[59s]`.
 
 Selecting a chat reads its current turn's latest valid settled request, including active/interrupted turns: `1.8s·62t/s·93%` means first-token latency, measured generation estimate including reasoning, and input cache hit rate. It does not average all requests. TTFT must belong to that request; later requests with no reliable boundary show `—`. Details defaults to the current turn, with reverse chronological turns and whole-conversation completed-turn totals available. Click the metrics or the ordinary chat menu's last item to open the separate resizable details window.
 

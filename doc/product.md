@@ -46,7 +46,7 @@ The synthetic project is only a UI placeholder and is not written back to Codex.
 - Chat status can include unread, working, completed, failed, interrupted, and no-response diagnostics.
 - Project and chat pin priority comes from Codex; local groups do not change Codex pins.
 - Recent activity normally follows the selected day range. A chat may be set to always include or exclude through the context menu; the Activity rules dialog lists both overrides and can restore automatic behavior. Include uses a solid purple bar; exclude uses a striped purple bar.
-- Default state priority is waiting/unread/working/read. Structured question answers and later user input resolve waiting; async questions survive turn completion. P project grouping and N status/name ordering are independently single-choice, with mutually exclusive directions.
+- Default state priority is waiting/unread/working/read. Structured question answers and later user input resolve waiting; async questions survive turn completion. Recent status filters allow multiple selections, default to all and derive ALL from the four selections. P controls recent project-column visibility, with separate project sorting and filtering. N cycles status/name ordering independently.
 - Waiting uses `?` for both projects and chats. Projects and Chats each have independent close and upward restore controls, retaining their organization and saved expansion state.
 - The app opens the Projects view, with a bold title and package version; the standalone Chats view has no visible tab. Active chats archive through the context menu; archived chats retain a restore icon. Both actions execute without another confirmation and verify state from catalog metadata without reading rollout bodies.
 

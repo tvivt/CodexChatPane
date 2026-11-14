@@ -14,6 +14,8 @@ See chats from the last few days across projects. When sorted by status, chats w
 
 Adjust the number of days, manually include or exclude chats, filter multiple projects, group by project, then sort by status or chat title.
 
+Status icons support multiple selections, initially including all four states. ALL selects or clears them together and indicates a partial selection. Search recent chat titles independently. P toggles the project column, with separate project sorting and filtering controls. Enable folder linkage to locate the selected chat immediately. On narrow panes, additional tools move into More while all five status controls remain visible.
+
 ## Projects · Organize work by project
 
 Select a project to show its chats in the Chats pane. Status indicators beside each project help you see whether it has running chats, finished chats to review, or chats waiting for an answer.
@@ -47,7 +49,7 @@ This is an experimental personal project, not an official Codex Desktop componen
 | Complete feature index | [Documentation](doc/README.md) |
 | Latency, speed, and statistics definitions (Chinese) | [Conversation metrics](doc/conversation-metrics.zh-CN.md) |
 | Quotas, consumption, and cost estimates (Chinese) | [Usage and consumption](doc/usage-history.zh-CN.md) |
-| v0.5.6 changes | [Release notes](doc/releases/v0.5.6.md) |
+| v0.5.7 changes | [Release notes](doc/releases/v0.5.7.md) |
 | Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
 ## Data and safety

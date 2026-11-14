@@ -67,6 +67,9 @@ const state = {
   dynamicProjectSort: "off",
   recentProjectSort: "off",
   recentChatSort: 'status-asc',
+  recentStatuses: ['waiting', 'unread', 'working', 'read'],
+  recentQuery: '',
+  recentSearchOpen: false,
   dynamicChatSort: 'status-asc',
   projectRecentLinked: false,
   recentProjectColumnVisible: true,
@@ -690,11 +693,10 @@ function projectRow(project, depth, inactive = false, showFolderInTip = false, s
   const projectIcon = projectStateIcon(project, inactive);
   const rowTitle = [project.name, showFolderInTip ? ui`文件夹：${projectFolders(project).join(', ') || t("根目录")}` : "", activity.title].filter(Boolean).join(" · ");
   const selected = state.selectedProjectIds.size ? state.selectedProjectIds.has(project.id) : !state.selectedProjectFolder && state.projectId === project.id;
-  const stateSlot = waiting ? ui`<span class="row-status project-state-slot waiting-input" title="${t('待回答')}" aria-label="${t('待回答')}">?</span>` : unread && working ? ui`<span class="row-status project-state-slot stacked"><span class="project-unread-dot"></span>${workingGlyph('project-working-dot')}</span>` : unread ? ui`<span class="row-status project-state-slot"><span class="project-unread-dot"></span></span>` : working ? ui`<span class="row-status project-state-slot">${workingGlyph('project-working-dot')}</span>` : '<span class="row-status project-state-slot"></span>';
   const total = showTotal ? projectChats.filter(chat => !effectiveReasons(chat).length).length : null;
   const check = !dynamicScope && state.selectedProjectIds.size ? rowCheck('project', project.id) : '';
   return ui`<div class="tree-row project-row ${project.synthetic ? "special-project" : ""} ${activity.className} ${selected ? "selected" : ""} ${check ? "has-check" : ""}" style="--depth:${depth}" data-project="${project.id}" data-project-folder="${esc(sourceFolder)}" ${dynamicScope ? ui`data-dynamic-item="${esc(project.id)}"` : ''} draggable="${!project.synthetic}" tabindex="0" title="${esc(rowTitle)}" aria-selected="${selected}">
-    ${check ? statusLead(check) : stateSlot}${projectTimeBar(projectChats)}${projectIcon}<span class="row-label"><span class="row-name" title="${esc(projectLabel(project))}">${esc(projectLabel(project))}</span>${total == null ? '' : ui`<span class="count">${total}</span>`}${waiting ? ui`<span class="project-count-badge waiting-input" title="${t('待回答')}">?${waiting}</span>` : ''}${unread ? ui`<span class="project-count-badge unread"><span></span>${unread}</span>` : ''}${working ? ui`<span class="project-count-badge working">${workingGlyph('badge-working-dot')}${working}</span>` : ''}</span><span class="row-end">${project.synthetic ? '' : projectStarButton(project) + projectPinButton(project)}</span>
+    ${check ? statusLead(check) : ''}${projectTimeBar(projectChats)}${projectIcon}<span class="row-label"><span class="row-name" title="${esc(projectLabel(project))}">${esc(projectLabel(project))}</span>${total == null ? '' : ui`<span class="count">${total}</span>`}${waiting ? ui`<span class="project-count-badge waiting-input" title="${t('待回答')}"><span aria-hidden="true">?</span>${waiting}</span>` : ''}${unread ? ui`<span class="project-count-badge unread"><span></span>${unread}</span>` : ''}${working ? ui`<span class="project-count-badge working">${workingGlyph('badge-working-dot')}${working}</span>` : ''}</span><span class="row-end">${project.synthetic ? '' : projectStarButton(project) + projectPinButton(project)}</span>
   </div>`;
 }
 
@@ -1067,7 +1069,9 @@ function statusLocalTime(at) {
   const date = new Date(at), now = new Date(), pad = n => String(n).padStart(2, '0');
   const dateKey = value => `${value.getFullYear()}-${pad(value.getMonth()+1)}-${pad(value.getDate())}`;
   const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-  const day = dateKey(date) === dateKey(now) ? (language() === 'zh' ? '今天' : 'Today') : dateKey(date) === dateKey(yesterday) ? (language() === 'zh' ? '昨天' : 'Yesterday') : dateKey(date);
+  const key = dateKey(date);
+  const calendarDay = date.getFullYear() === now.getFullYear() ? key.slice(5) : key;
+  const day = key === dateKey(now) ? (language() === 'zh' ? '今天' : 'Today') : key === dateKey(yesterday) ? (language() === 'zh' ? '昨天' : 'Yesterday') : calendarDay;
   return `${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 function matchingForecast(chat) {
@@ -1597,10 +1601,96 @@ function recentProjectOptions() {
 function projectRecentChats() {
   let rows = projectRecentBaseChats();
   if (state.recentProjectFilter.length) rows = rows.filter(chat => state.recentProjectFilter.includes(chat.projectId));
+  const query = state.recentQuery.trim().toLocaleLowerCase();
+  if (query) rows = rows.filter(chat => (chat.title || '').toLocaleLowerCase().includes(query));
   return chatsByProject(rows, 'recentProjectSort', 'recentChatSort');
 }
+const recentStatusOptions = [
+  ['all', '全部', icon('list')],
+  ['waiting', '待回答', icon('question')],
+  ['unread', '待查看', icon('dot')],
+  ['working', '工作中', icon('dots')],
+  ['read', '已读', icon('check')],
+];
+function recentStatusButtons(rows) {
+  const counts = {all:rows.length, waiting:0, unread:0, working:0, read:0};
+  for (const chat of rows) counts[chatRegion(chat)]++;
+  return recentStatusOptions.map(([key,label,glyph]) => {
+    const partial = key === 'all' && state.recentStatuses.length > 0 && state.recentStatuses.length < 4;
+    const selected = key === 'all' ? state.recentStatuses.length === 4 : state.recentStatuses.includes(key);
+    return `<button type="button" class="icon-button${selected || partial ? ' active' : ''}${partial ? ' partial' : ''}" data-action="filter-recent-status" data-status="${key}" aria-pressed="${partial ? 'mixed' : selected}" aria-label="${t(label)} ${counts[key]}" title="${t(label)}">${glyph}<span class="recent-count">${counts[key]}</span></button>`;
+  }).join('');
+}
 function projectRecentListMarkup(rows = projectRecentChats()) {
-  return projectSortedChatMarkup(rows, 'recentProjectSort', chat => globalChatRow(chat, '', '', true)) || ui`<div class="empty-state">${t('没有对话')}</div>`;
+  const visible = rows.filter(chat => state.recentStatuses.includes(chatRegion(chat)));
+  return projectSortedChatMarkup(visible, 'recentProjectSort', chat => globalChatRow(chat, '', '', true)) || ui`<div class="empty-state">${t('没有对话')}</div>`;
+}
+
+let recentHeaderObserver, recentWindowMinimum;
+function fitRecentHeader(header) {
+  if (!header.isConnected || !header.clientWidth) return;
+  const more = header.querySelector('.recent-more'), menu = more.querySelector('.recent-more-menu');
+  const projectTools = header.querySelector('.recent-project-tools');
+  const controls = [...header.querySelectorAll(':scope > button, .recent-project-tools > button, .project-filter-trigger, .recent-status-filters > button')];
+  // Keep the original actions in the DOM so menu entries share their handlers and picker.
+  for (const button of controls) button.hidden = false;
+  projectTools.classList.remove('overflow-tools');
+  header.style.setProperty('--recent-gap','0px');
+  header.querySelector('.project-filter-picker').classList.remove('overflow-picker');
+  more.hidden = false;
+  const box = getComputedStyle(header);
+  const available = header.clientWidth - parseFloat(box.paddingLeft) - parseFloat(box.paddingRight);
+  const widths = controls.map(button => button.getBoundingClientRect().width);
+  const titleWidth = header.querySelector('.days-count-label').getBoundingClientRect().width;
+  const moreWidth = more.getBoundingClientRect().width;
+  const statusGroup = header.querySelector('.recent-status-filters');
+  const groupBox = getComputedStyle(statusGroup);
+  const statusWidth = statusGroup.getBoundingClientRect().width + parseFloat(groupBox.marginLeft) + parseFloat(groupBox.marginRight);
+  const dividerWidth = header.querySelector('.recent-end-divider').getBoundingClientRect().width;
+  const requiredWidth = titleWidth + moreWidth + statusWidth + dividerWidth;
+  const minimum = Math.max(WINDOW_WIDTH_MIN, Math.ceil(window.innerWidth - available + requiredWidth));
+  const LogicalSize = window.__TAURI__?.dpi?.LogicalSize;
+  if (LogicalSize && nativeWindow?.setMinSize && minimum !== recentWindowMinimum) {
+    recentWindowMinimum = minimum;
+    nativeWindow.setMinSize(new LogicalSize(minimum, WINDOW_HEIGHT_MIN)).catch(() => { recentWindowMinimum = undefined; });
+  }
+  const overflow = [];
+  let used = titleWidth + statusWidth + dividerWidth + controls.reduce((sum, button, index) => sum + (button.dataset.status ? 0 : widths[index]), 0);
+  if (used > available) {
+    used += moreWidth;
+    for (let index = controls.length - 1; index >= 0 && used > available; index--) {
+      if (controls[index].dataset.status) continue;
+      used -= widths[index];
+      overflow.unshift(controls[index]);
+    }
+  }
+  more.hidden = !overflow.length;
+  if (more.hidden) more.open = false;
+  const visibleProjectButtons = controls.filter(button => projectTools.contains(button) && !overflow.includes(button)).length;
+  projectTools.classList.toggle('overflow-tools', !visibleProjectButtons);
+  // Include the spacer, the end divider and the padding inside the status group.
+  const gaps = controls.length - overflow.length - Math.max(0,visibleProjectButtons-1) + Number(!more.hidden) + 3;
+  header.style.setProperty('--recent-gap', Math.min(4,Math.max(0,(available-used-1)/gaps))+'px');
+  menu.replaceChildren();
+  for (const button of overflow) {
+    button.hidden = true;
+    button.closest('.project-filter-picker')?.classList.add('overflow-picker');
+    const entry = document.createElement('button');
+    entry.type = 'button';
+    entry.className = button.classList.contains('active') ? 'active' : '';
+    entry.innerHTML = button.innerHTML;
+    const label = document.createElement('span');
+    label.textContent = button.title;
+    entry.append(label);
+    if (button.hasAttribute('aria-pressed')) entry.setAttribute('aria-pressed',button.getAttribute('aria-pressed'));
+    entry.onclick = event => {
+      event.stopPropagation();
+      more.open = false;
+      more.querySelector('summary').focus();
+      button.click();
+    };
+    menu.append(entry);
+  }
 }
 function setChatDays(value) {
   const days = Number(value);
@@ -1638,7 +1728,9 @@ function projectRecentPanel() {
   const daysUnit = state.chatDays === 1 ? 'Day' : 'Days';
   const daysTip = ui`按最近 ${state.chatDays} 天过滤；0 天仅显示手动加入。`;
   const timeLabel = t('调整时间列宽'), projectWidthLabel = t('调整项目列宽');
-  return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label><span class="count">${rows.length}</span>${projectFilterPicker('recent-project')}${projectSortButton('recentProjectSort','toggle-recent-project-sort')}${chatSortButton('recentChatSort')}<span class="toolbar-spacer"></span><button class="icon-button" data-action="open-recent-rules" title="${t('动态规则')}" aria-label="${t('动态规则')}">${icon('activity')}</button><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}">${icon('panel')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
+  return ui`<section class="project-recent-panel ${state.recentProjectColumnVisible ? '' : 'project-column-hidden'}" style="${projectRecentColumnStyle()}"><div class="folder-view-label"><label class="days-count-label"><input class="days-count-input" type="number" min="0" max="365" value="${state.chatDays}" data-input="chat-days" aria-label="${t('最近天数')}"><span class="days-count-tip" title="${esc(daysTip)}">${daysUnit}</span></label>${chatSortButton('recentChatSort')}<span class="recent-project-tools"><button class="icon-button ${state.recentProjectColumnVisible ? 'active' : ''}" data-action="toggle-recent-project-column" aria-pressed="${state.recentProjectColumnVisible}" title="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}" aria-label="${t(state.recentProjectColumnVisible ? '隐藏项目列' : '显示项目列')}"><span class="sort-glyph">P</span></button>
+      ${projectSortButton('recentProjectSort','toggle-recent-project-sort')}${projectFilterPicker('recent-project')}</span><span class="recent-status-filters" role="group" aria-label="${t('对话状态筛选')}">${recentStatusButtons(rows)}</span><span class="toolbar-spacer"></span><span class="recent-end-divider" aria-hidden="true"></span>${searchOverlay('recent',state.recentSearchOpen,state.recentQuery,t('搜索动态栏对话标题'))}<button class="icon-button ${state.recentSearchOpen ? 'active' : ''}" data-action="toggle-search" data-search-scope="recent" title="${t('搜索动态栏对话标题')}" aria-label="${t('搜索动态栏对话标题')}">${icon('search')}</button><button class="icon-button" data-action="open-recent-rules" title="${t('动态规则')}" aria-label="${t('动态规则')}">${icon('activity')}</button><button class="icon-button ${state.projectRecentLinked ? 'active' : ''}" data-action="toggle-project-recent-link" aria-pressed="${state.projectRecentLinked}" title="${t('联动 Projects 与 Chats 文件夹')}" aria-label="${t('联动 Projects 与 Chats 文件夹')}">${icon(state.projectRecentLinked ? 'link' : 'link-off')}</button>
+      <details class="recent-more" hidden><summary class="icon-button" title="${t('更多')}" aria-label="${t('更多')}">${icon('dots')}</summary><div class="recent-more-menu"></div></details></div><div class="scroll project-recent-list">${projectRecentListMarkup(rows)}</div><div class="project-recent-column-resizer time-column" data-resize="project-recent-time" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${timeLabel}" title="${timeLabel}"></div><div class="project-recent-column-resizer project-column" data-resize="project-recent-project" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${projectWidthLabel}" title="${projectWidthLabel}"></div></section>`;
 }
 
 function projectSectionButton(kind = 'project', collapsed = false) {
@@ -1681,23 +1773,27 @@ function projectFilterPicker(pickerId = 'chat-project') {
   const selected = state[projectFilterField(pickerId)];
   const count = selected.length;
   const options = pickerId === 'recent-project' ? recentProjectOptions() : projectPickerOptions();
-  return ui`<div class="picker project-filter-picker" data-picker="${esc(pickerId)}"><button type="button" class="icon-button project-filter-trigger ${count ? 'active' : ''}" data-action="toggle-picker" data-picker-id="${esc(pickerId)}" aria-haspopup="listbox" aria-expanded="false" title="${t('按项目过滤')}" aria-label="${t('按项目过滤')}"><span class="filter-letter">P</span>${icon('filter')}${count ? ui`<span class="filter-count">${count}</span>` : ''}</button><div class="picker-menu project-picker-menu" role="listbox" aria-multiselectable="true" hidden><div class="picker-search">${icon('search')}<input data-input="picker-query" data-picker-id="${esc(pickerId)}" placeholder="${t('搜索 Project')}" aria-label="${t('搜索 Project')}"></div><div class="project-choice-list">${projectChoiceRows(pickerId,selected,true,options)}</div><div class="picker-footer"><button type="button" data-action="project-filter-all" data-picker-id="${esc(pickerId)}">${t('全选')}</button><button type="button" data-action="project-filter-clear" data-picker-id="${esc(pickerId)}">${t('清除')}</button></div></div></div>`;
+  return ui`<div class="picker project-filter-picker" data-picker="${esc(pickerId)}"><button type="button" class="icon-button project-filter-trigger ${count ? 'active' : ''}" data-action="toggle-picker" data-picker-id="${esc(pickerId)}" aria-haspopup="listbox" aria-expanded="false" title="${t('按项目过滤')}" aria-label="${t('按项目过滤')}">${pickerId === 'recent-project' ? '' : '<span class="filter-letter">P</span>'}${icon('filter', pickerId === 'recent-project' ? 'recent-filter-icon' : '')}${count && pickerId !== 'recent-project' ? ui`<span class="filter-count">${count}</span>` : ''}</button><div class="picker-menu project-picker-menu" role="listbox" aria-multiselectable="true" hidden><div class="picker-search">${icon('search')}<input data-input="picker-query" data-picker-id="${esc(pickerId)}" placeholder="${t('搜索 Project')}" aria-label="${t('搜索 Project')}"></div><div class="project-choice-list">${projectChoiceRows(pickerId,selected,true,options)}</div><div class="picker-footer"><button type="button" data-action="project-filter-all" data-picker-id="${esc(pickerId)}">${t('全选')}</button><button type="button" data-action="project-filter-clear" data-picker-id="${esc(pickerId)}">${t('清除')}</button></div></div></div>`;
 }
+const sortArrow = direction => icon(direction === 'asc' ? 'arrow-up' : direction === 'desc' ? 'arrow-down' : 'sort', 'sort-arrow');
 function projectSortButton(field, action) {
   const value = state[field];
   const title = value === 'off' ? t('按项目升序') : value === 'asc' ? t('项目升序，点击改为降序') : t('项目降序，点击关闭排序');
-  return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}"><span class="sort-glyph">P${value === 'desc' ? '↓' : '↑'}</span></button>`;
+  const glyph = field === 'recentProjectSort' ? sortArrow(value) : `<span class="sort-glyph">P${value === 'desc' ? '↓' : '↑'}</span>`;
+  return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}">${glyph}</button>`;
 }
+const nameSortGlyph = direction => `<span class="sort-glyph name-sort-glyph">N${sortArrow(direction)}</span>`;
 function chatSortButton(field) {
   const value = state[field];
   const active = value !== 'status-asc';
   const title = t(value === 'status-asc' ? '按工作状态排序，点击按对话名称升序' : value === 'name-asc' ? '对话名称升序，点击改为降序' : '对话名称降序，点击恢复工作状态排序');
-  return ui`<button type="button" class="icon-button sort-control ${active ? 'active' : ''}" data-action="cycle-chat-sort" data-field="${field}" aria-pressed="${active}" title="${esc(title)}" aria-label="${esc(title)}"><span class="sort-glyph">N${active ? value === 'name-desc' ? '↓' : '↑' : ''}</span></button>`;
+  const glyph = field === 'recentChatSort' ? nameSortGlyph(active ? value.slice(5) : 'off') : `<span class="sort-glyph">N${active ? value === 'name-desc' ? '↓' : '↑' : ''}</span>`;
+  return ui`<button type="button" class="icon-button sort-control ${active ? 'active' : ''}" data-action="cycle-chat-sort" data-field="${field}" aria-pressed="${active}" title="${esc(title)}" aria-label="${esc(title)}">${glyph}</button>`;
 }
 function nameSortButton(field, action) {
   const value = state[field];
   const title = value === 'off' ? t('按名称升序') : value === 'asc' ? t('名称升序，点击改为降序') : t('名称降序，点击恢复活动时间顺序');
-  return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}"><span class="sort-glyph">N${value === 'desc' ? '↓' : '↑'}</span></button>`;
+  return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}">${nameSortGlyph(value)}</button>`;
 }
 function chatsByProject(rows, sortField, chatSortField) {
   const sort = state[sortField];
@@ -2379,6 +2475,13 @@ function render() {
   state.tab = 'project';
   const content = state.settingsOpen ? renderSettingsPane() : renderProjectPane();
   document.getElementById("app").innerHTML = ui`${renderTitlebar()}<div class="layout single-pane">${content}</div>${renderStatusbar()}`;
+  recentHeaderObserver?.disconnect();
+  const recentHeader = document.querySelector('.project-recent-panel > .folder-view-label');
+  if (recentHeader) {
+    fitRecentHeader(recentHeader);
+    recentHeaderObserver ??= new ResizeObserver(([entry]) => fitRecentHeader(entry.target));
+    recentHeaderObserver.observe(recentHeader);
+  }
   if (pickerId) {
     const picker = [...document.querySelectorAll('.picker')].find(element => element.dataset.picker === pickerId);
     const menu = picker?.querySelector('.picker-menu');
@@ -2397,7 +2500,7 @@ function render() {
   document.querySelectorAll('.scroll, .dynamic-list, .recycle-list, .archive-list').forEach((element, index) => { element.scrollTop = scrollPositions[index] || 0; });
   savePreferences();
   saveFolders();
-  for (const el of document.querySelectorAll('details')) if (openDetails.includes(detailKey(el))) el.open = true;
+  for (const el of document.querySelectorAll('details')) if (!el.hidden && openDetails.includes(detailKey(el))) el.open = true;
   if (focusData && Object.keys(focusData).length && focused?.id !== 'context-menu' && !focused?.closest?.('#context-menu')) {
     const match = [...document.querySelectorAll('button, input, [tabindex]')].find(el => el.tagName === focused.tagName && Object.entries(focusData).every(([key,value]) => el.dataset[key] === value));
     match?.focus({preventScroll:true});
@@ -3425,6 +3528,10 @@ document.addEventListener("click", async event => {
     return;
   }
   if (!event.target.closest('.picker')) closePicker();
+  if (!event.target.closest('.recent-more')) {
+    const more = document.querySelector('.recent-more[open]');
+    if (more) more.open = false;
+  }
   const menuAction = event.target.closest('[data-menu-action]');
   if (menuAction) {
     if (menuAction.getAttribute('aria-disabled') === 'true') { showToast(t('操作不可用'), menuAction.title, 'error'); return; }
@@ -3562,15 +3669,18 @@ document.addEventListener("click", async event => {
         const trigger = action.closest('.picker').querySelector('.project-filter-trigger');
         trigger.classList.toggle('active', Boolean(state[field].length));
         trigger.querySelector('.filter-count')?.remove();
-        if (state[field].length) trigger.insertAdjacentHTML('beforeend', ui`<span class="filter-count">${state[field].length}</span>`);
+        if (pickerId !== 'recent-project' && state[field].length) trigger.insertAdjacentHTML('beforeend', ui`<span class="filter-count">${state[field].length}</span>`);
         if (pickerId === 'chat-project') {
           const list = document.querySelector('.global-dynamic .dynamic-list');
           if (list) list.innerHTML = renderChatGroups(filteredTimelineChats().filter(chat => !effectiveReasons(chat).length));
         } else {
           const panel = document.querySelector('.project-recent-panel');
           const rows = projectRecentChats();
-          const count = panel?.querySelector('.folder-view-label > .count');
-          if (count) count.textContent = rows.length;
+          const filters = panel?.querySelector('.recent-status-filters');
+          if (filters) {
+            filters.innerHTML = recentStatusButtons(rows);
+            fitRecentHeader(filters.parentElement);
+          }
           const list = panel?.querySelector('.project-recent-list');
           if (list) list.innerHTML = projectRecentListMarkup(rows);
         }
@@ -3590,6 +3700,16 @@ document.addEventListener("click", async event => {
       const options = action.dataset.pickerId === 'recent-project' ? recentProjectOptions() : projectPickerOptions();
       state[field] = name === 'project-filter-all' ? options.map(option => option.value) : [];
       render();
+      return;
+    }
+    if (name === 'filter-recent-status') {
+      const status = action.dataset.status;
+      if (recentStatusOptions.some(([key]) => key === status)) {
+        state.recentStatuses = status === 'all'
+          ? state.recentStatuses.length === 4 ? [] : recentStatusOptions.slice(1).map(([key]) => key)
+          : state.recentStatuses.includes(status) ? state.recentStatuses.filter(key => key !== status) : [...state.recentStatuses, status];
+        render();
+      }
       return;
     }
     if (name === 'cycle-chat-sort') {
@@ -3643,7 +3763,7 @@ document.addEventListener("click", async event => {
     }
     if (name === 'toggle-search' || name === 'close-search') {
       const scope = action.dataset.searchScope;
-      const fields = {project:['projectSearchOpen','projectQuery'], 'project-chat':['projectChatSearchOpen','projectChatQuery'], chat:['chatSearchOpen','chatQuery']}[scope];
+      const fields = {project:['projectSearchOpen','projectQuery'], 'project-chat':['projectChatSearchOpen','projectChatQuery'], chat:['chatSearchOpen','chatQuery'], recent:['recentSearchOpen','recentQuery']}[scope];
       if (!fields) return;
       state[fields[0]] = name === 'toggle-search' ? !state[fields[0]] : false;
       if (!state[fields[0]]) state[fields[1]] = '';
@@ -3721,7 +3841,17 @@ document.addEventListener("click", async event => {
       return;
     }
     if (name === 'toggle-recent-project-column') { state.recentProjectColumnVisible = !state.recentProjectColumnVisible; render(); return; }
-    if (name === 'toggle-project-recent-link') { state.projectRecentLinked = !state.projectRecentLinked; savePreferences(); render(); return; }
+    if (name === 'toggle-project-recent-link') {
+      state.projectRecentLinked = !state.projectRecentLinked;
+      const chat = chats.find(chat => chat.id === state.selectedChatId);
+      if (state.projectRecentLinked && chat) {
+        revealProjectInStructure(byProject(chat.projectId));
+        revealChatInStructure(chat);
+      }
+      savePreferences();
+      render();
+      return;
+    }
     if (name === 'toggle-project-section') {
       if (action.dataset.kind === 'project') state.projectsCollapsed = !state.projectsCollapsed;
       else if (action.dataset.kind === 'chat') state.projectChatsCollapsed = !state.projectChatsCollapsed;
@@ -3876,6 +4006,7 @@ document.addEventListener("contextmenu", event => {
 document.addEventListener("input", event => {
   const name = event.target.dataset.input;
   if (name === 'chat-days') { setChatDays(event.target.value); return; }
+  if (name === 'recent-query') { state.recentQuery = event.target.value; const caret = event.target.selectionStart; render(); focusInput(name, caret); }
   if (name === "project-query") { state.projectQuery = event.target.value; const caret = event.target.selectionStart; render(); focusInput(name, caret); }
   if (name === "project-chat-query") { state.projectChatQuery = event.target.value; const caret = event.target.selectionStart; render(); focusInput(name, caret); }
   if (name === "chat-query") { state.chatQuery = event.target.value; const caret = event.target.selectionStart; render(); focusInput(name, caret); }
@@ -3980,9 +4111,15 @@ document.addEventListener("keydown", event => {
   const projectFolderRow = event.target.closest('.folder-row[data-drag-folder]');
   if (projectFolderRow && event.key === "Delete") { event.preventDefault(); showFolderConfirm('project', projectFolderRow.dataset.dragFolder); }
   if (event.key === "Escape") {
+    const more = document.querySelector('.recent-more[open]');
+    if (more) { more.open = false; more.querySelector('summary').focus(); return; }
+    if (state.recentSearchOpen && event.target.closest('.project-recent-panel')) {
+      state.recentSearchOpen = false; state.recentQuery = ''; render(); return;
+    }
     closePicker();
     hideContextMenu();
     if (state.settingsOpen) { state.settingsOpen = false; render(); return; }
+    state.recentSearchOpen = false; state.recentQuery = '';
     if (state.projectSearchOpen || state.projectChatSearchOpen || state.chatSearchOpen) {
       state.projectSearchOpen = state.projectChatSearchOpen = state.chatSearchOpen = false;
       state.projectQuery = state.projectChatQuery = state.chatQuery = '';
