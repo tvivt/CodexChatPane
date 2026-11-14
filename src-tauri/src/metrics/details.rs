@@ -8,6 +8,30 @@ use std::{
 };
 
 pub(crate) const PAGE_SIZE: usize = 50;
+
+pub(crate) fn read_summary(home: &Path, id: &str) -> Result<ChatMetrics, String> {
+    let before = context(home)?;
+    // Full own history retains timing and tools; the usage-only cache omits those events.
+    let mut data = super::read_at(home, id, false)?;
+    let turns = data.summary.turn_count;
+    let completed = data.summary.completed_turn_count;
+    let requests = data
+        .turns
+        .iter()
+        .flat_map(|turn| turn.requests.iter().cloned())
+        .collect::<Vec<_>>();
+    data.summary = super::summarize(&requests);
+    data.summary.turn_count = turns;
+    data.summary.completed_turn_count = completed;
+    data.turns
+        .retain(|turn| Some(&turn.turn_id) == data.latest_turn_id.as_ref());
+    data.subagents.clear();
+    strip(&mut data);
+    if before != context(home)? {
+        return Err("账号或日志来源已切换，请重新打开详情".into());
+    }
+    Ok(data)
+}
 struct Entry {
     signature: String,
     context: String,

@@ -49,7 +49,7 @@ This is an experimental personal project, not an official Codex Desktop componen
 | Complete feature index | [Documentation](doc/README.md) |
 | Latency, speed, and statistics definitions (Chinese) | [Conversation metrics](doc/conversation-metrics.zh-CN.md) |
 | Quotas, consumption, and cost estimates (Chinese) | [Usage and consumption](doc/usage-history.zh-CN.md) |
-| v0.5.7 changes | [Release notes](doc/releases/v0.5.7.md) |
+| v0.6.0 changes | [Release notes](doc/releases/v0.6.0.md) |
 | Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
 ## Data and safety

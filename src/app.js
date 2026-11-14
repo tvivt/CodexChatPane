@@ -58,8 +58,9 @@ const state = {
   projectChatSearchOpen: false,
   chatQuery: "",
   chatSearchOpen: false,
-  chatProjectFilter: [],
-  recentProjectFilter: [],
+  chatProjectFilter: null,
+  recentProjectFilter: null,
+  projectFilterVersion: 2,
   chatDays: 3,
   nameSort: "off",
   projectNameSort: "off",
@@ -130,7 +131,7 @@ const state = {
 };
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
-const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', ...CHAT_SORT_FIELDS, 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
+const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', ...CHAT_SORT_FIELDS, 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'projectFilterVersion', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars', 'previewEnabled'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
@@ -139,10 +140,13 @@ for (const field of browserPreferenceFields) {
   if (typeof value === typeof state[field] && (typeof value !== 'number' || Number.isFinite(value) && value >= 0)) state[field] = value;
 }
 if (typeof savedPreferences.dynamicProjectSort === 'boolean') state.dynamicProjectSort = savedPreferences.dynamicProjectSort ? 'asc' : 'off';
-if (typeof savedPreferences.chatProjectFilter === 'string') state.chatProjectFilter = savedPreferences.chatProjectFilter ? [savedPreferences.chatProjectFilter] : [];
-if (!Array.isArray(state.chatProjectFilter)) state.chatProjectFilter = [];
-if (typeof savedPreferences.recentProjectFilter === 'string') state.recentProjectFilter = savedPreferences.recentProjectFilter ? [savedPreferences.recentProjectFilter] : [];
-if (!Array.isArray(state.recentProjectFilter)) state.recentProjectFilter = [];
+for (const field of ['chatProjectFilter','recentProjectFilter']) {
+  const saved = savedPreferences[field];
+  const selected = typeof saved === 'string' ? saved ? [saved] : [] : saved;
+  // Legacy empty arrays meant all; v2 keeps null (all) distinct from [] (none).
+  state[field] = Array.isArray(selected) && (selected.length || savedPreferences.projectFilterVersion === 2) ? selected : null;
+}
+state.projectFilterVersion = 2;
 for (const field of ['openFolders', 'openChatFolders']) if (Array.isArray(savedPreferences[field])) state[field] = new Set(savedPreferences[field].filter(item => typeof item === 'string'));
 const hasSavedOpenFolders = Array.isArray(savedPreferences.openFolders);
 const hasSavedOpenChatFolders = Array.isArray(savedPreferences.openChatFolders);
@@ -478,8 +482,8 @@ async function loadNativeSnapshot(catalogOnly = true) {
       state.selectedProjectIds = new Set([...state.selectedProjectIds].filter(id => projects.some(project => project.id === id)));
       state.selectedChatIds = new Set([...state.selectedChatIds].filter(id => chats.some(chat => chat.id === id)));
       state.projectId = projects.some(project => project.id === state.projectId) ? state.projectId : projects[0]?.id || '';
-      state.chatProjectFilter = state.chatProjectFilter.filter(id => projects.some(project => project.id === id));
-      state.recentProjectFilter = state.recentProjectFilter.filter(id => projects.some(project => project.id === id));
+      state.chatProjectFilter = state.chatProjectFilter?.filter(id => projects.some(project => project.id === id)) ?? null;
+      state.recentProjectFilter = state.recentProjectFilter?.filter(id => projects.some(project => project.id === id)) ?? null;
       if (!nativeLoaded) {
         state.selectedChatId = "";
         for (const project of projects) {
@@ -852,7 +856,7 @@ const metricNumber = value => metricValue(value) ? value.toLocaleString(language
 const metricSeconds = (value, digits = 1) => metricValue(value) ? `${(value / 1000).toFixed(digits)}s` : '—';
 const metricPercent = (value, digits = 1) => metricValue(value) ? `${(value * 100).toFixed(digits)}%` : '—';
 const metricsCompact = (metrics, speed = metrics?.tokenSpeed) => `${metricSeconds(metrics?.ttftMs)}·${metricValue(speed) ? Math.round(speed) + 't/s' : '—'}·${metricPercent(metrics?.cacheHitRate, 0)}`;
-const metricStatus = value => t(({completed:'已完成',inProgress:'进行中',running:'进行中',interrupted:'已中断',failed:'失败',pending:'等待中',closed:'已关闭'})[value] || value || '未知');
+const metricStatus = value => t(({completed:'已完成',inProgress:'进行中',running:'进行中',interrupted:'已中断',failed:'失败',pending:'等待中',closed:'已关闭',unknown:'未知'})[value] || value || '未知');
 function metricsTooltip(metrics, data, forecast = null) {
   if (!data) return t('点击查看对话详情；尚未读取统计');
   const turn = data.turns?.find(turn => turn.metrics === metrics);
@@ -864,11 +868,13 @@ function metricsTooltip(metrics, data, forecast = null) {
     t('点击查看对话详情')].join('\n');
 }
 const metricsPendingKey = (threadId, latestOnly, offset=0, revision=null) => `${metricsContextGeneration}:${threadId}:${latestOnly ? 'latest' : 'all:'+offset+':'+(revision||'fresh')}`;
-async function readChatMetrics(threadId, latestOnly = false, turnOffset=0, detailRevision=null) {
+async function readChatMetrics(threadId, latestOnly = false, turnOffset=0, detailRevision=null, summaryOnly=false) {
   if (!nativeInvoke) throw new Error(t('桌面运行时不可用'));
-  const key = metricsPendingKey(threadId, latestOnly, turnOffset, detailRevision);
+  const key = metricsPendingKey(threadId, latestOnly, turnOffset, detailRevision) + (summaryOnly ? ':summary' : '');
   if (metricsPending.has(key)) return metricsPending.get(key);
-  const pending = nativeInvoke('get_chat_metrics', latestOnly?{threadId,latestOnly}:{threadId,latestOnly,turnOffset,detailRevision});
+  const args = latestOnly?{threadId,latestOnly}:{threadId,latestOnly,turnOffset,detailRevision};
+  if (summaryOnly) args.summaryOnly = true;
+  const pending = nativeInvoke('get_chat_metrics', args);
   metricsPending.set(key, pending);
   try {
     const data = await pending;
@@ -943,8 +949,8 @@ function metricsTime(value) {
 function metricsScope(data, scope = '') {
   return scope === 'all' ? data?.summary || null : data?.turns?.find(turn => turn.turnId === (scope || data.latestTurnId))?.metrics || null;
 }
-function metricsTable(headers, rows) {
-  return `<div class="metrics-table-scroll"><table><thead><tr>${headers.map(label => `<th>${esc(t(label))}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}">${esc(t('没有可用记录'))}</td></tr>`}</tbody></table></div>`;
+function metricsTable(headers, rows, className = '') {
+  return `<div class="metrics-table-scroll${className ? ' '+esc(className) : ''}"><table><thead><tr>${headers.map(label => `<th>${esc(t(label))}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}">${esc(t('没有可用记录'))}</td></tr>`}</tbody></table></div>`;
 }
 function metricCells(values) { return values.map(value => `<td>${value}</td>`).join(''); }
 function metricsCostMoney(value) {
@@ -981,10 +987,58 @@ function metricsSelectionMarkup(data, scope = '') {
   const pager=total>50?`<nav class="metrics-turn-pages"><button class="text-button" data-metrics-action="page" data-offset="${offset-50}" ${offset===0||metricsView?.pageLoading?'disabled':''}>${esc(t('上一页'))}</button><span>${offset+1}–${Math.min(offset+50,total)} / ${metricNumber(total)}</span><button class="text-button" data-metrics-action="page" data-offset="${offset+50}" ${offset+50>=total||metricsView?.pageLoading?'disabled':''}>${esc(t('下一页'))}</button><button class="text-button" data-metrics-action="refresh">${esc(t('刷新'))}</button></nav>`:'';
   return ui`<div class="metrics-scope"><label>${t('统计范围')} <select data-metrics-scope><option value="all"${scope === 'all' ? ' selected' : ''}>${t('全会话（已完成轮次）')}</option>${turns.map(turn => `<option value="${esc(turn.turnId)}"${turn.turnId === selectedTurnId ? ' selected' : ''}>${esc(metricsTime(turn.startedAt))} · ${esc(metricStatus(turn.status))}</option>`).join('')}${!selectedTurnId && scope !== 'all' ? `<option value="" selected>${esc(t('没有轮次记录'))}</option>` : ''}</select></label><span>${esc(scopeLabel)}</span></div>${!data.complete ? ui`<p class="metrics-warning">${t('记录不完整')}</p>` : ''}${(data.warnings || []).map(warning => `<p class="metrics-warning">${esc(t(warning))}</p>`).join('')}<dl class="metrics-overview">${fields.map(([label,value]) => `<div><dt>${esc(t(label))}</dt><dd>${value}</dd></div>`).join('')}</dl><p class="metrics-note">${t('估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。')}${scope === 'all' ? t('首 token 显示完成轮次均值；不同模型请查看各轮明细。') : ''}</p><h3>${t('轮次明细')}</h3>${metricsTable(['开始时间','模型 / 推理强度','状态','首 token','估算速度','覆盖率','缓存命中率','输出 token','总耗时','工具阻塞','API 等价金额'],turnRows)}${pager}${metricsView?.pageError?`<p class="metrics-warning">${esc(metricsView.pageError)}</p>`:''}`;
 }
+function metricsAgentsMarkup(data, stats = metricsView?.data === data ? metricsView.agentStats : undefined) {
+  if (!data.subagents?.length) return '';
+  const rows = data.subagents.map(agent => {
+    const entry = stats?.get(agent.threadId);
+    const child = entry?.data || (agent.summary || agent.consumption ? agent : null);
+    const summary = child?.summary, totals = child?.consumption?.totals;
+    const error = entry?.error || agent.error;
+    const pending = error || child ? '—' : '…';
+    const hasUsage = totals && (totals.requests > 0 || child.complete && !child.warnings?.length);
+    const input = hasUsage ? totals.input : summary?.inputTokens;
+    const output = hasUsage ? totals.output : summary?.outputTokens;
+    const cache = hasUsage && totals.input > 0 ? totals.cached / totals.input : summary?.cacheHitRate;
+    const status = error ? t('读取失败') : child?.turns?.find(turn=>turn.turnId===child.latestTurnId)?.status || agent.status;
+    const speed = metricValue(summary?.tokenSpeed) ? summary.tokenSpeed.toFixed(1)+'t/s' : pending;
+    const nameTip = [agent.path || agent.threadId, child?.model || agent.model, error].filter(Boolean).join('\n');
+    const speedTip = summary ? `${t('token 覆盖率')} ${metricPercent(summary.coverage)} · ${t('有效请求 / 全部请求')} ${metricNumber(summary.validRequestCount)} / ${metricNumber(summary.requestCount)}` : '';
+    return `<tr>${metricCells([
+      `<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(nameTip)}">${esc(agent.name||agent.path||agent.threadId)}</button>`,
+      esc(child?.model || agent.model || '—'),
+      `<span title="${esc(error || '')}">${esc(metricStatus(status === 'interacted' ? 'unknown' : status))}</span>`,
+      child ? metricNumber(input) : pending,
+      child ? metricNumber(output) : pending,
+      child ? metricPercent(cache) : pending,
+      `<span title="${esc(speedTip)}">${speed}</span>`,
+      child ? esc(metricsCostMoney(child.consumption)) : pending,
+    ])}</tr>`;
+  });
+  return ui`<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输入 token','输出 token','缓存命中率','估算速度','API 等价金额'],rows,'metrics-agent-table')}`;
+}
+function renderMetricsAgents(view) {
+  if (metricsView !== view) return;
+  const element = document.getElementById('chat-metrics-dialog')?.querySelector?.('[data-metrics-agents]');
+  if (element) element.innerHTML = metricsAgentsMarkup(view.data, view.agentStats);
+  else renderChatMetricsDialog();
+}
+async function loadMetricsAgents(view) {
+  const context = metricsContextGeneration;
+  view.agentStats ??= new Map();
+  for (const agent of view.data?.subagents || []) {
+    if (metricsView !== view || context !== metricsContextGeneration) return;
+    if (agent.threadId === view.threadId || view.agentStats.has(agent.threadId)) continue;
+    let result;
+    try { result = {data:await readChatMetrics(agent.threadId,false,0,null,true)}; }
+    catch(error) { result = {error:String(error)}; }
+    if (metricsView !== view || context !== metricsContextGeneration) return;
+    view.agentStats.set(agent.threadId, result);
+    renderMetricsAgents(view);
+  }
+}
 function chatMetricsMarkup(data,scope='',canGoBack=false) {
   const toolRows=(data.tools||[]).map(tool=>`<tr>${metricCells([esc(tool.name),metricNumber(tool.count),metricNumber(tool.failures),metricSeconds(tool.runtimeMs),metricSeconds(tool.waitMs)])}</tr>`);
-  const agentRows=(data.subagents||[]).map(agent=>`<tr>${metricCells([`<button class="metrics-link" data-metrics-action="agent" data-id="${esc(agent.threadId)}" title="${esc(agent.path||agent.threadId)}">${esc(agent.name||agent.path||agent.threadId)}</button>`,esc(agent.model||'—'),esc(metricStatus(agent.status)),metricNumber(agent.summary?.outputTokens),metricValue(agent.summary?.tokenSpeed)?agent.summary.tokenSpeed.toFixed(1)+'t/s':'—',metricPercent(agent.summary?.coverage),metricPercent(agent.summary?.cacheHitRate),esc(metricsCostMoney(agent.consumption)),agent.error?esc(agent.error):'—'])}</tr>`);
-  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title||data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd||'—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ')||'—')} · ${t(data.archived?'已归档':'未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p>${metricsConsumptionMarkup(data)}<section data-metrics-selection>${metricsSelectionMarkup(data,scope)}</section><h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<h3>${t('子智能体（各自全会话）')}</h3><p class="metrics-note">${t('子智能体用量不混入主对话；点击名称查看独立详情。')}</p>${metricsTable(['名称 / 路径','模型','状态','输出 token','估算速度','覆盖率','缓存命中率','API 等价金额','读取错误'],agentRows)}</div>`;
+  return ui`${metricsHeader(canGoBack)}<div class="metrics-body"><h2>${esc(data.title||data.threadId)}</h2><p class="metrics-note metrics-path">${esc(data.cwd||'—')}</p><p class="metrics-note">${esc(data.threadId)} · ${esc([data.model,data.effort].filter(Boolean).join(' / ')||'—')} · ${t(data.archived?'已归档':'未归档')}</p><p class="metrics-note">${t('创建：')}${esc(metricsTime(data.createdAt))} · ${t('更新：')}${esc(metricsTime(data.updatedAt))} · ${t('截至：')}${esc(metricsTime(data.asOf))}</p>${metricsConsumptionMarkup(data)}<section data-metrics-selection>${metricsSelectionMarkup(data,scope)}</section><h3>${t('工具统计（全会话）')}</h3><p class="metrics-note">${t('运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。')}</p>${metricsTable(['工具','调用次数','失败次数','运行耗时','阻塞耗时'],toolRows)}<section data-metrics-agents>${metricsAgentsMarkup(data)}</section></div>`;
 }
 function renderMetricsSelection() {
   if(!metricsView?.data)return;
@@ -1018,7 +1072,7 @@ async function openChatMetrics(threadId, child = false) {
   }
   const parents = child && metricsView ? [...metricsView.parents,{...metricsView,parents:undefined}] : [];
   const request = ++metricsDetailRequest;
-  metricsView = {threadId,scope:'',parents,data:null,error:''};
+  metricsView = {threadId,scope:'',parents,data:null,error:'',agentStats:new Map()};
   hideConversationPreview('metrics-dialog');
   renderChatMetricsDialog();
   const dialog = document.getElementById('chat-metrics-dialog');
@@ -1031,6 +1085,7 @@ async function openChatMetrics(threadId, child = false) {
     if (request !== metricsDetailRequest || metricsView?.threadId !== threadId) return;
     metricsView.data = data;
     renderChatMetricsDialog();
+    metricsView.agentsLoading = loadMetricsAgents(metricsView);
   } catch(error) {
     if (request !== metricsDetailRequest || metricsView?.threadId !== threadId) return;
     metricsView.error = t('无法读取对话统计') + ': ' + String(error);
@@ -1049,6 +1104,7 @@ function backChatMetrics() {
   const parents = [...metricsView.parents], parent = parents.pop();
   metricsView = {...parent,parents};
   renderChatMetricsDialog();
+  metricsView.agentsLoading = loadMetricsAgents(metricsView);
 }
 document.addEventListener('cancel', event => {
   if (event.target?.id === 'chat-metrics-dialog') closeChatMetrics();
@@ -1179,8 +1235,8 @@ async function openConversationPreviewWindow(id) {
     showToast(t('无法打开预览'), String(error), 'error');
   }
 }
-async function showConversationPreview(id) {
-  if (!state.previewEnabled && !isPreviewWindow) return;
+async function showConversationPreview(id, explicit = false) {
+  if (!explicit && !state.previewEnabled && !isPreviewWindow) return;
   previewLog('preview-open-request', {id, previewWindow: isPreviewWindow, pinned: state.previewPinned});
   if (!isPreviewWindow) {
     if (state.previewPinned && previewChatId && previewChatId !== id) return;
@@ -1600,7 +1656,7 @@ function recentProjectOptions() {
 }
 function projectRecentChats() {
   let rows = projectRecentBaseChats();
-  if (state.recentProjectFilter.length) rows = rows.filter(chat => state.recentProjectFilter.includes(chat.projectId));
+  if (state.recentProjectFilter !== null) rows = rows.filter(chat => state.recentProjectFilter.includes(chat.projectId));
   const query = state.recentQuery.trim().toLocaleLowerCase();
   if (query) rows = rows.filter(chat => (chat.title || '').toLocaleLowerCase().includes(query));
   return chatsByProject(rows, 'recentProjectSort', 'recentChatSort');
@@ -1770,10 +1826,12 @@ function projectFilterField(pickerId) {
   return pickerId === 'recent-project' ? 'recentProjectFilter' : 'chatProjectFilter';
 }
 function projectFilterPicker(pickerId = 'chat-project') {
-  const selected = state[projectFilterField(pickerId)];
-  const count = selected.length;
   const options = pickerId === 'recent-project' ? recentProjectOptions() : projectPickerOptions();
-  return ui`<div class="picker project-filter-picker" data-picker="${esc(pickerId)}"><button type="button" class="icon-button project-filter-trigger ${count ? 'active' : ''}" data-action="toggle-picker" data-picker-id="${esc(pickerId)}" aria-haspopup="listbox" aria-expanded="false" title="${t('按项目过滤')}" aria-label="${t('按项目过滤')}">${pickerId === 'recent-project' ? '' : '<span class="filter-letter">P</span>'}${icon('filter', pickerId === 'recent-project' ? 'recent-filter-icon' : '')}${count && pickerId !== 'recent-project' ? ui`<span class="filter-count">${count}</span>` : ''}</button><div class="picker-menu project-picker-menu" role="listbox" aria-multiselectable="true" hidden><div class="picker-search">${icon('search')}<input data-input="picker-query" data-picker-id="${esc(pickerId)}" placeholder="${t('搜索 Project')}" aria-label="${t('搜索 Project')}"></div><div class="project-choice-list">${projectChoiceRows(pickerId,selected,true,options)}</div><div class="picker-footer"><button type="button" data-action="project-filter-all" data-picker-id="${esc(pickerId)}">${t('全选')}</button><button type="button" data-action="project-filter-clear" data-picker-id="${esc(pickerId)}">${t('清除')}</button></div></div></div>`;
+  const filter = state[projectFilterField(pickerId)];
+  const selected = filter ?? options.map(option=>option.value);
+  const count = filter?.length || 0;
+  const active = filter !== null;
+  return ui`<div class="picker project-filter-picker" data-picker="${esc(pickerId)}"><button type="button" class="icon-button project-filter-trigger ${active ? 'active' : ''}" data-action="toggle-picker" data-picker-id="${esc(pickerId)}" aria-haspopup="listbox" aria-expanded="false" title="${t('按项目过滤')}" aria-label="${t('按项目过滤')}">${pickerId === 'recent-project' ? '' : '<span class="filter-letter">P</span>'}${icon('filter', pickerId === 'recent-project' ? 'recent-filter-icon' : '')}${count && pickerId !== 'recent-project' ? ui`<span class="filter-count">${count}</span>` : ''}</button><div class="picker-menu project-picker-menu" role="listbox" aria-multiselectable="true" hidden><div class="picker-search">${icon('search')}<input data-input="picker-query" data-picker-id="${esc(pickerId)}" placeholder="${t('搜索 Project')}" aria-label="${t('搜索 Project')}"></div><div class="project-choice-list">${projectChoiceRows(pickerId,selected,true,options)}</div><div class="picker-footer"><button type="button" data-action="project-filter-all" data-picker-id="${esc(pickerId)}">${t('全选')}</button><button type="button" data-action="project-filter-clear" data-picker-id="${esc(pickerId)}">${t('清除')}</button></div></div></div>`;
 }
 const sortArrow = direction => icon(direction === 'asc' ? 'arrow-up' : direction === 'desc' ? 'arrow-down' : 'sort', 'sort-arrow');
 function projectSortButton(field, action) {
@@ -2360,7 +2418,7 @@ function projectTimelineList() {
 function filteredTimelineChats() {
   const q = state.chatQuery.trim().toLocaleLowerCase("zh-CN");
   return chats.filter(chat =>
-    (!state.chatProjectFilter.length || state.chatProjectFilter.includes(chat.projectId)) &&
+    (state.chatProjectFilter === null || state.chatProjectFilter.includes(chat.projectId)) &&
     (!q || ui`${chat.title} ${chat.id} ${projectLabel(byProject(chat.projectId))}`.toLocaleLowerCase("zh-CN").includes(q))).sort((a, b) => b.timelineAt - a.timelineAt || a.id.localeCompare(b.id));
 }
 
@@ -3059,7 +3117,7 @@ function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceF
   const id = chat?.id || project.id, ids = selectedIds.length ? selectedIds : [id], data = {id,ids:ids.join(','),scope};
   if (chat?.sourceArchived) {
     const unavailable = codexActionUnavailable(chat, 'archive');
-    return menuButton('恢复对话','codex-action',{id,codexaction:'archive'},Boolean(unavailable),unavailable);
+    return menuButton('恢复对话','codex-action',{id,codexaction:'archive'},Boolean(unavailable),unavailable) + menuButton('对话预览','chat-preview',{id});
   }
   const multiple = ids.length > 1;
   let menu = multiple ? '' : chat ? '' : menuButton(project.synthetic ? '在 Codex 新建无项目对话' : '在 Codex 新建对话','new',data);
@@ -3087,7 +3145,7 @@ function itemMenu(chat,project,scope,sourceGroup = '', selectedIds = [], sourceF
   if (multiple) return menu;
   const copies = chat ? [['复制标题',chat.title],['复制链接',`codex://threads/${id}`]] : [['复制名称',project.name],['复制路径',project.path || ''],['复制 ID',id]];
   if (chat && chatDiagnostic(chat)) copies.push(['复制诊断信息',diagnosticTooltip(chat)]);
-  return menu + copies.map(([label,text]) => menuButton(label,'copy',{text})).join('') + (chat ? menuButton('对话详情','chat-metrics',data) : '');
+  return menu + copies.map(([label,text]) => menuButton(label,'copy',{text})).join('') + (chat ? menuButton('对话预览','chat-preview',data) + menuButton('对话详情','chat-metrics',data) : '');
 }
 let menuTimeline = false;
 const CONFIG_KEYS = [PREFERENCES_KEY,FOLDERS_KEY,DYNAMIC_KEY,'CodexChatPane.language'];
@@ -3284,7 +3342,7 @@ function validateConfiguration(input) {
     if (key === 'CodexChatPane.language') { if (!['zh','en'].includes(value)) throw new Error(t('工具配置格式无效')); result[key] = value; continue; }
     const parsed = JSON.parse(value);
     let valid = true;
-    if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter','openFolders','openChatFolders'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','projectChatTimeWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
+    if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter'].includes(field) ? v === null || strings(v) : ['openFolders','openChatFolders'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','projectChatTimeWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
     if (key === FOLDERS_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => ['projects','chats'].includes(field) ? object(v) && Object.values(v).every(item => object(item) && typeof item.folder === 'string' && Object.entries(item).every(([k,x]) => k === 'folder' ? x.length <= 4096 : k === 'folders' ? strings(x) : ['recycled','starred'].includes(k) ? typeof x === 'boolean' : k === 'region' ? typeof x === 'string' && x.length <= 32 : ['order','manualOrder','regionEnteredAt'].includes(k) && Number.isFinite(x))) : ['localProjectFolders','localChatFolders','recentIncludedChatIds','recentExcludedChatIds','recycledChatFolders','openFolders','openChatFolders','starredProjectIds','pinnedProjectIds'].includes(field) && strings(v));
     if (key === 'CodexChatPane.dynamic-v1') valid = object(parsed) && ['projects','chats'].every(kind => Array.isArray(parsed.groups?.[kind]) && parsed.groups[kind].every(g=>object(g) && typeof g.id==='string' && typeof g.name==='string' && g.name.length<=4096) && object(parsed.members?.[kind]) && Object.values(parsed.members[kind]).every(g=>typeof g==='string' || strings(g))) && object(parsed.views) && Object.values(parsed.views).every(v=>object(v) && strings(v.order) && strings(v.groups) && strings(v.collapsed) && (v.orders === undefined || object(v.orders) && Object.values(v.orders).every(strings)));
     if (key === PREFERENCES_KEY && CHAT_SORT_FIELDS.some(field => parsed[field] != null && parsed[field] !== 'status-desc' && !CHAT_SORT_VALUES.includes(parsed[field]))) valid = false;
@@ -3338,6 +3396,7 @@ async function handleMenuAction(button) {
   const targetIds = (ids || id || '').split(',').filter(Boolean);
   const chat = chats.find(c => c.id === id), project = byProject(chat?.projectId || id);
   if (action === 'chat-metrics') { await openChatMetrics(id); return; }
+  if (action === 'chat-preview') { await showConversationPreview(id,true); return; }
   if (action === 'choose-target') { showTargetPicker(button); return; }
   if (action === 'copy') { await navigator.clipboard.writeText(copyText); return; }
   if (action === 'open') {
@@ -3663,13 +3722,17 @@ document.addEventListener("click", async event => {
       const pickerId = action.dataset.pickerId;
       if (pickerId === 'chat-project' || pickerId === 'recent-project') {
         const field = projectFilterField(pickerId);
-        state[field] = state[field].includes(value) ? state[field].filter(id => id !== value) : [...state[field], value];
-        action.setAttribute('aria-selected', String(state[field].includes(value)));
-        action.querySelector('.choice-check').innerHTML = state[field].includes(value) ? icon('check') : '';
+        const options = pickerId === 'recent-project' ? recentProjectOptions() : projectPickerOptions();
+        const selected = state[field] ?? options.map(option=>option.value);
+        const next = selected.includes(value) ? selected.filter(id=>id!==value) : [...selected,value];
+        state[field] = options.every(option=>next.includes(option.value)) ? null : next;
+        const checked = state[field] === null || state[field].includes(value);
+        action.setAttribute('aria-selected', String(checked));
+        action.querySelector('.choice-check').innerHTML = checked ? icon('check') : '';
         const trigger = action.closest('.picker').querySelector('.project-filter-trigger');
-        trigger.classList.toggle('active', Boolean(state[field].length));
+        trigger.classList.toggle('active', state[field] !== null);
         trigger.querySelector('.filter-count')?.remove();
-        if (pickerId !== 'recent-project' && state[field].length) trigger.insertAdjacentHTML('beforeend', ui`<span class="filter-count">${state[field].length}</span>`);
+        if (pickerId !== 'recent-project' && state[field]?.length) trigger.insertAdjacentHTML('beforeend', ui`<span class="filter-count">${state[field].length}</span>`);
         if (pickerId === 'chat-project') {
           const list = document.querySelector('.global-dynamic .dynamic-list');
           if (list) list.innerHTML = renderChatGroups(filteredTimelineChats().filter(chat => !effectiveReasons(chat).length));
@@ -3697,8 +3760,7 @@ document.addEventListener("click", async event => {
     }
     if (name === 'project-filter-all' || name === 'project-filter-clear') {
       const field = projectFilterField(action.dataset.pickerId);
-      const options = action.dataset.pickerId === 'recent-project' ? recentProjectOptions() : projectPickerOptions();
-      state[field] = name === 'project-filter-all' ? options.map(option => option.value) : [];
+      state[field] = name === 'project-filter-all' ? null : [];
       render();
       return;
     }
@@ -3722,7 +3784,7 @@ document.addEventListener("click", async event => {
     }
     if (name === 'pick-option') {
       const value = action.dataset.value;
-      if (action.dataset.pickerId === 'chat-project') state.chatProjectFilter = value;
+      if (action.dataset.pickerId === 'chat-project') state.chatProjectFilter = value ? [value] : null;
       if (action.dataset.pickerId === 'new-chat-project') newChatProjectId = value;
       const owner = action.closest('.picker');
       owner.querySelector('.picker-trigger span').textContent = action.lastElementChild.textContent;

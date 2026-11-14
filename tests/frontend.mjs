@@ -197,6 +197,16 @@ assert.equal(vm.runInContext('metricsView.threadId',standaloneContext),'another-
 vm.runInContext('closeChatMetrics()',standaloneContext);
 assert.deepEqual(metricsWindowCalls,['close'],'closing details closes its own native window');
 vm.runInContext(script, context);
+const filterInitialization=script.slice(0,script.indexOf("for (const field of ['openFolders', 'openChatFolders'])"));
+for (const [preferences,expected] of [
+  [{chatProjectFilter:[],recentProjectFilter:[]},[null,null]],
+  [{chatProjectFilter:['old-project'],recentProjectFilter:'old-project'},[['old-project'],['old-project']]],
+  [{projectFilterVersion:2,chatProjectFilter:[],recentProjectFilter:[]},[[],[]]],
+]) {
+  const reloaded=vm.createContext({...context,localStorage:{getItem:key=>key==='CodexChatPane.preferences-v1'?JSON.stringify(preferences):null,setItem(){}}});
+  vm.runInContext(filterInitialization,reloaded);
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify([state.chatProjectFilter,state.recentProjectFilter])',reloaded)),expected,'project filter migration distinguishes old all from saved none');
+}
 for (const [key,value] of legacyStorage) {
   assert.ok(savedLocal.has(key.replace('codex-chat-pane.', 'CodexChatPane.')), `legacy storage key ${key} migrates before startup reads`);
   assert.equal(savedLocal.get(key), value, 'migration retains the old value for rollback');
@@ -390,7 +400,8 @@ vm.runInContext(`
   assert.ok(!itemMenu(null, {...project,synthetic:true,pathValid:false}, '').includes('打开文件夹'));
   codexMcpEnabled = true;
   const archivedMenu = itemMenu({...example,sourceArchived:true}, project, '');
-  assert.equal((archivedMenu.match(/data-menu-action=/g) || []).length, 1, 'archived chat menu contains only restore');
+  assert.equal((archivedMenu.match(/data-menu-action=/g) || []).length, 2, 'archived chat menu offers restore and explicit preview');
+  assert.ok(archivedMenu.includes('data-menu-action="chat-preview"'));
   assert.ok(!archivedMenu.includes('在 Codex 打开'));
   assert.ok(archivedMenu.includes('data-codexaction="archive"') && archivedMenu.includes('恢复对话'), 'archived chats offer restore through the archive MCP action');
   assert.ok(!archivedMenu.includes('data-codexaction="rename"'), 'restore replaces the unavailable rename action');
@@ -1139,8 +1150,38 @@ vm.runInContext(`
   assert.deepEqual(filteredNames, [...filteredNames].sort((a,b)=>a.localeCompare(b,language())), 'name sorting combines with the existing Project filter');
   state.recentChatSort = 'status-asc';
   assert.ok(filteredTimelineChats().some(chat => chat.projectId !== projects[1].id), 'Chats tab is not affected by the 3 Days filter');
-  state.recentProjectFilter = [];
+  state.recentProjectFilter = null;
+  const filterChats=chats;
+  chats=projects.slice(0,2).map((project,index)=>({...example,id:'project-filter-'+index,title:'Filter '+index,projectId:project.id,timelineAt:Date.now(),reasons:[],sourceArchived:false}));
+  for (const pickerId of ['recent-project','chat-project']) {
+    const field=projectFilterField(pickerId);
+    state[field]=null;
+    const options=pickerId==='recent-project'?recentProjectOptions():projectPickerOptions();
+    assert.ok(options.length>0);
+    assert.ok(!projectFilterPicker(pickerId).includes('aria-selected="false"'),'default checks every project');
+    const trigger={classList:{toggle(){}},querySelector(){return null;},insertAdjacentHTML(){}};
+    const pick=value=>dispatch('click',{target:{
+      dataset:{action:'pick-project',pickerId,value},setAttribute(){},querySelector(){return {innerHTML:''};},
+      closest(selector){return selector==='[data-action]'?this:selector==='.picker'?{querySelector:()=>trigger}:null;}
+    }});
+    const rows=()=>pickerId==='recent-project'?projectRecentChats():filteredTimelineChats();
+    pick(options[0].value);
+    assert.ok(state[field]!==null&&!state[field].includes(options[0].value),'first click excludes the clicked project');
+    assert.ok(rows().every(chat=>chat.projectId!==options[0].value));
+    pick(options[0].value);
+    assert.equal(state[field],null,'selecting the last unchecked project restores all');
+    const footer=action=>dispatch('click',{target:{dataset:{action,pickerId},closest(selector){return selector==='[data-action]'?this:null;}}});
+    footer('project-filter-clear');
+    assert.deepEqual(state[field],[]);
+    assert.equal(rows().length,0,'clear means no projects selected');
+    assert.deepEqual(JSON.parse(localStorage.getItem(PREFERENCES_KEY))[field],[]);
+    assert.equal(JSON.parse(localStorage.getItem(PREFERENCES_KEY)).projectFilterVersion,2);
+    footer('project-filter-all');
+    assert.equal(state[field],null);
+    assert.ok(!projectFilterPicker(pickerId).includes('aria-selected="false"'));
+  }
   state.recentProjectSort = 'asc';
+  chats=filterChats;
   state.dynamicProjectSort = 'off';
   const recentLabels = projectRecentChats().map(chat => projectLabel(byProject(chat.projectId) || {synthetic:true}));
   assert.deepEqual(recentLabels, [...recentLabels].sort((a,b) => a.localeCompare(b, language())));
@@ -1987,6 +2028,8 @@ await vm.runInContext(`(async () => {
       assert.ok(bounded.includes('1–50 / 10,000'));
     }
     assert.ok(html.includes('工具统计（全会话）') && html.includes('子智能体（各自全会话）'),'tools and subagents declare their own scope');
+    assert.ok(!chatMetricsMarkup({...data,subagents:[]}).includes('子智能体（各自全会话）'),'leaf chats omit the entire child section');
+    assert.ok(metricsAgentsMarkup(data).includes('<td>…</td>'),'metadata-only children show loading');
     assert.ok(!chatMetricsMarkup(data,'latest').includes('缺少输出起点') && html.includes('data-metrics-action="agent"'));
     assert.ok(metricsTooltip(summary,data).includes('61/82') && metricsTooltip(summary,data).includes('86.2%'));
     const briefTip=metricsTooltip(summary,{...data,complete:false,turns:[{status:'inProgress',metrics:summary,requests:[{responseId:'hidden-response-id'}]}]});
@@ -2148,6 +2191,7 @@ await vm.runInContext(`(async () => {
     };
     const statusBeforeDetails = chatMetrics.get('second');
     await openChatMetrics('first');
+    await metricsView.agentsLoading;
     assert.equal(chatMetrics.get('second'),statusBeforeDetails,'full detail results do not replace status snapshots');
     metricsView.scope = 'all';
     await openChatMetrics('child',true);
@@ -2158,6 +2202,41 @@ await vm.runInContext(`(async () => {
     assert.equal(metricsView.threadId,'first');
     assert.equal(metricsView.scope,'all','back restores explicit parent total scope');
     assert.equal(metricsScope(metricsView.data,metricsView.scope).outputTokens,999);
+    {
+      const savedView=metricsView, savedInvoke=nativeInvoke;
+      const reads=[];
+      nativeInvoke=(command,args)=>new Promise((resolve,reject)=>reads.push({command,args,resolve,reject}));
+      const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
+      const opening=openChatMetrics('parent');
+      reads[0].resolve({...fixture('parent'),subagents:['a','b','c'].map(threadId=>({threadId,name:threadId,status:'completed'}))});
+      await opening;
+      assert.equal(reads.length,2,'parent renders before sequential child loading completes');
+      assert.equal(reads[1].args.summaryOnly,true);
+      assert.ok(dialog.innerHTML.includes('<td>…</td>'));
+      reads[1].resolve({...fixture('a'),consumption:{totals:{...costTotals,input:300,output:30,cached:270,costUsd:.02}},summary:{...summary,tokenSpeed:55}});
+      await flush();
+      assert.equal(reads.length,3);
+      assert.ok(dialog.innerHTML.includes('<td>300</td>')&&dialog.innerHTML.includes('<td>30</td>'),'child own settled usage fills the row');
+      assert.ok(dialog.innerHTML.includes('90.0%')&&dialog.innerHTML.includes('55.0t/s'));
+      reads[2].reject(Error('<missing log>'));await flush();
+      assert.equal(reads.length,4,'a failed child does not block later children');
+      assert.ok(dialog.innerHTML.includes('&lt;missing log&gt;'));
+      const loading=metricsView.agentsLoading;
+      closeChatMetrics();reads[3].resolve(fixture('c'));await loading;
+      assert.equal(metricsView,null,'late child results cannot reopen a closed parent');
+      assert.equal(reads.length,4,'summary reads never recursively load grandchildren');
+      nativeInvoke=savedInvoke;metricsView=savedView;
+      renderChatMetricsDialog();
+    }
+    {
+      const priorInvoke=nativeInvoke,priorEnabled=state.previewEnabled,priorPinned=state.previewPinned,priorId=previewChatId;
+      const previewCalls=[];
+      nativeInvoke=async(command,args)=>{previewCalls.push({command,args});};
+      state.previewEnabled=false;state.previewPinned=false;
+      await handleMenuAction({dataset:{menuAction:'chat-preview',id:'second'}});
+      assert.ok(previewCalls.some(c=>c.command==='open_conversation_preview_window'&&c.args.threadId==='second'),'explicit context-menu preview works when row preview icons are disabled');
+      nativeInvoke=priorInvoke;state.previewEnabled=priorEnabled;state.previewPinned=priorPinned;previewChatId=priorId;
+    }
     for (let index=0;index<30;index++) rememberChatMetrics(fixture('cached-' + index));
     assert.equal(chatMetrics.size,24,'retained metric bodies are bounded like preview pages');
     assert.ok(chatMetrics.has('second'),'cache eviction retains the selected conversation status');
@@ -2166,11 +2245,12 @@ await vm.runInContext(`(async () => {
     assert.ok(chatMetricsMarkup(data).includes(' · 已完成</option>'),'scope choices use localized statuses');
     const scopedReads = [];
     nativeInvoke = (command,args) => new Promise(resolve => scopedReads.push({args,resolve}));
-    const statusRead = readChatMetrics('scoped',true), detailRead = readChatMetrics('scoped');
-    assert.equal(scopedReads.length,2,'status and detail reads never share an in-flight result');
-    assert.deepEqual(scopedReads.map(read => read.args.latestOnly),[true,false]);
+    const statusRead = readChatMetrics('scoped',true), detailRead = readChatMetrics('scoped'), summaryRead = readChatMetrics('scoped',false,0,null,true);
+    assert.equal(scopedReads.length,3,'status, detail and child-summary reads never share an in-flight result');
+    assert.deepEqual(scopedReads.map(read => read.args.latestOnly),[true,false,false]);
+    assert.equal(scopedReads[2].args.summaryOnly,true);
     scopedReads.forEach(read => read.resolve(fixture('scoped')));
-    await Promise.all([statusRead,detailRead]);
+    await Promise.all([statusRead,detailRead,summaryRead]);
     nativeInvoke = (command,args) => new Promise(resolve => pending.set(args.threadId,resolve));
     const afterClose = openChatMetrics('late'); closeChatMetrics();
     pending.get('late')(fixture('late')); await afterClose;
@@ -2195,7 +2275,7 @@ await vm.runInContext(`(async () => {
       assert.equal(metricsView,null,'a late page cannot repopulate a closed detail window');
       nativeInvoke=oldInvoke;delete dialog.querySelector;
     }
-    assert.ok(!itemMenu({...savedChats[0],sourceArchived:true},{id:'project'},'global').includes('chat-metrics'),'archived menu remains restore-only');
+    assert.ok(!itemMenu({...savedChats[0],sourceArchived:true},{id:'project'},'global').includes('chat-metrics'),'archived menu has no metrics action');
     assert.equal(itemMenu({...savedChats[0],sourceArchived:false},{id:'project'},'global').match(/data-menu-action="[^"]+"/g).at(-1), 'data-menu-action="chat-metrics"', 'details is the last ordinary chat menu action');
     assert.ok(!JSON.stringify(configurationDocument()).includes('chatMetrics'),'metrics are not persisted in configuration');
     isAuxiliaryWindow=false;state.selectedChatId='';chatMetrics.clear();runningMetricsKeys.clear();

@@ -837,6 +837,12 @@ body.metrics-window .project-chooser.chat-metrics-dialog { position:fixed; inset
 .metrics-selected { background:color-mix(in srgb,var(--focus) 10%,transparent); }
 .metrics-link { border:0; padding:0; color:var(--focus); background:transparent; font:inherit; text-align:left; cursor:pointer; }
 .metrics-link:hover, .metrics-link:focus-visible { text-decoration:underline; }
+[data-metrics-agents] { container-type:inline-size; }
+.metrics-agent-table :is(th,td):nth-child(n+4) { text-align:right; }
+@container (max-width:900px) {
+  .metrics-agent-table :is(th,td):nth-child(2),
+  .metrics-agent-table :is(th,td):nth-child(6) { display:none; }
+}
 body.usage-window #app { display:none; }
 body.usage-window .usage-dialog { position:fixed; inset:0; width:100%; height:100%; max-width:none; max-height:none; margin:0; border:0; border-radius:0; }
 .usage-dialog { overflow:hidden; }

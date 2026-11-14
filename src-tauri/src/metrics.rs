@@ -8,6 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod agents;
 pub(crate) mod analysis;
 pub(crate) mod details;
 mod latest;
@@ -1068,18 +1069,7 @@ fn read_at_mode(
         .map(|turn| turn.turn_id.clone());
     let effort = turns.last().and_then(|turn| turn.effort.clone());
     if children {
-        subagents.retain_mut(|agent| {
-            match catalog(home, &agent.thread_id) {
-                Ok((_, result)) => {
-                    agent.model = result.model;
-                }
-                Err(error) => {
-                    agent.error = Some(error);
-                    agent.status = "unavailable".into();
-                }
-            }
-            true
-        });
+        subagents = agents::direct(home, thread_id, subagents)?;
     } else {
         subagents.clear();
     }

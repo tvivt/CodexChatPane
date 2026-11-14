@@ -129,7 +129,7 @@ const english = {
   '估算生成速度含推理，排除工具等待；缺起点请求不进入速度，但保留用量。': 'Estimated speed includes reasoning and excludes tool waits. Requests with missing starts are excluded from speed but retained in usage.',
   '首 token 显示完成轮次均值；不同模型请查看各轮明细。': 'First token shows the mean of completed turns; inspect each turn for different models.',
   '轮次明细': 'Turn details', '工具统计（全会话）': 'Tools (entire conversation)', '运行耗时与阻塞耗时分别展示；并行、嵌套工具不可相加成总等待。': 'Runtime and blocking are shown separately. Parallel and nested tools cannot be summed as total wait.',
-  '子智能体（各自全会话）': 'Subagents (each entire conversation)', '子智能体用量不混入主对话；点击名称查看独立详情。': 'Subagent usage is separate from the parent. Click a name for its own details.',
+  '子智能体（各自全会话）': 'Subagents (each entire conversation)', '子智能体用量不混入主对话；点击名称查看独立详情。': 'Subagent usage is separate from the parent. Click a name for its own details.', '读取失败': 'Read failed',
   '调用次数': 'Calls', '失败次数': 'Failures', '运行耗时': 'Runtime', '阻塞耗时': 'Blocking time', '名称 / 路径': 'Name / path', '读取错误': 'Read error',
   '缺少输出起点': 'Missing output start', '缺少推理计时': 'Missing reasoning timing', '输出前段缺失': 'Missing earlier output', '生成时间无效': 'Invalid generation timing',
   '跨越前一请求': 'Crosses previous request', '工具等待重叠': 'Overlaps tool wait', '请求区间重叠': 'Overlapping requests', '日志段不完整': 'Incomplete log segment',

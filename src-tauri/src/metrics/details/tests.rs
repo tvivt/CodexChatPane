@@ -31,6 +31,136 @@ fn fixture() -> tempfile::TempDir {
     }
     dir
 }
+
+#[test]
+fn only_direct_children_are_listed_and_child_details_keep_normal_statistics() {
+    let dir = fixture();
+    let home = dir.path();
+    let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute_batch("ALTER TABLE threads ADD COLUMN source TEXT;")
+        .unwrap();
+    for (id, parent) in [("child", "main"), ("peer", "main"), ("grandchild", "child")] {
+        let path = home.join(format!("{id}.jsonl"));
+        let source = json!({"subagent":{"thread_spawn":{"parent_thread_id":parent,"agent_path":format!("/root/{id}")}}});
+        db.execute("INSERT INTO threads(id,title,cwd,model,archived,created_at,updated_at,rollout_path,source) VALUES(?1,?1,'','gpt-6.1-sol',0,1,2,?2,?3)",
+            rusqlite::params![id,path.to_string_lossy(),source.to_string()]).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
+        for value in [
+            json!({"type":"session_meta","payload":{"id":id,"source":source,"thread_source":"subagent"}}),
+            json!({"type":"turn_context","payload":{"thread_id":id,"turn_id":"own","model":"gpt-6.1-sol"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","thread_id":id,"turn_id":"own"}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"own","item":{"type":"AgentMessage","id":"answer"},"started_at_ms":1000,"completed_at_ms":2000}}),
+            json!({"type":"token_usage_record","payload":{"thread_id":id,"turn_id":"own","response_id":format!("request-{id}"),"usage":{"input_tokens":100,"cached_input_tokens":90,"output_tokens":50,"reasoning_output_tokens":0}}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"own","item":{"type":"SubAgentActivity","id":"parent-message","agent_thread_id":"main","agent_path":"/root","kind":"interacted"}}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"own","item":{"type":"SubAgentActivity","id":"peer-message","agent_thread_id":"peer","agent_path":"/root/peer","kind":"interacted"}}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","thread_id":id,"turn_id":"own"}}),
+        ] {
+            writeln!(file, "{value}").unwrap();
+        }
+    }
+    let main = read(home, "main", 0, None).unwrap();
+    assert_eq!(
+        main.subagents
+            .iter()
+            .map(|a| a.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["child", "peer"]
+    );
+    let child = read(home, "child", 0, None).unwrap();
+    assert_eq!(
+        child
+            .subagents
+            .iter()
+            .map(|a| a.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["grandchild"]
+    );
+    assert_eq!(child.summary.output_tokens, Some(50));
+    assert_eq!(
+        serde_json::to_value(&child.consumption).unwrap()["totals"]["output"],
+        50
+    );
+    assert_eq!(child.turn_total, Some(1));
+    assert!(read(home, "grandchild", 0, None)
+        .unwrap()
+        .subagents
+        .is_empty());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(home.join("child.jsonl"))
+        .unwrap();
+    for value in [
+        json!({"type":"turn_context","payload":{"thread_id":"child","turn_id":"interrupted","model":"gpt-6.1-sol"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","thread_id":"child","turn_id":"interrupted"}}),
+        json!({"type":"token_usage_record","payload":{"thread_id":"child","turn_id":"interrupted","response_id":"no-timing","usage":{"input_tokens":200,"cached_input_tokens":180,"output_tokens":70,"reasoning_output_tokens":0}}}),
+        json!({"type":"event_msg","payload":{"type":"turn_aborted","thread_id":"child","turn_id":"interrupted"}}),
+    ] {
+        writeln!(file, "{value}").unwrap();
+    }
+    let summary = read_summary(home, "child").unwrap();
+    assert_eq!(
+        summary.summary.output_tokens,
+        Some(120),
+        "summary retains interrupted settled usage"
+    );
+    assert_eq!(summary.summary.turn_count, 2);
+    assert_eq!(summary.summary.completed_turn_count, 1);
+    assert_eq!(summary.summary.request_count, 2);
+    assert_eq!(
+        summary.summary.valid_request_count, 1,
+        "missing timing affects speed only"
+    );
+    assert_eq!(
+        serde_json::to_value(&summary.consumption).unwrap()["totals"]["output"],
+        120
+    );
+    assert!(summary.subagents.is_empty(), "summary does not recurse");
+    assert!(summary
+        .turns
+        .iter()
+        .all(|t| t.requests.is_empty() && t.activities.is_empty()));
+    assert_eq!(
+        read(home, "main", 0, main.detail_revision.as_deref())
+            .unwrap()
+            .detail_revision,
+        main.detail_revision,
+        "summary loading retains the parent's frozen page"
+    );
+}
+
+#[test]
+#[ignore = "checks the two user-selected real child logs without editing source records"]
+fn local_subagent_statistics_sample() {
+    let home = crate::source::codex_home().unwrap();
+    let parent = "01a0ff60-165e-7ff1-89c5-4d58b94ce669";
+    let direct = super::super::agents::direct(&home, parent, vec![]).unwrap();
+    for id in [
+        "01a11b4b-f104-7e02-91eb-21bef797f8ab",
+        "01a11b4c-484f-7ce1-875d-4bb629b49d50",
+    ] {
+        assert!(direct.iter().any(|a| a.thread_id == id));
+        let start = std::time::Instant::now();
+        let summary = read_summary(&home, id).unwrap();
+        assert!(summary.summary.request_count > 0);
+        assert!(summary.summary.output_tokens.is_some_and(|v| v > 0));
+        let full = read(&home, id, 0, None).unwrap();
+        assert!(full
+            .subagents
+            .iter()
+            .all(|a| a.thread_id != parent && a.thread_id != id));
+        assert!(!full.subagents.iter().any(|a| [
+            "01a11b4b-f104-7e02-91eb-21bef797f8ab",
+            "01a11b4c-484f-7ce1-875d-4bb629b49d50"
+        ]
+        .contains(&a.thread_id.as_str())));
+        println!(
+            "id={id} summary={} direct_children={} elapsed_ms={}",
+            serde_json::to_string(&summary.summary).unwrap(),
+            full.subagents.len(),
+            start.elapsed().as_millis()
+        );
+    }
+}
 #[test]
 fn compact_pages_retain_summary_counts_and_never_reparse_for_paging() {
     let dir = fixture();

@@ -776,6 +776,7 @@ async fn get_chat_preview(
 async fn get_chat_metrics(
     thread_id: String,
     latest_only: Option<bool>,
+    summary_only: Option<bool>,
     turn_offset: Option<usize>,
     detail_revision: Option<String>,
 ) -> Result<metrics::ChatMetrics, String> {
@@ -784,6 +785,9 @@ async fn get_chat_metrics(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let home = source::codex_home()?;
+        if summary_only.unwrap_or(false) {
+            return metrics::details::read_summary(&home, &thread_id);
+        }
         if !latest_only.unwrap_or(false) {
             return metrics::details::read(
                 &home,
