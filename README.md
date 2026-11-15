@@ -6,7 +6,13 @@ CodexChatPane is a chat sidebar for Codex Desktop on Windows. When you work on s
 
 **[Download for Windows](https://github.com/tvivt/CodexChatPane/releases/latest)**
 
-![Interface screenshot](CodexChatPane.png)
+![CodexChatPane interface with English area labels](CodexChatPane.en.png)
+
+## Highlights
+
+- **Quotas and consumption in one place**: Track 5h/W quota, reset history, Token usage and API-equivalent cost. Compare projects, chats and periods, with model breakdowns and separate subagent usage.
+- **MCP operations without direct database edits**: Renaming, pinning, archiving and restoring use Codex's MCP tools. The app reads Codex's original databases without writing to them directly.
+- **Lightweight local app**: A Rust backend uses file-change notifications, incremental reads, cached results and on-demand details to reduce repeated scans of chat histories.
 
 ## Recent activity · See which chats need attention
 
@@ -28,7 +34,7 @@ Search the current project's chats by title, organize frequent chats with folder
 
 Collapse and expand the Projects and Chats panes independently to keep the lists you need visible.
 
-## Chat statistics and quotas
+## Chat metrics and quota consumption
 
 - **Selected-chat metrics**: The bottom bar shows values such as `1.8s·62t/s·93%`: first-token latency, estimated generation speed, and input cache hit rate. Σ is the estimated total speed of running chats; hover to see each chat's speed.
 - **Turn details**: Open Chat details from the context menu to inspect each turn's model, input and output Tokens, cache usage and speed, along with activity counts, tools and subagents.
@@ -52,11 +58,11 @@ This is an experimental personal project, not an official Codex Desktop componen
 | v0.6.1 changes | [Release notes](doc/releases/v0.6.1.md) |
 | Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
-## Data and safety
+## Local data and MCP operations
 
-- The app does not upload or host your conversations. Browsing does not modify the original Codex conversations.
-- Folders, groups, themes, and window settings stay local.
-- Renaming, pinning, and archiving change Codex state; enable write operations in settings before using them.
+- The app opens Codex's original databases in read-only mode and does not directly edit them. Changes such as renaming, pinning, archiving and restoring go through Codex's MCP tools; enable write operations in settings before using them.
+- Local folders, groups, themes, window settings and statistics caches are saved separately on your computer.
+- The app does not upload or host your conversations.
 
 ## License
 
