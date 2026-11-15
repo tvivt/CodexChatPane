@@ -949,6 +949,7 @@ body.usage-window .usage-dialog { position:fixed; inset:0; width:100%; height:10
 .usage-reset-summary > details { font-size:12px; text-align:right; }
 .usage-card-expirations { white-space:pre-line; line-height:1.7; }
 .usage-reset-table { table-layout:auto; }
+.usage-reset-table > thead > tr > th:first-child { width:36%; }
 .usage-reset-table > tbody > tr > td:last-child button { padding:5px 8px; border:1px solid var(--line); border-radius:4px; color:var(--focus); background:transparent; cursor:pointer; white-space:nowrap; }
 .usage-reset-table .usage-reset-detail-row > td { width:100%; padding:8px 12px 14px; text-align:left; background:color-mix(in srgb,var(--selected) 20%,transparent); }
 .usage-reset-meta { display:flex; flex-wrap:wrap; gap:4px 16px; margin-bottom:10px; color:var(--muted); font-size:11px; }
@@ -1360,7 +1361,7 @@ html[data-drag-collapse] .pin-folder .chat-row { display:none !important; }
 .project-recent-panel .folder-view-label :is(.icon-button) { display:inline-flex; align-items:center; justify-content:center; gap:1px; width:auto; min-width:20px; height:24px; padding:0 1px; }
 :root[data-theme-family] .project-recent-panel .folder-view-label .icon-button { color:var(--muted); background:transparent; }
 :root[data-theme-family] .project-recent-panel .folder-view-label .icon-button.active { color:var(--focus); }
-.project-recent-panel .folder-view-label > .icon-button { min-width:24px; }
+.project-recent-panel .folder-view-label > .icon-button { min-width:20px; }
 .folder-view-label .sort-control { display:inline-flex; align-items:center; justify-content:center; align-self:center; height:24px; }
 .project-recent-panel .folder-view-label > [data-field="recentChatSort"] { min-width:18px; }
 .project-recent-panel .folder-view-label .icon-button .icon { width:16px; height:16px; flex:none; stroke-width:2; }
@@ -1377,14 +1378,18 @@ html[data-drag-collapse] .pin-folder .chat-row { display:none !important; }
 .project-recent-panel .folder-view-label .icon-button.active::after { left:2px; right:2px; bottom:1px; background:var(--focus); }
 .project-recent-panel .folder-view-label .days-count-label { height:24px; line-height:24px; }
 .project-recent-panel .folder-view-label .days-count-input { height:24px; line-height:24px; }
-.recent-status-filters { display:inline-flex; align-items:center; gap:max(0px,calc(var(--recent-gap,0px) - 1px)); margin-left:1px; padding-left:calc(3px + var(--recent-gap,0px)); background:linear-gradient(var(--muted),var(--muted)) left center / 2px 16px no-repeat; }
+.recent-status-filters { display:inline-flex; flex-shrink:0; align-items:center; gap:1px; margin-left:1px; padding-left:3px; background:linear-gradient(var(--muted),var(--muted)) left center / 2px 16px no-repeat; }
 .recent-end-divider { width:2px; height:16px; border-inline:1px solid transparent; box-sizing:content-box; background:var(--muted) content-box; }
 .project-recent-panel .folder-view-label :is(.recent-count,.filter-count) { padding:0; min-width:0; height:auto; background:transparent; color:var(--text); font-family:inherit; font-size:11px; font-weight:500; line-height:16px; font-variant-numeric:tabular-nums; }
+.project-recent-panel .recent-status-filters > .icon-button { flex-shrink:0; padding:0; border-width:0; }
+.recent-status-filters :is([data-status="all"],[data-status="read"]) { --recent-count-width:3ch; }
+.project-recent-panel .recent-status-filters .recent-count { width:var(--recent-count-width,2ch); flex:0 0 var(--recent-count-width,2ch); font-size:10px; text-align:left; }
 .recent-status-filters [data-status="all"] .icon { color:light-dark(#2456a4,#8bbaff); }
 .recent-status-filters [data-status="waiting"] .icon { color:var(--warning); }
 .project-recent-panel .recent-status-filters [data-status="waiting"] .icon { transform:scale(.73); stroke-width:2.6; }
 .recent-status-filters [data-status="unread"] .icon { color:var(--danger); }
 .recent-status-filters [data-status="working"] .icon { color:var(--working); }
+.project-recent-panel .recent-status-filters [data-status="error"] .icon { color:var(--danger); transform:scale(.73); stroke-width:2.6; }
 .recent-status-filters [data-status="read"] .icon { color:light-dark(#536f97,#8fafdc); }
 .project-recent-list .global-chat-row { height:var(--row-height); min-height:var(--row-height); }
 .project-recent-list [data-recent-project] { cursor:grab; -webkit-user-drag:element; user-drag:element; }

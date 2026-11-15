@@ -14,7 +14,7 @@ const usageCountdown = (at, now) => {
 };
 const usageBucket = minutes => minutes === 300 ? '5h' : 'W';
 const usageMonth = date => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}`;
-const usageReset = type => t(({natural:'自然重置',natural_pending:'自然重置(待确认)',card:'重置卡',early:'提前重置',unknown:'未知',plan_changed:'套餐变化',account_changed:'账号变化'})[type] || '进行中');
+const usageReset = type => t(({natural:'自然重置',natural_pending:'自然重置',card:'重置卡',early:'提前重置',unknown:'未知',plan_changed:'套餐变化',account_changed:'账号变化'})[type] || '进行中');
 const usageMoney = totals => totals?.requests && totals.unpricedRequests === totals.requests ? '—'
   : `≈$${Number(totals?.costUsd || 0).toFixed(4)}${totals?.unpricedRequests ? ' + '+t('未计价') : ''}`;
 const usageSourceMoney = (totals,subagent=false) => {
@@ -373,12 +373,12 @@ export function createUsageView({invoke,nativeWindow}) {
   }
   function resets(){
     const cards=resetCardsTip(history.limits),rows=shownCycles();
-    return `<div class="usage-reset-summary"><div><strong>${usageEscape(t('W 额度重置历史'))}</strong><small>${usageEscape(t('开始记录'))} ${usageEscape(usageTime(history.observedSince))}</small></div><details><summary>${usageEscape(cards.split('\n')[0])}</summary><p class="usage-card-expirations">${usageEscape(cards.split('\n').slice(1).join('\n')||t('到期时间未知'))}</p></details></div>${history.warnings?.length?`<p class="usage-footnote">${usageEscape(history.warnings.map(t).join('；'))}</p>`:''}${rows.length?`<div class="usage-table-scroll" data-usage-scroll="resets"><table class="usage-table usage-reset-table"><thead><tr>${['额度周期','重置方式','最后剩余','总 Token','详情'].map(l=>`<th>${usageEscape(t(l))}</th>`).join('')}</tr></thead><tbody>${rows.map(c=>{
+    return `<div class="usage-reset-summary"><div><strong>${usageEscape(t('W 额度重置历史'))}</strong><small>${usageEscape(t('开始记录'))} ${usageEscape(usageTime(history.observedSince))}</small></div><details><summary>${usageEscape(cards.split('\n')[0])}</summary><p class="usage-card-expirations">${usageEscape(cards.split('\n').slice(1).join('\n')||t('到期时间未知'))}</p></details></div>${history.warnings?.length?`<p class="usage-footnote">${usageEscape(history.warnings.map(t).join('；'))}</p>`:''}${rows.length?`<div class="usage-table-scroll" data-usage-scroll="resets"><table class="usage-table usage-reset-table"><thead><tr>${['额度周期','重置方式','最后剩余','总 Token','API 等价','详情'].map(l=>`<th>${usageEscape(t(l))}</th>`).join('')}</tr></thead><tbody>${rows.map(c=>{
       const id=resetCycleKey(c),open=expandedCycles.has(id),entry=cycleReports.get(id),totals=entry?.totals||entry?.data?.totals;
       const tokens=totals?quotaNoticeTokens(totals):entry?.error?'—':'…';
       const method=c.endedAt==null?t('进行中'):c.resetType?usageReset(c.resetType):t('未知');
       const remaining=c.remainingKnown!==false&&Number.isFinite(c.remaining)?`${c.remaining.toFixed(1)}%`:'—';
-      return `<tr data-usage-cycle="${usageEscape(id)}"><td title="${usageEscape(c.startedAt==null?t('从首次观测计算'):cycleLabel(c))}">${usageEscape(usageCycleLabel(c,true))}</td><td>${usageEscape(method)}</td><td>${remaining}</td><td title="${usageEscape(totals?usageNumber(totals.input+totals.output):entry?.error||t('正在读取…'))}">${tokens}</td><td>${usageAction('expand-reset',t('详情')+(open?' ▾':' ▸'),`data-id="${usageEscape(id)}" aria-expanded="${open}"`,true)}</td></tr>${open?`<tr class="usage-reset-detail-row"><td colspan="5">${resetDetail(c)}</td></tr>`:''}`;
+      return `<tr data-usage-cycle="${usageEscape(id)}"><td title="${usageEscape(c.startedAt==null?t('从首次观测计算'):cycleLabel(c))}">${usageEscape(usageCycleLabel(c,true))}</td><td>${usageEscape(method)}</td><td>${remaining}</td><td title="${usageEscape(totals?usageNumber(totals.input+totals.output):entry?.error||t('正在读取…'))}">${tokens}</td><td>${totals?usageCostMarkup(totals):entry?.error?'—':'…'}</td><td>${usageAction('expand-reset',t('详情')+(open?' ▾':' ▸'),`data-id="${usageEscape(id)}" aria-expanded="${open}"`,true)}</td></tr>${open?`<tr class="usage-reset-detail-row"><td colspan="6">${resetDetail(c)}</td></tr>`:''}`;
     }).join('')}</tbody></table></div>`:usageEmpty('暂无重置记录')}${olderHistory()}<p class="usage-footnote">${usageEscape(t('仅展示已记录的 W 周期；缺少周期边界的更早消耗可按自然时间查看。'))}</p>`;
   }
   function rememberCycleTotals(interval,totals){
@@ -550,7 +550,12 @@ export function createUsageView({invoke,nativeWindow}) {
       const data=await invoke('get_usage_consumption',{query:{...selected,threadIds},refresh:true});
       if(!active||version!==generation||context!==contextGeneration||tab!==currentTab)return;
       report=data;
+      roundReports.clear();
       cycleReports.clear();rememberCycleTotals(selected,data.totals);render();
+      for(const id of [...expanded]){
+        if(!active||version!==generation||context!==contextGeneration||tab!==currentTab)break;
+        await loadChatDetails(id);
+      }
     }else if(tab==='resets'){
       const needed=new Set([...visibleResetCycles,...expandedCycles]);
       for(const id of cycleReports.keys())if(!needed.has(id))cycleReports.delete(id);

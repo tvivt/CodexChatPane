@@ -1,6 +1,6 @@
 # 文档总览 / Documentation index
 
-更新日期：2026-11-14。源码版本 v0.6.0（[说明 / Release notes](releases/v0.6.0.md)）；Windows 附件由对应标签工作流构建并发布，实际可下载版本以 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases) 为准。本文是 CodexChatPane 的全功能入口。功能说明采用本批交付后的行为口径；历史测试、当前检查和实际部署证据单独记录，不以文档更新代表测试通过或 EXE 已更新。
+更新日期：2026-11-15。源码版本 v0.6.1（[说明 / Release notes](releases/v0.6.1.md)）；Windows 附件由对应标签工作流构建并发布，实际可下载版本以 [GitHub Releases](https://github.com/tvivt/CodexChatPane/releases) 为准。本文是 CodexChatPane 的全功能入口。功能说明采用本批交付后的行为口径；历史测试、当前检查和实际部署证据单独记录，不以文档更新代表测试通过或 EXE 已更新。
 
 This index covers the complete feature set. Feature descriptions use the delivery behavior; dated test results and actual deployment evidence remain separate. English guides summarize the same behavior; detailed numerical and parser references are in Chinese.
 
@@ -26,7 +26,7 @@ This index covers the complete feature set. Feature descriptions use the deliver
 | 动态列表 | 最近天数、独立标题搜索、手动加入/移出；状态单选与 ALL 显示全部；项目过滤多选；P 项目列显隐、独立项目排序与漏斗；窄栏更多菜单、开启即定位的文件夹联动 | [主界面](usage.zh-CN.md#2-主界面) |
 | 本地组织 | 多层 Folder、交叉 Group、Star、顺序、折叠、多选、拖动及本地回收；不改真实项目目录 | [常用操作](usage.zh-CN.md#3-常用操作)、[菜单](usage.zh-CN.md#6-右键菜单速查) |
 | 分栏收起 | Projects 与 Chats 各自关闭、各自展开，恢复保留内容状态 | [主界面](usage.zh-CN.md#2-主界面) |
-| 状态与诊断 | 待回答 `?` 优先于完成待查看、工作中、已读；错误/重连诊断、执行计时、活动日期；回答后恢复实际状态 | [产品状态](product.zh-CN.md#5-排序与状态)、[使用](usage.zh-CN.md#2-主界面) |
+| 状态与诊断 | 未读错误优先于待回答 `?`、完成待查看、工作中、已读；已读对话按时间倒序；错误已读后保留标识，解除或下一轮正常时清除 | [产品状态](product.zh-CN.md#5-排序与状态)、[使用](usage.zh-CN.md#2-主界面) |
 | 打开与新建 | Deep Link 定位对话，按项目路径新建；打开文件夹、所属项目、复制标题/链接/诊断 | [Deep Link](integration.zh-CN.md#2-deep-link)、[菜单](usage.zh-CN.md#6-右键菜单速查) |
 | Codex 写操作 | 重命名、Pin、Project Pin、归档/恢复；新旧 MCP 管道发现、能力校验、结果回读 | [App MCP](integration.zh-CN.md#3-codex-app-mcp) |
 | 归档与菜单 | 归档行只显示恢复；面板不透明、不穿透；所有菜单在外部点击或失焦时关闭 | [菜单](usage.zh-CN.md#6-右键菜单速查) |

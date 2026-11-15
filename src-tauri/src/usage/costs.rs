@@ -319,7 +319,15 @@ pub(super) fn candidates(
     )
     .map_err(|e| e.to_string())?;
     let title = crate::source::thread_title_expression(&catalog)?;
-    let mut statement=catalog.prepare(&format!("SELECT id,{title},rollout_path,COALESCE(thread_source,'') FROM threads WHERE COALESCE(thread_source,'') != 'guardian_review' AND (?1 IS NULL OR updated_at>=?1) AND (?2 IS NULL OR created_at<?2) ORDER BY updated_at DESC")).map_err(|e|e.to_string())?;
+    let source = if catalog
+        .prepare("SELECT source FROM threads LIMIT 0")
+        .is_ok()
+    {
+        "source"
+    } else {
+        "NULL"
+    };
+    let mut statement=catalog.prepare(&format!("SELECT id,{title},rollout_path,COALESCE(thread_source,''),{source} FROM threads WHERE COALESCE(thread_source,'') != 'guardian_review' AND (?1 IS NULL OR updated_at>=?1) AND (?2 IS NULL OR created_at<?2) ORDER BY updated_at DESC")).map_err(|e|e.to_string())?;
     let threads = statement
         .query_map(
             params![
@@ -338,13 +346,54 @@ pub(super) fn candidates(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    Ok(threads)
+    // Workers have no separate Pane row, so parent updates must include their descendants.
+    let selected = query.thread_ids.as_ref().map(|ids| {
+        let mut selected: HashSet<_> = ids.iter().cloned().collect();
+        for (id, _, path, _, _) in &threads {
+            if crate::rollout_log::fragment_id(Path::new(path))
+                .is_some_and(|fragment| selected.contains(fragment))
+            {
+                selected.insert(id.clone());
+            }
+        }
+        let parents: Vec<_> = threads
+            .iter()
+            .filter_map(|(id, _, _, _, source)| {
+                let value: serde_json::Value = serde_json::from_str(source.as_deref()?).ok()?;
+                let parent = value["parent_thread_id"]
+                    .as_str()
+                    .or_else(|| value["subagent"]["thread_spawn"]["parent_thread_id"].as_str())
+                    .or_else(|| {
+                        value["source"]["subagent"]["thread_spawn"]["parent_thread_id"].as_str()
+                    })?;
+                Some((id, parent.to_owned()))
+            })
+            .collect();
+        loop {
+            let before = selected.len();
+            for (id, parent) in &parents {
+                if selected.contains(parent) {
+                    selected.insert((*id).clone());
+                }
+            }
+            if before == selected.len() {
+                break;
+            }
+        }
+        selected
+    });
+    Ok(threads
+        .into_iter()
+        .filter(|(id, _, _, _, _)| selected.as_ref().is_none_or(|ids| ids.contains(id)))
+        .map(|(id, title, path, kind, _)| (id, title, path, kind))
+        .collect())
 }
 
 pub fn index(
@@ -383,16 +432,7 @@ fn index_shared(
     if super::context::identity(home)? != identity {
         return Err("账号或日志来源已切换，停止旧索引".into());
     }
-    let threads: Vec<_> = candidates(home, query)?
-        .into_iter()
-        .filter(|(id, _, path, _)| {
-            query.thread_ids.as_ref().is_none_or(|ids| {
-                ids.contains(id)
-                    || crate::rollout_log::fragment_id(Path::new(path))
-                        .is_some_and(|fragment| ids.iter().any(|id| id == fragment))
-            })
-        })
-        .collect();
+    let threads = candidates(home, query)?;
     let mut db = database(home)?;
     let projects: HashMap<_, _> = snapshot
         .into_iter()
@@ -2356,6 +2396,95 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn incremental_parent_refresh_indexes_new_and_nested_workers() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        super::super::context::confirm(dir.path(), Some("test-account")).unwrap();
+        let catalog = Connection::open(dir.path().join("state_5.sqlite")).unwrap();
+        catalog.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,rollout_path TEXT,model TEXT,cwd TEXT,archived INTEGER,created_at INTEGER,updated_at INTEGER,thread_source TEXT,source TEXT);").unwrap();
+        let query = Query {
+            thread_ids: Some(vec!["main".into()]),
+            ..Default::default()
+        };
+        for (id, parent) in [
+            ("main", None),
+            ("child", Some("main")),
+            ("leaf", Some("child")),
+            ("other", None),
+        ] {
+            let path = dir.path().join(format!("{id}.jsonl"));
+            let source = parent
+                .map(|parent| json!({"subagent":{"thread_spawn":{"parent_thread_id":parent}}}));
+            let records = [
+                json!({"type":"session_meta","payload":{"id":id,"source":source,"thread_source":if parent.is_some(){"subagent"}else{"user"}}}),
+                json!({"type":"turn_context","payload":{"turn_id":"own","model":"gpt-6.1-sol"}}),
+                json!({"timestamp":"2026-10-23T01:00:00Z","type":"token_usage_record","payload":{"thread_id":id,"turn_id":"own","response_id":"request","usage":{"input_tokens":100,"cached_input_tokens":90,"output_tokens":10,"reasoning_output_tokens":5,"input_tokens_details":{"cache_write_tokens":0}}}}),
+            ];
+            std::fs::write(
+                &path,
+                records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+            )
+            .unwrap();
+            catalog
+                .execute(
+                    "INSERT INTO threads VALUES(?1,?1,?2,'gpt-6.1-sol','',0,1,2,?3,?4)",
+                    params![
+                        id,
+                        path.to_string_lossy(),
+                        if parent.is_some() { "subagent" } else { "user" },
+                        source.map(|v| v.to_string())
+                    ],
+                )
+                .unwrap();
+            if id == "main" {
+                index(dir.path(), None, &query, |_, _| {}).unwrap();
+                assert_eq!(
+                    report(dir.path(), Query::default())
+                        .unwrap()
+                        .totals
+                        .requests,
+                    1
+                );
+            }
+        }
+        index(dir.path(), None, &query, |_, total| assert_eq!(total, 3)).unwrap();
+        let value = report(
+            dir.path(),
+            Query {
+                group: Some("chat".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(value.rows.len(), 1);
+        assert_eq!(value.rows[0].thread_id.as_deref(), Some("main"));
+        assert_eq!(value.totals.requests, 3);
+        assert_eq!(value.totals.subagent_requests, 2);
+        index(dir.path(), None, &query, |_, _| {}).unwrap();
+        assert_eq!(
+            report(dir.path(), Query::default())
+                .unwrap()
+                .totals
+                .requests,
+            3,
+            "unchanged family refresh never duplicates usage"
+        );
+        let leaf = candidates(
+            dir.path(),
+            &Query {
+                thread_ids: Some(vec!["leaf".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            leaf.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(),
+            vec!["leaf"],
+            "child changes do not scan ancestors or siblings"
+        );
+    }
+
     #[test]
     fn indexes_compressed_own_usage_and_refreshes_replacements() {
         use serde_json::json;

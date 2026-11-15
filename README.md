@@ -10,11 +10,11 @@ CodexChatPane is a chat sidebar for Codex Desktop on Windows. When you work on s
 
 ## Recent activity · See which chats need attention
 
-See chats from the last few days across projects. When sorted by status, chats waiting for an answer appear first with `?`, followed by finished chats you have not viewed, running chats, and read chats.
+See chats from the last few days across projects. Status order puts unread errors first, followed by questions `?`, finished unread chats, running chats and read chats. Read chats use conversation time, newest first. Acknowledging an error retains its current diagnostic icon; recovery or a healthy next turn clears it.
 
 Adjust the number of days, manually include or exclude chats, filter multiple projects, group by project, then sort by status or chat title.
 
-Status icons use a single selection, with ALL selected by default. Click a state to show it, or ALL to show every state. Project filtering supports multiple selections. Search recent chat titles independently. P toggles the project column, with separate project sorting and filtering controls. Enable folder linkage to locate the selected chat immediately. On narrow panes, additional tools move into More while all five status controls remain visible.
+Status icons use a single selection, with ALL selected by default. Click a state to show it, or ALL to show every state. The red warning icon filters chats with errors. Project filtering supports multiple selections. Search recent chat titles independently. P toggles the project column, with separate project sorting and filtering controls. Enable folder linkage to locate the selected chat immediately. On narrow panes, additional tools move into More while all six status controls remain visible.
 
 ## Projects · Organize work by project
 
@@ -32,8 +32,8 @@ Collapse and expand the Projects and Chats panes independently to keep the lists
 
 - **Selected-chat metrics**: The bottom bar shows values such as `1.8s·62t/s·93%`: first-token latency, estimated generation speed, and input cache hit rate. Σ is the estimated total speed of running chats; hover to see each chat's speed.
 - **Turn details**: Open Chat details from the context menu to inspect each turn's model, input and output Tokens, cache usage and speed, along with activity counts, tools and subagents.
-- **Quotas and periods**: Check remaining 5h/W quota, reset countdowns, reset-card counts and expiry information. Click the quota area for period history and quota remaining before each reset. It opens with the current period plus five recent periods, with ten more available at a time.
-- **Usage and cost**: Trend charts use different colors for each model and switch between Tokens and API-equivalent cost. Summarize by project, chat or date, then expand a chat to inspect turns and subagent usage. API-equivalent cost is an estimate, not your subscription bill.
+- **Quotas and periods**: Check remaining 5h/W quota, reset countdowns, reset-card counts and expiry information. Click the quota area for period history, quota remaining before each reset and each period's API-equivalent cost. It opens with the current period plus five recent periods, with ten more available at a time.
+- **Usage and cost**: Trend charts use different colors for each model and switch between Tokens and API-equivalent cost. Summarize by project, chat or date, then expand a chat to inspect turns and subagent usage. Parent updates include descendant workers and refresh expanded details; selected time ranges still apply to each request. API-equivalent cost is an estimate, not your subscription bill.
 
 ## Get started
 
@@ -49,7 +49,7 @@ This is an experimental personal project, not an official Codex Desktop componen
 | Complete feature index | [Documentation](doc/README.md) |
 | Latency, speed, and statistics definitions (Chinese) | [Conversation metrics](doc/conversation-metrics.zh-CN.md) |
 | Quotas, consumption, and cost estimates (Chinese) | [Usage and consumption](doc/usage-history.zh-CN.md) |
-| v0.6.0 changes | [Release notes](doc/releases/v0.6.0.md) |
+| v0.6.1 changes | [Release notes](doc/releases/v0.6.1.md) |
 | Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
 ## Data and safety

@@ -193,7 +193,7 @@ function saveFolders() {
   if (nativeInvoke && !nativeLoaded) return;
   const savedChats = {...folderPreferences.chats};
   for (const chat of chats) {
-    if (chat.folder || chat.starred) savedChats[chat.id] = {folder:chat.folder, starred:chat.starred, manualOrder:chat.manualOrder};
+    if (chat.folder || chat.starred || chat.errorReadKey) savedChats[chat.id] = {folder:chat.folder, starred:chat.starred, manualOrder:chat.manualOrder, ...(chat.errorReadKey ? {errorReadKey:chat.errorReadKey} : {})};
     else delete savedChats[chat.id];
   }
   folderPreferences = {
@@ -357,7 +357,15 @@ function nativeProject(project, index, previous) {
   };
 }
 
-const chatRegion = chat => chat.waitingForInput ? 'waiting' : chat.working ? 'working' : chat.codexUnread === true ? 'unread' : 'read';
+function chatErrorKey(chat) {
+  const issue = chatDiagnostic(chat);
+  return issue && issue.severity !== 'warning' ? JSON.stringify([chat.turnId || '', issue.kind || 'other', issue.source || '', issue.at || chat.errorAt || chat.activityAt || 0]) : '';
+}
+const chatRegion = chat => {
+  const error = Boolean(chatErrorKey(chat));
+  if (error && !chat.errorSeen) return 'error';
+  return chat.waitingForInput ? 'waiting' : chat.working ? 'working' : chat.codexUnread === true && !error ? 'unread' : 'read';
+};
 function nativeChat(chat, index, previous) {
   previous ||= folderPreferences.chats?.[chat.id];
   const timelineAt = chat.activityAt || chat.lastUserMessageAt || chat.updatedAt || chat.createdAt;
@@ -371,12 +379,17 @@ function nativeChat(chat, index, previous) {
   const openedAt = previous?.codexUnread === true && codexUnread === false ? Date.now() : previous?.openedAt || 0;
   const failed = chat.executionStatus === "failed";
   const completed = chat.executionStatus === "completed";
-  const sourceChanged = !previous || previous.executionStatus !== chat.executionStatus || previous.activityAt !== activityAt;
+  const sourceChanged = !previous || previous.turnId !== chat.turnId || previous.executionStatus !== chat.executionStatus || previous.activityAt !== activityAt;
   const diagnostic = chat.diagnostic || (failed ? {kind: "other", severity: "error", message: t("Codex 返回失败，但未记录错误原因"), at: activityAt, source: "thread-history"} : null);
   const localDiagnostic = !sourceChanged ? previous?.localDiagnostic || null : null;
+  const errorReadKey = chatErrorKey({diagnostic,localDiagnostic,turnId:chat.turnId,activityAt});
+  const observed = previous?.id && previous.activitySynced !== false;
+  const sameError = observed && errorReadKey === chatErrorKey(previous);
+  const readConfirmed = codexUnread === false && (!observed || sameError && previous.codexUnread === true);
+  const errorSeen = Boolean(errorReadKey && (previous?.errorReadKey === errorReadKey || sameError && previous.errorSeen || readConfirmed));
   const working = Boolean(chat.working);
   const waitingForInput = Boolean(chat.waitingForInput);
-  const region = chatRegion({working, codexUnread, waitingForInput});
+  const region = chatRegion({working, codexUnread, waitingForInput,diagnostic,localDiagnostic,errorSeen});
   return {
     id: chat.id,
     projectId: chat.projectId,
@@ -406,7 +419,8 @@ function nativeChat(chat, index, previous) {
     localDiagnostic,
     error: Boolean(diagnostic || localDiagnostic),
     errorAt: diagnostic?.at || localDiagnostic?.at || 0,
-    errorSeen: diagnostic ? diagnostic.severity !== "warning" && codexUnread === false : !sourceChanged && previous?.errorSeen || false,
+    errorSeen,
+    errorReadKey:errorSeen ? errorReadKey : '',
     openedAt,
     region,
     regionEnteredAt: previous?.region == null || previous?.activitySynced===false ? previous?.regionEnteredAt || activityAt || 0 : previous.region === region ? previous.regionEnteredAt || 0 : Date.now(),
@@ -481,7 +495,6 @@ async function loadNativeSnapshot(catalogOnly = true) {
       const previousById = nativeLoaded;
       projects = snapshot.projects.map((project, index) => nativeProject(project, index, previousById ? previousProjects.get(project.id) : folderPreferences.projects?.[project.id]));
       chats = snapshot.chats.map((chat, index) => nativeChat(chat, index, previousById ? previousChats.get(chat.id) : folderPreferences.chats?.[chat.id]));
-      if (state.recentProjectSort === 'custom' || state.recentProjectOrder.length) syncRecentProjectOrder();
       state.selectedProjectIds = new Set([...state.selectedProjectIds].filter(id => projects.some(project => project.id === id)));
       state.selectedChatIds = new Set([...state.selectedChatIds].filter(id => chats.some(chat => chat.id === id)));
       state.projectId = projects.some(project => project.id === state.projectId) ? state.projectId : projects[0]?.id || '';
@@ -630,6 +643,7 @@ const projectFolders = project => Array.isArray(project?.folders) && project.fol
 const esc = value => String(value).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]);
 function projectRegion(project) {
   const rows = chats.filter(chat => chat.projectId === project.id && !effectiveReasons(chat).length);
+  if (rows.some(chat => chatRegion(chat) === 'error')) return 'error';
   if (rows.some(chat => chat.waitingForInput)) return 'waiting';
   if (rows.some(chat => chatRegion(chat) === 'unread')) return 'unread';
   if (rows.some(chat => chat.working)) return 'working';
@@ -657,7 +671,7 @@ function sortProjects(rows) {
     const direction = sort === 'desc' ? -1 : 1;
     return [...ranked].sort((a, b) => direction * projectLabel(a).localeCompare(projectLabel(b), language()) || a.id.localeCompare(b.id));
   }
-  const rank = project => project.synthetic ? -1 : ({waiting:0,unread:1,working:2,read:3})[project.region || 'read'];
+  const rank = project => project.synthetic ? -1 : ({error:0,waiting:1,unread:2,working:3,read:4})[project.region || 'read'];
   return [...ranked].sort((a, b) => rank(a) - rank(b) || regionTimeCompare(a, b) || a.id.localeCompare(b.id));
 }
 function pinFirst(rows, isPinned) {
@@ -1648,10 +1662,37 @@ document.addEventListener("mousedown", event => {
   void windowAction(event.detail === 2 ? "toggleMaximize" : "startDragging");
 });
 
+let recentExpiryTimer = 0;
+let recentWindowSignature = '';
 function projectRecentBaseChats() {
   const manualOnly = state.chatDays === 0;
   const cutoff = Date.now() - state.chatDays * 86400000;
   return chats.filter(chat => !effectiveReasons(chat).length && !state.recentExcludedChatIds.has(chat.id) && (manualOnly ? state.recentIncludedChatIds.has(chat.id) : chat.timelineAt >= cutoff || state.recentIncludedChatIds.has(chat.id)));
+}
+function syncRecentExpiry(rows = projectRecentBaseChats()) {
+  clearTimeout(recentExpiryTimer);
+  recentExpiryTimer = 0;
+  recentWindowSignature = JSON.stringify(rows.map(chat=>chat.id));
+  if (isAuxiliaryWindow || document.hidden || !state.chatDays) return;
+  let next = Infinity;
+  for (const chat of rows) {
+    if (!state.recentIncludedChatIds.has(chat.id) && Number.isFinite(chat.timelineAt)) {
+      next = Math.min(next, chat.timelineAt + state.chatDays * 86400000 + 1);
+    }
+  }
+  if (Number.isFinite(next)) recentExpiryTimer = setTimeout(refreshRecentWindow, Math.min(2147483647, Math.max(1, next - Date.now())));
+}
+function refreshRecentWindow() {
+  clearTimeout(recentExpiryTimer);
+  recentExpiryTimer = 0;
+  if (isAuxiliaryWindow || document.hidden) return;
+  if (sourceRefreshBlocked()) {
+    recentExpiryTimer = setTimeout(refreshRecentWindow, 250);
+    return;
+  }
+  const rows = projectRecentBaseChats();
+  if (JSON.stringify(rows.map(chat=>chat.id)) !== recentWindowSignature) render();
+  else syncRecentExpiry(rows);
 }
 function recentProjectOptions() {
   const ids = new Set(projectRecentBaseChats().map(chat => chat.projectId));
@@ -1666,13 +1707,14 @@ function projectRecentChats() {
 }
 const recentStatusOptions = [
   ['all', '全部', icon('list')],
+  ['error', '出错', icon('alert')],
   ['waiting', '待回答', icon('question')],
   ['unread', '待查看', icon('dot')],
   ['working', '工作中', icon('dots')],
   ['read', '已读', icon('check')],
 ];
 function recentStatusButtons(rows) {
-  const counts = {all:rows.length, waiting:0, unread:0, working:0, read:0};
+  const counts = {all:rows.length, waiting:0, unread:0, working:0, error:0, read:0};
   for (const chat of rows) counts[chatRegion(chat)]++;
   return recentStatusOptions.map(([key,label,glyph]) => {
     const selected = key === state.recentStatus;
@@ -1685,8 +1727,16 @@ function projectRecentListMarkup(rows = projectRecentChats()) {
 }
 
 let recentHeaderObserver, recentWindowMinimum;
+let recentCountLayoutWidth = 0, recentCountDigits = {};
 function fitRecentHeader(header) {
   if (!header.isConnected || !header.clientWidth) return;
+  for (const button of header.querySelectorAll('.recent-status-filters > button')) {
+    const key = button.dataset.status, reserved = key === 'all' || key === 'read' ? 3 : 2;
+    const digits = Math.max(reserved, button.querySelector('.recent-count').textContent.length);
+    recentCountDigits[key] = recentCountLayoutWidth === header.clientWidth ? Math.max(recentCountDigits[key] || reserved, digits) : digits;
+    button.style.setProperty('--recent-count-width', `${recentCountDigits[key]}ch`);
+  }
+  recentCountLayoutWidth = header.clientWidth;
   const more = header.querySelector('.recent-more'), menu = more.querySelector('.recent-more-menu');
   const projectTools = header.querySelector('.recent-project-tools');
   const controls = [...header.querySelectorAll(':scope > button, .recent-project-tools > button, .project-filter-trigger, .recent-status-filters > button')];
@@ -1726,8 +1776,8 @@ function fitRecentHeader(header) {
   if (more.hidden) more.open = false;
   const visibleProjectButtons = controls.filter(button => projectTools.contains(button) && !overflow.includes(button)).length;
   projectTools.classList.toggle('overflow-tools', !visibleProjectButtons);
-  // Include the spacer, the end divider and the padding inside the status group.
-  const gaps = controls.length - overflow.length - Math.max(0,visibleProjectButtons-1) + Number(!more.hidden) + 3;
+  // Status spacing is fixed; distribute only the outer toolbar gaps.
+  const gaps = controls.length - overflow.length - Math.max(0,visibleProjectButtons-1) - recentStatusOptions.length + Number(!more.hidden) + 3;
   header.style.setProperty('--recent-gap', Math.min(4,Math.max(0,(available-used-1)/gaps))+'px');
   menu.replaceChildren();
   for (const button of overflow) {
@@ -1855,9 +1905,9 @@ function nameSortButton(field, action) {
   const title = value === 'off' ? t('按名称升序') : value === 'asc' ? t('名称升序，点击改为降序') : t('名称降序，点击恢复活动时间顺序');
   return ui`<button class="icon-button sort-control ${value !== 'off' ? 'active' : ''}" data-action="${esc(action)}" aria-pressed="${value !== 'off'}" title="${title}" aria-label="${title}">${nameSortGlyph(value)}</button>`;
 }
-function syncRecentProjectOrder() {
-  const seed = projectRecentChats().map(chat=>chat.projectId);
-  state.recentProjectOrder = [...new Set([...state.recentProjectOrder,...seed,...projects.map(project=>project.id)].filter(id=>typeof id==='string'&&id.length>0&&id.length<=4096))];
+function syncRecentProjectOrder(rows = projectRecentBaseChats()) {
+  const seed = rows.map(chat=>chat.projectId);
+  state.recentProjectOrder = [...new Set([...state.recentProjectOrder,...seed].filter(id=>typeof id==='string'&&id.length>0&&id.length<=4096))];
 }
 function moveRecentProject(id, targetId, mode) {
   if (id === targetId || !['before','after'].includes(mode)) return false;
@@ -1962,9 +2012,9 @@ function projectPinButton(project) {
 }
 const chatPriority = chat => chat.codexPinned ? 0 : 1;
 const regionTimeCompare = (a, b) => (b.regionEnteredAt || 0) - (a.regionEnteredAt || 0);
-const chatRegionRank = chat => ({waiting:0,unread:1,working:2,read:3})[chatRegion(chat)];
+const chatRegionRank = chat => ({error:0,waiting:1,unread:2,working:3,read:4})[chatRegion(chat)];
 const receivedOrderAt = chat => chat.regionEnteredAt || 0;
-const statusTimeCompare = (a,b) => chatRegionRank(a) - chatRegionRank(b) || regionTimeCompare(a, b) || a.id.localeCompare(b.id);
+const statusTimeCompare = (a,b) => chatRegionRank(a) - chatRegionRank(b) || (chatRegion(a) === 'read' ? (leadTimestamp(b) || 0) - (leadTimestamp(a) || 0) : regionTimeCompare(a, b)) || a.id.localeCompare(b.id);
 const regionOrder = rows => [...rows].sort(statusTimeCompare);
 const timelineDayTone = day => day === 0 ? "time-today" : day === 1 ? "time-yesterday" : day === 2 ? "time-before" : day <= 7 ? "time-week" : day <= 30 ? "time-month" : "time-old";
 const chatStatusBar = (chat, manual = true) => ui`<span class="row-bar chat-status-bar ${manual && state.recentIncludedChatIds.has(chat.id) ? 'manual-include' : manual && state.recentExcludedChatIds.has(chat.id) ? 'manual-exclude' : timelineDayTone(chat.dayOffset)}" aria-hidden="true"></span>`;
@@ -1972,12 +2022,12 @@ const projectTimeBar = rows => chatStatusBar(rows.reduce((latest, chat) => !late
 const statusLead = inner => ui`<span class="row-status">${inner || ''}</span>`;
 
 function activitySummary(rows) {
-  const waiting = rows.filter(chat => chat.waitingForInput).length;
-  const working = rows.filter(chat => chat.working && !chat.waitingForInput).length;
-  const attention = rows.filter(chat => chat.attentionAt && !chat.waitingForInput).length;
-  const errors = rows.filter(chat => chat.error).length;
-  const error = rows.filter(chat => chat.error && !chat.errorSeen).length;
-  const acknowledgedError = rows.some(chat => chat.error && chat.errorSeen);
+  const waiting = rows.filter(chat => chatRegion(chat) === 'waiting').length;
+  const working = rows.filter(chat => chatRegion(chat) === 'working').length;
+  const attention = rows.filter(chat => chat.attentionAt && chatRegion(chat) === 'unread').length;
+  const errors = rows.filter(chat => chatErrorKey(chat)).length;
+  const error = rows.filter(chat => chatRegion(chat) === 'error').length;
+  const acknowledgedError = rows.some(chat => chatErrorKey(chat) && chat.errorSeen);
   const completedAt = rows.reduce((latest, chat) => Math.max(latest, chat.completedAt || 0), 0);
   const age = latestTimelineAt() - completedAt;
   const heat = !completedAt ? "old" : age <= 21600000 ? "recent" : age <= 172800000 ? "aging" : "old";
@@ -2098,6 +2148,7 @@ function chatLeadShowsDuration(chat) {
 }
 function chatWorkStatus(chat) {
   if(chat.activitySynced===false&&!chat.executionStatus&&!chat.working&&!chat.waitingForInput)return `<span class="chat-work-status" title="${esc(t('状态尚未同步'))}" aria-label="${esc(t('状态尚未同步'))}">·</span>`;
+  if (chatErrorKey(chat)) return diagnosticIcon('chat-work-status',chat);
   if (chat.waitingForInput) return ui`<span class="chat-work-status waiting-input" title="${t('待回答')}" aria-label="${t('待回答')}">?</span>`;
   const issue = chatDiagnostic(chat);
   return issue ? diagnosticIcon('chat-work-status',chat) : chat.working ? workingIndicator('chat-work-status',chat) : chat.attentionAt ? ui`<span class="chat-work-status attention" aria-label="${t('完成待查看')}"></span>` : '';
@@ -2200,7 +2251,7 @@ function diagnosticTooltip(chat) {
   const issue = chatDiagnostic(chat);
   if (!issue) return "";
   const label = t((DIAGNOSTICS[issue.kind] || DIAGNOSTICS.other)[0]);
-  return [label, issue.message,
+  return [label, issue.message, chat.errorSeen ? t('错误已查看') : '',
     Number.isFinite(issue.retry) ? ui`重试：${issue.retry}${Number.isFinite(issue.maxRetries) ? ui` / ${issue.maxRetries}` : ""}` : "",
     issue.kind === "noResponse" ? ui`已等待：${Math.max(0, Math.floor((executionClockNow - (issue.at - 120000)) / 1000))} 秒` : "",
     Number.isFinite(issue.resetsAt) ? ui`重置：${compactLocalTime(issue.resetsAt * 1000)}` : "",
@@ -2550,6 +2601,9 @@ function render() {
     document.body.classList.add('preview-window');
     return;
   }
+  const recentRows = projectRecentBaseChats();
+  syncRecentProjectOrder(recentRows);
+  syncRecentExpiry(recentRows);
   applyChatLeadWidth();
   state.tab = 'project';
   const content = state.settingsOpen ? renderSettingsPane() : renderProjectPane();
@@ -2624,6 +2678,41 @@ document.addEventListener('click', event => {
 
 let codexActionInFlight = false;
 let codexActionChatId = '';
+async function openChat(chat) {
+  try {
+    if (nativeInvoke) await nativeInvoke('open_chat', {threadId:chat.id});
+    if (chat.localDiagnostic?.source === 'open-chat') {
+      chat.localDiagnostic = null;
+      chat.error = Boolean(chat.diagnostic);
+      chat.errorAt = chat.diagnostic?.at || 0;
+      if (!chat.error) { chat.errorSeen = false; chat.errorReadKey = ''; }
+    }
+    const key = chatErrorKey(chat);
+    if (key) {
+      chat.errorReadKey = key;
+      chat.errorSeen = true;
+      chat.codexUnread = false;
+      chat.attentionAt = 0;
+      chat.region = chatRegion(chat);
+      chat.regionEnteredAt = Date.now();
+    }
+    if (!nativeInvoke) chat.attentionAt = 0;
+    else {
+      nativeSourceSignature = '';
+      void loadNativeSnapshot();
+    }
+  } catch (error) {
+    chat.error = true;
+    chat.errorSeen = false;
+    chat.errorReadKey = '';
+    chat.errorAt = Date.now();
+    chat.localDiagnostic = {kind:'other',severity:'error',message:String(error),at:chat.errorAt,source:'open-chat'};
+    chat.region = chatRegion(chat);
+    chat.regionEnteredAt = chat.errorAt;
+    showToast(t('无法请求 Codex 打开'),String(error),'error');
+  }
+  render();
+}
 async function runCodexChatAction(chat, action, title = null) {
   const unavailable = codexActionUnavailable(chat, action);
   if (unavailable) { showToast(t('操作不可用'), unavailable, 'error'); return; }
@@ -2743,6 +2832,7 @@ function hideContextMenu() {
 }
 if (nativeWindow) void nativeWindow.onFocusChanged(({payload:focused}) => {
   if (!focused) hideContextMenu();
+  else if (!isAuxiliaryWindow) refreshRecentWindow();
 });
 
 function createProjectFolder(parent = '', value = '') {
@@ -3364,7 +3454,7 @@ function validateConfiguration(input) {
     const parsed = JSON.parse(value);
     let valid = true;
     if (key === PREFERENCES_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => browserPreferenceFields.includes(field) && (['chatProjectFilter','recentProjectFilter'].includes(field) ? v === null || strings(v) : ['openFolders','openChatFolders','recentProjectOrder'].includes(field) ? strings(v) : typeof v === typeof state[field] && (typeof v !== 'number' || Number.isFinite(v) && v >= (['projectRecentTimeWidth','projectRecentProjectWidth','projectChatTimeWidth','chatTimeWidth','chatProjectWidth'].includes(field) ? 0 : 1) && v < 100000)));
-    if (key === FOLDERS_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => ['projects','chats'].includes(field) ? object(v) && Object.values(v).every(item => object(item) && typeof item.folder === 'string' && Object.entries(item).every(([k,x]) => k === 'folder' ? x.length <= 4096 : k === 'folders' ? strings(x) : ['recycled','starred'].includes(k) ? typeof x === 'boolean' : k === 'region' ? typeof x === 'string' && x.length <= 32 : ['order','manualOrder','regionEnteredAt'].includes(k) && Number.isFinite(x))) : ['localProjectFolders','localChatFolders','recentIncludedChatIds','recentExcludedChatIds','recycledChatFolders','openFolders','openChatFolders','starredProjectIds','pinnedProjectIds'].includes(field) && strings(v));
+    if (key === FOLDERS_KEY) valid = object(parsed) && Object.entries(parsed).every(([field,v]) => ['projects','chats'].includes(field) ? object(v) && Object.values(v).every(item => object(item) && typeof item.folder === 'string' && Object.entries(item).every(([k,x]) => k === 'folder' ? x.length <= 4096 : k === 'folders' ? strings(x) : k === 'errorReadKey' ? typeof x === 'string' && x.length <= 4096 : ['recycled','starred'].includes(k) ? typeof x === 'boolean' : k === 'region' ? typeof x === 'string' && x.length <= 32 : ['order','manualOrder','regionEnteredAt'].includes(k) && Number.isFinite(x))) : ['localProjectFolders','localChatFolders','recentIncludedChatIds','recentExcludedChatIds','recycledChatFolders','openFolders','openChatFolders','starredProjectIds','pinnedProjectIds'].includes(field) && strings(v));
     if (key === 'CodexChatPane.dynamic-v1') valid = object(parsed) && ['projects','chats'].every(kind => Array.isArray(parsed.groups?.[kind]) && parsed.groups[kind].every(g=>object(g) && typeof g.id==='string' && typeof g.name==='string' && g.name.length<=4096) && object(parsed.members?.[kind]) && Object.values(parsed.members[kind]).every(g=>typeof g==='string' || strings(g))) && object(parsed.views) && Object.values(parsed.views).every(v=>object(v) && strings(v.order) && strings(v.groups) && strings(v.collapsed) && (v.orders === undefined || object(v.orders) && Object.values(v.orders).every(strings)));
     if (key === PREFERENCES_KEY && CHAT_SORT_FIELDS.some(field => parsed[field] != null && parsed[field] !== 'status-desc' && !CHAT_SORT_VALUES.includes(parsed[field]))) valid = false;
     if (!valid) throw new Error(t('工具配置格式无效'));
@@ -3421,9 +3511,7 @@ async function handleMenuAction(button) {
   if (action === 'choose-target') { showTargetPicker(button); return; }
   if (action === 'copy') { await navigator.clipboard.writeText(copyText); return; }
   if (action === 'open') {
-    await nativeInvoke?.('open_chat',{threadId:id});
-    nativeSourceSignature = '';
-    void loadNativeSnapshot();
+    if (chat) await openChat(chat);
     return;
   }
   if (action === 'codex-action') {
@@ -4022,24 +4110,7 @@ document.addEventListener("click", async event => {
     } else if (state.chatTimelineLinked) {
       fromProjectTimeline ? revealChatInStructure(chat) : revealChatInTimeline(chat);
     }
-    if (chat.error && !chat.diagnostic && (!nativeInvoke || chat.executionStatus !== "failed")) chat.errorSeen = true;
-    {
-      try {
-        if (nativeInvoke) {
-          await nativeInvoke("open_chat", { threadId: chat.id });
-          nativeSourceSignature = '';
-          void loadNativeSnapshot();
-        }
-        if (!nativeInvoke) chat.attentionAt = 0;
-      } catch (error) {
-        chat.error = true;
-        chat.errorSeen = false;
-        chat.errorAt = Date.now();
-        chat.localDiagnostic = {kind: "other", severity: "error", message: String(error), at: chat.errorAt, source: "open-chat"};
-        showToast(t("无法请求 Codex 打开"), String(error), "error");
-      }
-    }
-    render();
+    await openChat(chat);
     return;
   }
 });
@@ -4730,6 +4801,7 @@ async function listenForSourceChanges() {
 }
 document.addEventListener('visibilitychange', () => {
   if (isMetricsWindow || isUsageWindow) return;
+  if (!isAuxiliaryWindow) refreshRecentWindow();
   syncLiveTimers();
   if (!document.hidden && nativeInvoke) {
     chats.filter(chat => chat.working && (!isPreviewWindow || chat.id === previewChatId)).forEach(chat => pendingActivityIds.add(chat.id));

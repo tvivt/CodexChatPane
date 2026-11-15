@@ -202,6 +202,7 @@ try{
   assert.ok(dialog.open);
   assert.ok(dialog.innerHTML.indexOf('data-usage-action="resets"')<dialog.innerHTML.indexOf('data-usage-action="consumption"'),'reset history is the first tab');
   assert.ok(dialog.innerHTML.includes('W 额度重置历史'),'quota details opens on reset history by default');
+  assert.ok(dialog.innerHTML.includes('<th>总 Token</th><th>API 等价</th><th>详情</th>'),'cycle cost appears immediately before details');
   const resetRow=id=>dialog.innerHTML.match(new RegExp(`<tr data-usage-cycle="${id}">(.*?)</tr>`))?.[1];
   assert.ok(resetRow(cycle.id).includes('<td>提前重置</td>')&&!resetRow(cycle.id).includes('<td>重置卡</td>'),'a historical row labels the event that ended it');
   assert.ok(resetRow('current').includes('<td>进行中</td>'),'the current period remains ongoing');
@@ -435,6 +436,20 @@ try{
   await click('close');
 
   const dashboardCalls=[];
+  let refreshedFamily=false;
+  const familyUpdating=createUsageView({invoke:async(command,args)=>{
+    if(command==='get_quota_history')return {cycles:allCycles};
+    if(args?.query?.group==='chat')return chatSample;
+    if(args?.query?.group==='round')return roundSample;
+    if(args?.query?.group==='agent')return {...agentSample,rows:[{...agentSample.rows[0],label:refreshedFamily?'Updated worker':'Old worker'}]};
+    return sample;
+  },nativeWindow:{close(){}}});
+  await familyUpdating.open();await click('consumption');await click('group',{key:'chat'});await click('expand-chat',{id:'chat-1'});
+  assert.ok(dialog.innerHTML.includes('Old worker'));
+  refreshedFamily=true;familyUpdating.changed({threads:['chat-1']});await waitUpdates();
+  assert.ok(dialog.innerHTML.includes('Updated worker')&&!dialog.innerHTML.includes('Old worker'),'source changes refresh already expanded child details');
+  await click('close');
+
   const dashboardModels=Array.from({length:7},(_,i)=>({model:`model-${i}`,totals:{...totals,input:(i+1)*100,output:(i+1)*10,cached:i===0?100:0,costUsd:i===6?0:(7-i)*.01,unpricedRequests:i===6?1:0}}));
   const dashboardTotals=dashboardModels.reduce((sum,m)=>{for(const key of ['input','output','cached','reasoning','costUsd','unpricedRequests'])sum[key]+=m.totals[key];return sum;},{...totals,input:0,output:0,cached:0,reasoning:0,costUsd:0,unpricedRequests:0,requests:7,subagentRequests:1});
   const dashboardRow={...row,totals:dashboardTotals,modelTotals:dashboardModels};
@@ -553,6 +568,9 @@ try{
   automatic[1](sample);await tick();
   assert.equal(automatic.length,2,'offscreen historical periods are not indexed');
   assert.ok(dialog.innerHTML.includes('title="110">110</td>'),'loaded totals are displayed directly in collapsed rows');
+  const loadedCycle=dialog.innerHTML.match(new RegExp(`<tr data-usage-cycle="${cycle.id}">(.*?)</tr>`,'s'))?.[1];
+  assert.ok(loadedCycle?.includes('≈$0.0100'),'cycle costs reuse lazily loaded totals');
+  assert.ok(dialog.innerHTML.includes('<td colspan="6">'),'expanded details span the new cost column');
   visible.clear();visible.add('oldest');
   const activeObserver=observers.at(-1);
   activeObserver.callback(activeObserver.rows.map(target=>({target,isIntersecting:visible.has(target.dataset.usageCycle)})));
@@ -572,11 +590,11 @@ try{
   const pendingView=createUsageView({invoke:async(command)=>command==='get_quota_history'?{cycles:[current,pendingCycle,incompleteNatural]}:sample,nativeWindow:{close(){}}});
   await pendingView.open();
   const pendingRow=dialog.innerHTML.match(/<tr data-usage-cycle="pending">(.*?)<\/tr>/)?.[1];
-  assert.ok(pendingRow.includes('<td>自然重置(待确认)</td>')&&pendingRow.includes('预计 '));
+  assert.ok(pendingRow.includes('<td>自然重置</td>')&&pendingRow.includes('预计 '));
   const naturalRow=dialog.innerHTML.match(/<tr data-usage-cycle="old">(.*?)<\/tr>/)?.[1];
   assert.ok(naturalRow.includes('<td>自然重置</td>')&&!naturalRow.includes('待确认'),'incomplete coverage does not imply an unconfirmed end');
   await click('expand-reset',{id:'pending'});
-  assert.ok(dialog.innerHTML.includes('重置方式 自然重置(待确认)')&&dialog.innerHTML.includes('预计结束 ')&&dialog.innerHTML.includes('预计周期 '),'details label both the uncertain method and estimated time/duration');
+  assert.ok(dialog.innerHTML.includes('重置方式 自然重置')&&!dialog.innerHTML.includes('自然重置(待确认)')&&dialog.innerHTML.includes('预计结束 ')&&dialog.innerHTML.includes('预计周期 '),'method has a simple label while estimated time/duration remain explicit');
   await click('cycle',{id:'pending'});
   assert.ok(dialog.innerHTML.includes('含待确认周期，按预计截止统计'),'consumption does not present an estimated range as a confirmed end');
   await click('close');
