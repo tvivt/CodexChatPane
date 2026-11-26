@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+mod catalog_tests;
 mod diagnostics;
 mod questions;
 mod rate_limits;
@@ -28,7 +30,6 @@ const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "rollout_path",
     "source",
     "thread_source",
-    "cwd",
     "project_id",
 ];
 
@@ -46,6 +47,8 @@ pub struct SourceSnapshot {
     pub activity_pending: Vec<String>,
     #[serde(skip)]
     pub(crate) source_identity: Option<(PathBuf, Option<std::time::SystemTime>)>,
+    #[serde(skip)]
+    pub(crate) title_sources: HashMap<String, (String, Option<IndexTitle>)>,
 }
 
 pub(crate) type HistorySummary = (
@@ -204,13 +207,12 @@ struct ThreadRow {
     updated_at: i64,
     archived: bool,
     rollout_path: PathBuf,
-    cwd: String,
     project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct GlobalState {
-    #[serde(rename = "local-projects")]
+    #[serde(rename = "local-projects", default)]
     local_projects: HashMap<String, LocalProject>,
     #[serde(rename = "project-order", default)]
     project_order: Vec<String>,
@@ -282,7 +284,7 @@ pub(crate) fn snapshot_identity() -> Result<(PathBuf, Option<std::time::SystemTi
     snapshot_identity_at(&home.join("state_5.sqlite"), &home)
 }
 
-fn snapshot_identity_at(
+pub(crate) fn snapshot_identity_at(
     database: &Path,
     home: &Path,
 ) -> Result<(PathBuf, Option<std::time::SystemTime>), String> {
@@ -298,6 +300,11 @@ fn snapshot_identity_at(
 pub fn scan_catalog(previous: Option<&SourceSnapshot>) -> Result<SourceSnapshot, String> {
     let home = codex_home()?;
     scan_path_mode(&home.join("state_5.sqlite"), &home, previous, true)
+}
+
+#[cfg(test)]
+pub(crate) fn scan_catalog_at(home: &Path) -> Result<SourceSnapshot, String> {
+    scan_path_mode(&home.join("state_5.sqlite"), home, None, true)
 }
 
 #[cfg(test)]
@@ -342,6 +349,8 @@ fn scan_path_mode(
         unread_thread_ids,
     ) = read_global_state(&home.join(".codex-global-state.json"))?;
     let threads = read_threads(&connection)?;
+    let indexed_titles = read_index_titles(&home.join("session_index.jsonl"))?;
+    let mut title_sources = HashMap::new();
     let history_summaries = previous
         .map(|snapshot| snapshot.history_summaries.clone())
         .unwrap_or_else(|| {
@@ -491,15 +500,6 @@ fn scan_path_mode(
         }
     }
     let known_project_ids: HashSet<String> = projects.iter().map(|row| row.id.clone()).collect();
-    let project_ids_by_path: HashMap<String, String> = projects
-        .iter()
-        .filter_map(|project| {
-            project
-                .path
-                .as_deref()
-                .map(|path| (normalized_path(path), project.id.clone()))
-        })
-        .collect();
     let mut chats = Vec::with_capacity(threads.len());
     let activity_pending = if catalog_only && previous.is_some() {
         threads
@@ -514,6 +514,38 @@ fn scan_path_mode(
     };
 
     for thread in threads {
+        let database_title = thread
+            .name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(thread.title);
+        let old_sources = previous.and_then(|p| p.title_sources.get(&thread.id));
+        let index = indexed_titles
+            .get(&thread.id)
+            .cloned()
+            .or_else(|| old_sources.and_then(|(_, index)| index.clone()));
+        let old_chat = previous.and_then(|p| p.chats.iter().find(|c| c.id == thread.id));
+        let title = match (old_sources, old_chat) {
+            // A rename need not advance the message timestamp. Observe changes in each source.
+            (Some((old_database, old_index)), Some(old_chat))
+                if old_database == &database_title =>
+            {
+                if index.as_ref().map(|i| &i.title) != old_index.as_ref().map(|i| &i.title) {
+                    index
+                        .as_ref()
+                        .map(|i| i.title.clone())
+                        .unwrap_or(database_title.clone())
+                } else {
+                    old_chat.title.clone()
+                }
+            }
+            (Some(_), Some(_)) => database_title.clone(),
+            _ => index
+                .as_ref()
+                .filter(|i| i.at >= seconds_or_millis(thread.updated_at))
+                .map(|i| i.title.clone())
+                .unwrap_or(database_title.clone()),
+        };
+        title_sources.insert(thread.id.clone(), (database_title, index));
         let project_id = (!projectless_thread_ids.contains(&thread.id))
             .then(|| {
                 assignments
@@ -525,11 +557,6 @@ fn scan_path_mode(
                             .project_id
                             .as_ref()
                             .filter(|id| known_project_ids.contains(*id))
-                            .cloned()
-                    })
-                    .or_else(|| {
-                        project_ids_by_path
-                            .get(&normalized_path(&thread.cwd))
                             .cloned()
                     })
             })
@@ -556,10 +583,7 @@ fn scan_path_mode(
             metrics_revision: activity.and_then(|activity| activity.metrics_revision.clone()),
             generation: activity.and_then(|activity| activity.generation.clone()),
             project_id,
-            title: thread
-                .name
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(thread.title),
+            title,
             created_at: seconds_or_millis(thread.created_at),
             updated_at,
             archived: thread.archived,
@@ -655,6 +679,7 @@ fn scan_path_mode(
         history_loaded: !catalog_only || previous.is_some_and(|p| p.history_loaded),
         activity_pending,
         source_identity: Some(identity),
+        title_sources,
     })
 }
 
@@ -1289,8 +1314,16 @@ fn read_global_state(
     ),
     String,
 > {
-    let bytes = fs::read(path).map_err(|error| format!("无法读取 Codex 全局状态：{error}"))?;
-    let state: GlobalState = serde_json::from_slice(&bytes)
+    let mut state = match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
+            .map_err(|error| format!("无法解析 Codex 全局状态：{error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => return Err(format!("无法读取 Codex 全局状态：{error}")),
+    };
+    state.extend(global_state_settings(
+        path.parent().unwrap_or(Path::new(".")),
+    )?);
+    let state: GlobalState = serde_json::from_value(serde_json::Value::Object(state))
         .map_err(|error| format!("无法解析 Codex 全局状态：{error}"))?;
     let order: HashMap<_, _> = state
         .project_order
@@ -1332,6 +1365,79 @@ fn read_global_state(
     ))
 }
 
+// Only these settings affect the catalog; unrelated desktop writes must not trigger scans.
+pub(crate) fn global_state_settings(
+    home: &Path,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let path = home.join(".codex-global-state.sqlite");
+    if !path.is_file() {
+        return Ok(Default::default());
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    let mut statement = connection.prepare("SELECT key,value FROM settings WHERE scope='global' AND key IN ('local-projects','project-order','thread-project-assignments','projectless-thread-ids','pinned-thread-ids','pinned-project-ids','electron-thread-read-state-v1')")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    rows.map(|r| {
+        let (key, value) = r.map_err(|e| e.to_string())?;
+        Ok((
+            key,
+            serde_json::from_str(&value).map_err(|e| e.to_string())?,
+        ))
+    })
+    .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IndexTitle {
+    title: String,
+    at: i64,
+}
+
+fn read_index_titles(path: &Path) -> Result<HashMap<String, IndexTitle>, String> {
+    use std::io::BufRead;
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+        thread_name: String,
+        updated_at: String,
+    }
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(format!("无法读取 Codex 标题索引：{error}")),
+    };
+    let mut titles = HashMap::<String, IndexTitle>::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
+            continue;
+        };
+        let Ok(at) = time::OffsetDateTime::parse(
+            &entry.updated_at,
+            &time::format_description::well_known::Rfc3339,
+        ) else {
+            continue;
+        };
+        if entry.thread_name.trim().is_empty() {
+            continue;
+        }
+        let at = (at.unix_timestamp_nanos() / 1_000_000) as i64;
+        if titles.get(&entry.id).is_none_or(|old| at >= old.at) {
+            titles.insert(
+                entry.id,
+                IndexTitle {
+                    title: entry.thread_name,
+                    at,
+                },
+            );
+        }
+    }
+    Ok(titles)
+}
+
 pub(crate) fn thread_title_expression(connection: &Connection) -> Result<&'static str, String> {
     let columns = connection
         .prepare("PRAGMA table_info(threads)")
@@ -1351,7 +1457,7 @@ pub(crate) fn thread_title_expression(connection: &Connection) -> Result<&'stati
 fn read_threads(connection: &Connection) -> Result<Vec<ThreadRow>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, title, name, created_at, updated_at, archived, rollout_path, cwd, project_id\n             FROM threads\n             WHERE COALESCE(thread_source, '') NOT IN ('guardian_review', 'subagent')\n             ORDER BY updated_at DESC, id",
+            "SELECT id, title, name, created_at, updated_at, archived, rollout_path, project_id\n             FROM threads\n             WHERE COALESCE(thread_source, '') NOT IN ('guardian_review', 'subagent')\n             ORDER BY updated_at DESC, id",
         )
         .map_err(|error| format!("无法读取 Codex Thread schema：{error}"))?;
     let rows = statement
@@ -1364,19 +1470,12 @@ fn read_threads(connection: &Connection) -> Result<Vec<ThreadRow>, String> {
                 updated_at: row.get(4)?,
                 archived: row.get::<_, i64>(5)? != 0,
                 rollout_path: PathBuf::from(row.get::<_, String>(6)?),
-                cwd: row.get(7)?,
-                project_id: row.get(8)?,
+                project_id: row.get(7)?,
             })
         })
         .map_err(|error| format!("无法查询 Codex Chat：{error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("无法解码 Codex Chat：{error}"))
-}
-
-fn normalized_path(path: &str) -> String {
-    path.trim_end_matches(|character| character == '/' || character == '\\')
-        .replace('/', "\\")
-        .to_lowercase()
 }
 
 fn project_path_error(path: Option<&str>) -> Option<String> {
@@ -1426,6 +1525,150 @@ fn seconds_or_millis(value: i64) -> i64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn metadata_regression() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("state_5.sqlite");
+        let db = Connection::open(&database).unwrap();
+        db.execute_batch("CREATE TABLE threads(id TEXT, title TEXT, name TEXT, created_at INTEGER, updated_at INTEGER, archived INTEGER, rollout_path TEXT, cwd TEXT, project_id TEXT, thread_source TEXT, source TEXT DEFAULT 'vscode');
+            INSERT INTO threads VALUES('assigned','Original','Old',1,2,0,'','C:\\Elsewhere',NULL,'user','vscode');
+            INSERT INTO threads VALUES('loose','Loose',NULL,1,2,0,'','C:\\Pane',NULL,'user','vscode');
+            INSERT INTO threads VALUES('path','Path',NULL,1,2,0,'','\\\\?\\C:\\Pane\\',NULL,'user','vscode');").unwrap();
+        fs::write(dir.path().join(".codex-global-state.json"), r#"{"local-projects":{"p":{"name":"Pane","rootPaths":["C:\\Pane"]}},"thread-project-assignments":{"assigned":{"projectId":"old"}},"projectless-thread-ids":[]}"#).unwrap();
+        let settings = Connection::open(dir.path().join(".codex-global-state.sqlite")).unwrap();
+        settings.execute_batch("CREATE TABLE settings(scope TEXT,key TEXT,value TEXT,PRIMARY KEY(scope,key)) WITHOUT ROWID;").unwrap();
+        for (key, value) in [
+            (
+                "thread-project-assignments",
+                r#"{"assigned":{"projectKind":"local","projectId":"p"},"loose":{"projectId":"p"}}"#,
+            ),
+            ("projectless-thread-ids", r#"["loose"]"#),
+        ] {
+            settings
+                .execute("INSERT INTO settings VALUES('global',?1,?2)", [key, value])
+                .unwrap();
+        }
+        let index = dir.path().join("session_index.jsonl");
+        let write_index = |name: &str, at: &str| {
+            fs::write(
+                &index,
+                serde_json::json!({"id":"assigned","thread_name":name,"updated_at":at}).to_string()
+                    + "\n",
+            )
+            .unwrap();
+        };
+        write_index("Old", "1970-01-01T00:00:02Z");
+        let mut snapshot = scan_path_mode(&database, dir.path(), None, true).unwrap();
+        let chat =
+            |s: &SourceSnapshot, id: &str| s.chats.iter().find(|c| c.id == id).unwrap().clone();
+        assert_eq!(chat(&snapshot, "assigned").project_id, "p");
+        assert_eq!(
+            chat(&snapshot, "loose").project_id,
+            "synthetic:uncategorized"
+        );
+        assert_eq!(
+            chat(&snapshot, "path").project_id,
+            "synthetic:uncategorized"
+        );
+        // Rename only: the message timestamp never changes in either arrival order.
+        for index_first in [true, false] {
+            let name = if index_first {
+                "Index first"
+            } else {
+                "State first"
+            };
+            let started = std::time::Instant::now();
+            if index_first {
+                write_index(name, "2026-11-26T00:00:01Z");
+            } else {
+                db.execute("UPDATE threads SET name=?1 WHERE id='assigned'", [name])
+                    .unwrap();
+            }
+            snapshot = scan_path_mode(&database, dir.path(), Some(&snapshot), true).unwrap();
+            assert_eq!(chat(&snapshot, "assigned").title, name);
+            eprintln!(
+                "metadata rename index_first={index_first}: scan {:?}",
+                started.elapsed()
+            );
+            snapshot = scan_path_mode(&database, dir.path(), Some(&snapshot), true).unwrap();
+            assert_eq!(
+                chat(&snapshot, "assigned").title,
+                name,
+                "unrelated refresh must not revert the rename"
+            );
+            if index_first {
+                db.execute("UPDATE threads SET name=?1 WHERE id='assigned'", [name])
+                    .unwrap();
+            } else {
+                write_index(name, "2026-11-26T00:00:02Z");
+            }
+            snapshot = scan_path_mode(&database, dir.path(), Some(&snapshot), true).unwrap();
+            assert_eq!(chat(&snapshot, "assigned").title, name);
+            assert_eq!(chat(&snapshot, "assigned").updated_at, 2000);
+        }
+        // An old duplicate and a partially appended line cannot replace the latest index title.
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&index).unwrap();
+        writeln!(file,"{{\"id\":\"assigned\",\"thread_name\":\"Old\",\"updated_at\":\"1970-01-01T00:00:01Z\"}}\n{{\"id\":").unwrap();
+        let snapshot = scan_path_mode(&database, dir.path(), Some(&snapshot), true).unwrap();
+        assert_eq!(chat(&snapshot, "assigned").title, "State first");
+        // Empty current settings are authoritative, rather than resurrecting old JSON entries.
+        settings
+            .execute(
+                "UPDATE settings SET value='{}' WHERE key='thread-project-assignments'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            read_global_state(&dir.path().join(".codex-global-state.json"))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        settings
+            .execute(
+                "INSERT INTO settings VALUES('global','local-projects',?1)",
+                [r#"{"p":{"name":"Pane","rootPaths":["C:\\Pane"]}}"#],
+            )
+            .unwrap();
+        fs::rename(
+            dir.path().join(".codex-global-state.json"),
+            dir.path().join("legacy-state.json"),
+        )
+        .unwrap();
+        let current = read_global_state(&dir.path().join(".codex-global-state.json")).unwrap();
+        assert_eq!(
+            current.0[0].id, "p",
+            "the current SQLite state works without legacy JSON"
+        );
+        assert!(current.2.contains("loose"));
+    }
+
+    #[test]
+    #[ignore = "reads local Codex catalog without changing real conversations"]
+    fn live_metadata_audit() {
+        let started = std::time::Instant::now();
+        let snapshot = scan_catalog(None).unwrap();
+        for (id, expected) in [
+            ("01a21617-c492-7091-98e8-d113a5870324", "CodexChatPane"),
+            ("01a216c1-ab80-72c2-afc7-859ad2f3c279", "StockToolNew"),
+        ] {
+            let chat = snapshot.chats.iter().find(|c| c.id == id).unwrap();
+            let project = snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == chat.project_id)
+                .unwrap();
+            assert_eq!(project.name, expected);
+            eprintln!("metadata live {id} -> {}", project.name);
+        }
+        eprintln!(
+            "metadata live catalog: {} chats, {:?}",
+            snapshot.chats.len(),
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn explains_project_path_errors() {
@@ -1495,8 +1738,8 @@ mod tests {
         assert_eq!(snapshot.projects.len(), 3);
         assert_eq!(snapshot.projects[0].count, 1);
         assert_eq!(
-            snapshot.projects[1].count, 1,
-            "exact cwd falls back to its project root"
+            snapshot.projects[1].count, 0,
+            "matching cwd does not imply project membership"
         );
         assert_eq!(snapshot.projects[2].name, "无项目对话");
         assert_eq!(snapshot.chats.len(), 3, "subagent threads are hidden");
@@ -1524,7 +1767,7 @@ mod tests {
                 .iter()
                 .filter(|chat| chat.project_id == "synthetic:uncategorized")
                 .count(),
-            1
+            2
         );
         let assigned = snapshot.chats.iter().find(|chat| chat.id == "t1").unwrap();
         assert_eq!(assigned.title, "Visible");

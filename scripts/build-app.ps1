@@ -11,6 +11,8 @@ if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") { 
 if ($LASTEXITCODE -ne 0) { throw "npm ci failed: $LASTEXITCODE" }
 & node tests/frontend.mjs
 if ($LASTEXITCODE -ne 0) { throw "Frontend checks failed: $LASTEXITCODE" }
+& node tests/metadata-refresh.mjs
+if ($LASTEXITCODE -ne 0) { throw "Metadata refresh checks failed: $LASTEXITCODE" }
 & node tests/dynamic.mjs
 if ($LASTEXITCODE -ne 0) { throw "Dynamic checks failed: $LASTEXITCODE" }
 & cargo fmt --manifest-path src-tauri/Cargo.toml --check

@@ -401,7 +401,7 @@ duration_ms            = 1398216
 - `src-tauri/src/source.rs`：状态库和 SourceSnapshot，已有 `seconds_or_millis`；复用 home、thread、rollout 路径定位。
 - `src-tauri/src/rollout_log.rs`：共用明文/压缩读取、逻辑字节定位及实际文件签名。
 - `src-tauri/src/source/rollout.rs`：活动摘要、问题状态及 `metricsRevision`（当前轮次末次 token_usage_record.response_id）；新轮次清空结算标识。文本仅临时解析，不持久化完整性能内容。
-- `src-tauri/src/preview.rs`：按需分页读取模式可参考；详情统计不能只对一页正文分词。
+- `src-tauri/src/preview.rs`：可参考所选对话的日志链读取方式，统计需覆盖完整正文。
 - `src-tauri/src/metrics.rs`：流式解析、逐请求计量、工具阻塞区间和独立子线程统计；测试包括合成数据与只读真实样例。
 - `src-tauri/src/lib.rs`：`get_chat_metrics` Tauri command 与窗口入口。
 - `src/app.js`：`loadSelectedChatMetrics` / `statusChatMarkup` / `openChatMetrics`。点击对话按需读取，状态栏固定选中对话；悬停不发起读取。

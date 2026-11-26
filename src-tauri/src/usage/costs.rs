@@ -7,6 +7,8 @@ use std::{
     path::Path,
     sync::{Mutex, OnceLock},
 };
+#[cfg(test)]
+mod catalog_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +20,20 @@ struct Entry {
     output: u64,
     reasoning: Option<u64>,
     writes: Option<u64>,
+}
+
+impl Entry {
+    fn cost(&self, settled_at: Option<i64>) -> Option<f64> {
+        pricing::estimate(
+            self.model.as_deref(),
+            self.tier.as_deref(),
+            self.input,
+            self.cached,
+            self.output,
+            self.writes,
+            settled_at,
+        )
+    }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -169,16 +185,9 @@ pub fn attach_metrics(data: &mut metrics::ChatMetrics) {
                 reasoning: request.reasoning_tokens,
                 writes: request.cache_write_tokens,
             };
-            request.cost_usd = pricing::estimate(
-                entry.model.as_deref(),
-                entry.tier.as_deref(),
-                input,
-                cached,
-                output,
-                entry.writes,
-            );
-            add(&mut own, &entry, false);
-            add(&mut total, &entry, false);
+            request.cost_usd = entry.cost(request.settled_at);
+            add(&mut own, &entry, false, request.cost_usd);
+            add(&mut total, &entry, false, request.cost_usd);
         }
         own.conversations = usize::from(own.requests > 0);
         turn.consumption = Some(own);
@@ -417,6 +426,39 @@ pub fn index(
     })
 }
 
+fn valid_catalog<'a>(
+    home: &Path,
+    snapshot: Option<&'a SourceSnapshot>,
+) -> Option<&'a SourceSnapshot> {
+    let identity = crate::source::snapshot_identity_at(&home.join("state_5.sqlite"), home).ok()?;
+    snapshot.filter(|s| {
+        s.state == "Ready" && s.error.is_none() && s.source_identity.as_ref() == Some(&identity)
+    })
+}
+
+pub fn sync_catalog(home: &Path, snapshot: Option<&SourceSnapshot>) -> Result<(), String> {
+    let Some(snapshot) = valid_catalog(home, snapshot) else {
+        return Ok(());
+    };
+    sync_catalog_rows(&database(home)?, snapshot)
+}
+
+fn sync_catalog_rows(db: &Connection, snapshot: &SourceSnapshot) -> Result<(), String> {
+    let projects: HashMap<_, _> = snapshot
+        .projects
+        .iter()
+        .map(|p| (p.id.as_str(), p.name.as_str()))
+        .collect();
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    for chat in &snapshot.chats {
+        let Some(project) = projects.get(chat.project_id.as_str()) else {
+            continue;
+        };
+        tx.execute("UPDATE usage_threads SET title=?2,project_id=?3,project=?4 WHERE id=?1 AND (title IS NOT ?2 OR project_id IS NOT ?3 OR project IS NOT ?4)", params![chat.id,chat.title,chat.project_id,project]).map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 fn index_shared(
     home: &Path,
     snapshot: Option<&SourceSnapshot>,
@@ -434,6 +476,7 @@ fn index_shared(
     }
     let threads = candidates(home, query)?;
     let mut db = database(home)?;
+    let snapshot = valid_catalog(home, snapshot);
     let projects: HashMap<_, _> = snapshot
         .into_iter()
         .flat_map(|s| s.projects.iter())
@@ -444,21 +487,23 @@ fn index_shared(
         .flat_map(|s| s.chats.iter())
         .map(|c| (c.id.as_str(), c))
         .collect();
-    db.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-    for chat in snapshot.into_iter().flat_map(|s| s.chats.iter()) {
-        let name = projects
-            .get(chat.project_id.as_str())
-            .copied()
-            .unwrap_or("无项目对话");
-        db.execute("INSERT INTO usage_threads(id,signature,title,project_id,project) VALUES(?1,'',?2,?3,?4) ON CONFLICT(id) DO UPDATE SET title=excluded.title,project_id=excluded.project_id,project=excluded.project WHERE title IS NOT excluded.title OR project_id IS NOT excluded.project_id OR project IS NOT excluded.project",params![chat.id,chat.title,chat.project_id,name]).map_err(|e|e.to_string())?;
+    if let Some(snapshot) = snapshot {
+        sync_catalog_rows(&db, snapshot)?;
     }
-    db.execute_batch("COMMIT").map_err(|e| e.to_string())?;
     let mut complete = true;
     for (index, (id, title, path, kind)) in threads.iter().enumerate() {
         if super::context::identity(home)? != identity {
             return Err("账号或日志来源已切换，停止旧索引".into());
         }
         progress(index, threads.len());
+        let saved: Option<(String, String, String)> = db
+            .query_row(
+                "SELECT signature,project_id,project FROM usage_threads WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         let (project_id, project) = chats
             .get(id.as_str())
             .map(|c| {
@@ -470,18 +515,19 @@ fn index_shared(
                         .unwrap_or("无项目对话"),
                 )
             })
+            .or_else(|| {
+                saved
+                    .as_ref()
+                    .map(|(_, id, name)| (id.as_str(), name.as_str()))
+            })
             .unwrap_or(("", "无项目对话"));
-        let saved: Option<String> = db
-            .query_row(
-                "SELECT signature FROM usage_threads WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
+        let title = chats
+            .get(id.as_str())
+            .map(|c| c.title.as_str())
+            .unwrap_or(title);
         if saved
-            .as_deref()
-            .is_some_and(|s| unchanged(s, Path::new(path)))
+            .as_ref()
+            .is_some_and(|(s, _, _)| unchanged(s, Path::new(path)))
         {
             db.execute(
                 "UPDATE usage_threads SET title=?1,project_id=?2,project=?3 WHERE id=?4",
@@ -590,7 +636,7 @@ fn index_shared(
     Ok(())
 }
 
-fn add(total: &mut Totals, entry: &Entry, child: bool) {
+fn add(total: &mut Totals, entry: &Entry, child: bool, cost: Option<f64>) {
     total.input += entry.input;
     total.cached += entry.cached;
     total.output += entry.output;
@@ -604,14 +650,7 @@ fn add(total: &mut Totals, entry: &Entry, child: bool) {
     if entry.tier.is_none() || entry.writes.is_none() || entry.writes.unwrap_or(0) > 0 {
         total.estimated_requests += 1;
     }
-    match pricing::estimate(
-        entry.model.as_deref(),
-        entry.tier.as_deref(),
-        entry.input,
-        entry.cached,
-        entry.output,
-        entry.writes,
-    ) {
+    match cost {
         Some(cost) => {
             total.cost_usd += cost;
             if child {
@@ -908,10 +947,11 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
                 row.models.push(model.clone());
             }
         }
-        add(&mut row.totals, &entry, child);
-        add(&mut totals, &entry, child);
+        let cost = entry.cost(at);
+        add(&mut row.totals, &entry, child, cost);
+        add(&mut totals, &entry, child, cost);
         let model_total = model_totals.entry(model.into()).or_default();
-        add(model_total, &entry, child);
+        add(model_total, &entry, child, cost);
         model_total.conversations = {
             let ids = model_chats.entry(model.into()).or_default();
             ids.insert(root.id.clone());
@@ -922,7 +962,7 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
             .or_default()
             .entry(model.into())
             .or_default();
-        add(row_total, &entry, child);
+        add(row_total, &entry, child, cost);
         row_total.conversations = {
             let ids = row_model_chats
                 .entry((key.clone(), model.into()))
@@ -932,13 +972,13 @@ pub fn report(home: &Path, query: Query) -> Result<Report, String> {
         };
         if let Some(at) = at {
             let at = (at + shift).div_euclid(bucket) * bucket - shift;
-            add(trend.entry(at).or_default(), &entry, child);
+            add(trend.entry(at).or_default(), &entry, child, cost);
             let model_total = trend_models
                 .entry(at)
                 .or_default()
                 .entry(model.into())
                 .or_default();
-            add(model_total, &entry, child);
+            add(model_total, &entry, child, cost);
             model_total.conversations = {
                 let ids = trend_model_chats.entry((at, model.into())).or_default();
                 ids.insert(root.id.clone());

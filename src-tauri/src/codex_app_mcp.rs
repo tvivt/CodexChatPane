@@ -133,9 +133,17 @@ pub fn run_project_pin(
             arguments,
         )?;
     }
+    verify_project_pin_with(project_id, enabled, || crate::source::scan_catalog(None))
+}
+
+pub(crate) fn verify_project_pin_with(
+    project_id: &str,
+    enabled: bool,
+    mut read: impl FnMut() -> Result<crate::source::SourceSnapshot, String>,
+) -> Result<(), String> {
     let deadline = Instant::now() + VERIFY_TIMEOUT;
     loop {
-        if crate::source::scan_catalog(None)?
+        if read()?
             .projects
             .iter()
             .any(|project| project.id == project_id && project.codex_pinned == enabled)
@@ -307,9 +315,21 @@ fn verify_action(
     title: Option<&str>,
     enabled: Option<bool>,
 ) -> Result<(), String> {
+    verify_action_with(thread_id, action, title, enabled, || {
+        crate::source::scan_catalog(None)
+    })
+}
+
+pub(crate) fn verify_action_with(
+    thread_id: &str,
+    action: &str,
+    title: Option<&str>,
+    enabled: Option<bool>,
+    mut read: impl FnMut() -> Result<crate::source::SourceSnapshot, String>,
+) -> Result<(), String> {
     let deadline = Instant::now() + VERIFY_TIMEOUT;
     loop {
-        if let Ok(snapshot) = crate::source::scan_catalog(None) {
+        if let Ok(snapshot) = read() {
             if let Some(chat) = snapshot.chats.iter().find(|chat| chat.id == thread_id) {
                 let verified = match action {
                     "rename" => title == Some(chat.title.as_str()),

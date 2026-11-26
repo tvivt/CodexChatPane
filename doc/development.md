@@ -32,6 +32,7 @@ Frontend build and framework-free checks:
 npm run build
 node tests/frontend.mjs
 node tests/dynamic.mjs
+node tests/metadata-refresh.mjs
 ```
 
 Rust formatting and tests:
@@ -65,7 +66,7 @@ The development checkout has no publishing workflow. The public release checkout
 
 The development repository is the source of truth for documentation. Its public `README.md`, `README.zh-CN.md`, `doc/`, and screenshots are copied to the release repository; internal design notes remain in the development repository. Update public documentation there once, then sync it for release.
 
-Version fields are `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (currently 0.5.6). Preserve the fixed local entry name CodexChatPane.exe. Generic output is `.runtime/bin/CodexChatPane.exe`; `D:\AI\CodexChatPane\CodexChatPane.exe` is this machine's deployment convention, not a general default. Before replacement, query and confirm the running executable path with Get-Process and CIM, exit that exact process, build, copy, and restart. Record new build/installed SHA256 equality, file time, new PID, path, StartTime and Responding. Equal hashes of two old binaries do not prove new code is deployed.
+Version fields are `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (currently 0.6.4). Preserve the fixed local entry name CodexChatPane.exe. Generic output is `.runtime/bin/CodexChatPane.exe`; `D:\AI\CodexChatPane\CodexChatPane.exe` is this machine's deployment convention, not a general default. Before replacement, query and confirm the running executable path with Get-Process and CIM, exit that exact process, build, copy, and restart. Record new build/installed SHA256 equality, file time, new PID, path, StartTime and Responding. Equal hashes of two old binaries do not prove new code is deployed.
 
 ## Current unpublished verification
 

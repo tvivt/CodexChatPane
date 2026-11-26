@@ -31,7 +31,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 - `src-tauri/src/source/rate_limits.rs`：通过 App MCP 读取实时额度，失败后走 CLI app-server，限制查询时间并清理查询进程。
 - `src-tauri/src/source/diagnostics.rs`：读取有限的桌面诊断日志并分类错误。
 - `src-tauri/src/source_watch.rs`：Codex home 根目录不递归监听，只递归监听 `sessions` / `archived_sessions`。
-- `src-tauri/src/preview.rs`：按页读取对话预览，限制单页和缓存大小。
+- `src-tauri/src/preview.rs` 与 `preview/transcript.rs` 读取所选对话的日志链，并按完整消息行追加更新。
 - `src-tauri/src/metrics.rs` / `metrics/latest.rs`：完整自身详情与最新请求增量读取；后者另外维护至多 3 条预测样本，保持单次实测 summary 不变。
 - `metrics/details.rs`：完整计量后释放请求/活动正文，仅缓存轮次及全量汇总；4 个线程槽、50 条轮次/页，快照 ID 保持翻页一致，账号/来源/认证变化隔离。冷读或版本变化后的重开仍可能完整解析。
 - `src-tauri/src/source/rollout/generation.rs`：复用活动游标提取本线程轮次和模型配置，输出 `generation`；运行/终止沿用活动状态，不另造一套生命周期或读取任务。
@@ -58,7 +58,7 @@ CODEX_HOME/.codex-chat-pane + localStorage
 3. `get_snapshot` 与 `get_catalog_snapshot` 都先走 `scan_catalog`：只读状态库和全局目录，不读 rollout、历史消息、诊断、项目路径文件系统或额度。缓存中的执行/待回答状态保留，冷态未知不假装完成。
 4. 前端立即用稳定 ID 合并并渲染，恢复 Folder/Group，随后通过 `get_chat_activity` 异步补历史状态和项目路径检查。首次批量投影后，只读运行中、待回答、选中或实际变化的目标；片段投影优先，缺失时回退逻辑线程 ID。`activityPending` 保留新线程或换路径目标。
 5. 目录变化只更新列表元数据并复用活动缓存；rollout 变化只更新受影响对话 ID。历史库变化比较缓存的最新轮次状态摘要，只补查实际变化的 ID，包括晚到的失败详情；工具输出和投影变化不重读所有 rollout。
-   活动对话每秒增量检查 rollout 和诊断，不查询历史库；耗时使用缓存开始时间和本地时钟。打开的预览另行按目标对话分页读取，隐藏或关闭后停止刷新。
+   活动对话每秒增量检查 rollout 和诊断，不查询历史库；耗时使用缓存开始时间和本地时钟。预览首次读取目标对话全文，后续接收增量，隐藏或关闭后停止刷新。
    窗口隐藏时保留待更新对象，恢复可见时集中处理，不全量重扫执行历史。额度在启动、恢复可见时独立刷新，可见期间每分钟刷新。监听溢出或重新连接时允许全量扫描，补回丢失的事件。
 6. Rust 扫描失败时保留最后有效快照，并向界面报告错误。
 
@@ -98,7 +98,7 @@ Chat 的工作状态和诊断来自结构化事件与受限日志读取；rollou
 | `metrics/latest.rs` | 当前轮次 parser、最新有效请求、至多 3 个同配置样本 | 32 个线程槽；追加读完整尾行，截断/创建身份/压缩/依赖变化重建；无预测阶段持久化 |
 | `metrics/details.rs` | 轮次摘要、完整汇总及工具/子代理元数据 | 4 个线程槽；窗口每页 50 轮；翻页零正文读取，快照失效重新打开；不缓存或传输请求/活动明细 |
 | `metrics/analysis.rs` | 验证后的用量、legacy 基线、问答短摘要和紧凑额度观察 | 持久版本 `usage-analysis-v4`；普通 JSONL 安全偏移追加，检查路径/创建时间/长度/mtime、首行及游标前小块；替换或历史链变化重建 |
-| `preview.rs` / `rollout_log.rs` | 分页正文、链元数据、压缩逻辑长度 | 预览 24、链 32、长度 128 项，逐项淘汰；不缓存整份解压正文；扩大压缩预览窗口仍可能重复顺序解码 |
+| `preview.rs` / `rollout_log.rs` | 当前预览正文、链元数据、压缩逻辑长度 | 仅缓存一条对话的预览，链元数据 32 项、长度 128 项。切换对话或日志被替换、截短时重建预览 |
 | `usage/costs.rs` | 逐请求明细、索引覆盖区间、按 UTC 日修订的报告 | `details-v7`；标题/项目/父子/覆盖/价表及相关日期变化失效；部分读取不认证完整范围 |
 | `usage/ledger.rs` | 当前身份下按输入版本构建的额度周期 | 8 项；新快照/导入修订/覆盖月/关闭标记/身份变化失效；分钟通知走 live-only，不合并导入历史 |
 | `usage/ledger/recognizer.rs` | 窗口模式、候选、事件证据、输入前缀与关闭别名 | `quota_derivations` / `quota_event_alias` 持久化；追加续判，历史插入仅重放紧凑观察；同一采用边界驱动显示与缓存分组 |

@@ -55,7 +55,7 @@ This is an experimental personal project, not an official Codex Desktop componen
 | Complete feature index | [Documentation](doc/README.md) |
 | Latency, speed, and statistics definitions (Chinese) | [Conversation metrics](doc/conversation-metrics.zh-CN.md) |
 | Quotas, consumption, and cost estimates (Chinese) | [Usage and consumption](doc/usage-history.zh-CN.md) |
-| v0.6.1 changes | [Release notes](doc/releases/v0.6.1.md) |
+| v0.6.4 changes | [Release notes](doc/releases/v0.6.4.md) |
 | Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
 ## Local data and MCP operations

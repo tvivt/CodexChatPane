@@ -132,7 +132,7 @@ const state = {
 };
 
 const PREFERENCES_KEY = 'CodexChatPane.preferences-v1';
-const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'recentProjectOrder', ...CHAT_SORT_FIELDS, 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'projectFilterVersion', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'previewPinned', 'openFolders', 'openChatFolders'];
+const preferenceFields = ['projectId', 'dynamicProjectSort', 'recentProjectSort', 'recentProjectOrder', ...CHAT_SORT_FIELDS, 'projectRecentLinked', 'recentProjectColumnVisible', 'chatsLowerPanel', 'projectArchiveOpen', 'projectsCollapsed', 'projectChatsCollapsed', 'projectFilterVersion', 'chatProjectFilter', 'recentProjectFilter', 'chatDays', 'globalProjectSort', 'nameSort', 'projectNameSort', 'projectTimelineIncludesArchived', 'globalTimelineIncludesArchived', 'chatArchiveOpen', 'chatTimelineOpen', 'globalTimelineOpen', 'recycleHeight', 'chatTimelineHeight', 'archiveHeight', 'projectStructureHeight', 'projectRecentHeight', 'projectRecentTimeWidth', 'projectRecentProjectWidth', 'projectChatTimeWidth', 'chatTimeWidth', 'chatProjectWidth', 'chatsLowerHeight', 'openFolders', 'openChatFolders'];
 const browserPreferenceFields = [...preferenceFields, 'theme', 'themeFamily', 'windowMode', 'singlePaneWidth', 'showDateBars', 'previewEnabled'];
 let savedPreferences = {};
 try { savedPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}') || {}; } catch {}
@@ -316,6 +316,8 @@ async function loadToolConfig() {
 function confirmCodexMcpUse() {
   showAppConfirm({
     title: t('Codex MCP 操作'),
+    copy: t('本程序的图标仅显示在系统托盘，不显示在任务栏。'),
+    highlightCopy: true,
     note: t('CodexChatPane 将通过 Codex 桌面版内部 MCP 修改对话名称、Pin 和归档状态。该接口未公开，Codex 更新后可能暂时失效。是否启用？'),
     submit: t('启用'),
     danger: false,
@@ -572,19 +574,14 @@ async function flushSourceRefresh() {
     return;
   }
   if (pendingFullRefresh || pendingCatalogRefresh || !nativeLoaded) {
-    const catalogOnly = true;
-    const activityAfterCatalog = catalogOnly ? [...pendingActivityIds] : [];
-    const historyAfterCatalog = catalogOnly ? [...pendingHistoryIds] : [];
     pendingFullRefresh = false;
     pendingCatalogRefresh = false;
-    pendingActivityIds.clear();
-    pendingHistoryIds.clear();
-    if (!catalogOnly) pendingHistoryRefresh = false;
-    await loadNativeSnapshot(catalogOnly);
-    activityAfterCatalog.forEach(id => pendingActivityIds.add(id));
-    historyAfterCatalog.forEach(id => pendingHistoryIds.add(id));
-    queueSourceRefresh();
-    return;
+    await loadNativeSnapshot(true);
+    // A stream of catalog changes must not postpone a pending answer refresh.
+    if (!nativeLoaded || document.hidden || sourceRefreshBlocked()) {
+      queueSourceRefresh();
+      return;
+    }
   }
   const ids = [...pendingActivityIds];
   const historyIds = [...pendingHistoryIds];
@@ -1090,7 +1087,6 @@ async function openChatMetrics(threadId, child = false) {
   const parents = child && metricsView ? [...metricsView.parents,{...metricsView,parents:undefined}] : [];
   const request = ++metricsDetailRequest;
   metricsView = {threadId,scope:'',parents,data:null,error:'',agentStats:new Map()};
-  hideConversationPreview('metrics-dialog');
   renderChatMetricsDialog();
   const dialog = document.getElementById('chat-metrics-dialog');
   if (!dialog.open) {
@@ -1256,203 +1252,166 @@ async function showConversationPreview(id, explicit = false) {
   if (!explicit && !state.previewEnabled && !isPreviewWindow) return;
   previewLog('preview-open-request', {id, previewWindow: isPreviewWindow, pinned: state.previewPinned});
   if (!isPreviewWindow) {
-    if (state.previewPinned && previewChatId && previewChatId !== id) return;
     previewChatId = id;
     await openConversationPreviewWindow(id);
     return;
   }
-  if (state.previewPinned && previewChatId && previewChatId !== id) return;
   if (previewChatId === id) return;
   previewChatId = id;
   queueSourceRefresh({threads:[id]});
   syncLiveTimers();
   await queueConversationPage(id);
 }
-const previewRoleLabel = kind => kind === 'assistant' ? 'AI' : kind === 'interruption' ? 'STEER' : 'USER';
-const previewFoldControl = kind => ui`<span class="preview-fold-label">${kind === 'assistant' ? 'A' : 'U'}</span>${icon('chevrons-down')}`;
-function conversationMarkup(page) {
-  if (page?.error) return ui`<div class="conversation-empty error">${esc(page.error)}</div>`;
-  if (!page?.items?.length) return ui`<div class="conversation-empty">${t('暂无可预览内容')}</div>`;
-  const systemMarkup = (item, nested = false) => {
-    const [label,...body] = item.text.split('\n');
-    return ui`<details class="conversation-item system ${item.kind}${nested ? ' conversation-nested' : ''}"><summary>${icon('info')}<strong>${esc(label || 'System context')}</strong>${icon('chevron-right')}</summary><div>${esc(body.join('\n'))}</div></details>`;
-  };
-  const blockMarkup = (item, index, nested = '') => {
-    const kind = item.kind === 'assistant' ? 'assistant' : 'user';
-    const label = previewRoleLabel(kind);
-    const summary = item.text.split(/\r?\n/, 1)[0].trim();
-    return ui`<details class="conversation-item ${item.kind} conversation-block ${kind}-block" data-preview-block="${kind}"${index === page.currentUser ? ' data-current-user="true"' : ''}><summary><span class="preview-role-label ${kind}">${label}</span>${summary ? ui`<span class="conversation-summary">${esc(summary)}</span>` : ''}${icon('chevron-right')}</summary><div class="conversation-block-body">${nested}<div class="conversation-message">${esc(item.text)}</div></div></details>`;
-  };
-  const processMarkup = item => ui`<article class="conversation-item ${item.kind}">${item.kind === 'process' || item.kind === 'compact' ? icon('refresh') : ''}<div>${esc(item.text)}</div></article>`;
-  const interruptionMarkup = (item, index) => {
-    const summary = item.text.split(/\r?\n/, 1)[0].trim();
-    return ui`<details class="conversation-item interruption conversation-block conversation-nested"${index === page.currentUser ? ' data-current-user="true"' : ''} open><summary><span class="preview-role-label interruption">STEER</span>${summary ? ui`<span class="conversation-summary">${esc(summary)}</span>` : ''}${icon('chevron-right')}</summary><div class="conversation-block-body"><div class="conversation-message">${esc(item.text)}</div></div></details>`;
-  };
-  const assistantMarkup = entries => {
-    const assistant = entries.find(({item}) => item.kind === 'assistant')?.item;
-    const summary = assistant?.text.split(/\r?\n/, 1)[0].trim() || '';
-    const current = entries.some(({index}) => index === page.currentUser);
-    const body = entries.map(({item, index}) => {
-      if (item.kind === 'assistant') return ui`<div class="conversation-message">${esc(item.text)}</div>`;
-      if (item.kind === 'system' || item.kind === 'aborted') return systemMarkup(item, true);
-      if (item.kind === 'interruption') return interruptionMarkup(item, index);
-      return processMarkup(item);
-    }).join('');
-    return ui`<details class="conversation-item assistant conversation-block assistant-block" data-preview-block="assistant"${current ? ' data-current-user="true"' : ''}><summary><span class="preview-role-label assistant">AI</span>${summary ? ui`<span class="conversation-summary">${esc(summary)}</span>` : ''}${icon('chevron-right')}</summary><div class="conversation-block-body">${body}</div></details>`;
-  };
-  let markup = '', activity = [], leadingActivity = [], seenUser = false;
-  const flushActivity = () => {
-    if (activity.length) markup += assistantMarkup(activity);
-    activity = [];
-  };
-  page.items.forEach((item, index) => {
-    if (item.kind === 'user') {
-      if (seenUser) flushActivity();
-      else {
-        seenUser = true;
-        activity.push(...leadingActivity);
-        leadingActivity = [];
-      }
-      markup += blockMarkup(item, index);
-      return;
-    }
-    if (['assistant', 'interruption', 'system', 'process', 'compact', 'aborted'].includes(item.kind)) {
-      (seenUser ? activity : leadingActivity).push({item, index});
-      return;
-    }
-    if (seenUser) flushActivity();
-    markup += processMarkup(item);
-  });
-  if (!seenUser) activity = leadingActivity;
-  flushActivity();
-  return markup;
+function previewGroups(items, start = 0) {
+  const groups = [];
+  for (let i=start; i<items.length; i++) {
+    const item=items[i];
+    if (item.kind==='user') groups.push({key:item.offset,start:i,title:item.text || item.attachments?.map(a=>a.name).join('、') || t('用户对话'),items:[]});
+    groups.at(-1)?.items.push(item);
+  }
+  return groups;
 }
-const PREVIEW_HISTORY_THRESHOLD = 0.2;
-const previewScrollRange = body => Math.max(0, body.scrollHeight - body.clientHeight);
-const previewNearTop = body => (Number(body.scrollTop) || 0) / Math.max(1, body.scrollHeight) <= PREVIEW_HISTORY_THRESHOLD;
-const previewUserScrolled = body => {
-  const range = previewScrollRange(body);
-  return range > 0 && (Number(body.scrollTop) || 0) < range;
-};
-const previewNeedsOlderPage = (body, page) => Boolean(page?.before != null && previewNearTop(body));
-function togglePreviewDetails(kind) {
-  const selector = kind === 'assistant' ? '.assistant-block' : kind === 'user' ? '.user-block' : '';
-  if (!selector) return;
-  const details = [...document.querySelectorAll(`#chat-preview ${selector}`)];
-  const open = details.some(detail => !detail.open);
-  details.forEach(detail => { detail.open = open; });
+function previewRow(group,current) {
+  return `<details class="preview-question" data-preview-key="row-${group.key}"${current?' data-current-user="true"':''}><summary>${icon('chevron-right')}<span class="preview-question-title">${esc(group.title)}</span></summary><div class="preview-thread"></div></details>`;
 }
-function renderConversationPreview(anchorCurrentUser = false, preserveScroll = '', bodyOnly = false) {
-  const preview = document.getElementById('chat-preview');
-  const page = conversationPages.get(previewChatId);
-  if (!preview || !previewChatId || !page) return;
-  const oldBody = preview.querySelector('.conversation-scroll');
-  const hadOldBody = Boolean(oldBody);
-  const oldHeight = oldBody?.scrollHeight || 0, oldTop = oldBody?.scrollTop || 0;
-  previewLog('render-start', {id: previewChatId, items: page.items?.length || 0, before: page.before, loading: page.loading, anchorCurrentUser, preserveScroll: preserveScroll || 'none', bodyOnly, oldTop, oldHeight});
-  const detailStates = new Map([...(oldBody?.querySelectorAll('details') || [])].map(detail => [detail.textContent, detail.open]));
-  const chat = chats.find(item => item.id === previewChatId), project = byProject(chat?.projectId);
-  if (bodyOnly && oldBody) oldBody.innerHTML = conversationMarkup(page);
-  else preview.innerHTML = ui`<header class="conversation-preview-head"${isPreviewWindow ? ' data-window-drag' : ''}>${projectStateIcon(project || {synthetic:true})}<strong>${esc(projectLabel(project))}</strong>${icon('chat')}<span>${esc(chat?.title || previewChatId)}</span><span class="toolbar-spacer"></span><button class="icon-button preview-fold-control" data-action="toggle-preview-details" data-preview-kind="user" aria-label="${t('展开／收拢用户')}" title="${t('展开／收拢用户')}">${previewFoldControl('user')}</button><button class="icon-button preview-fold-control" data-action="toggle-preview-details" data-preview-kind="assistant" aria-label="${t('展开／收拢 AI')}" title="${t('展开／收拢 AI')}">${previewFoldControl('assistant')}</button><button class="icon-button ${state.previewPinned ? 'active' : ''}" data-action="toggle-conversation-preview-pin" aria-pressed="${state.previewPinned}" aria-label="${t(state.previewPinned ? '取消 Pin' : 'Pin')}" title="${t(state.previewPinned ? '取消 Pin' : 'Pin')}">${icon('pin')}</button><button class="icon-button" data-action="close-conversation-preview" aria-label="${t('关闭')}" title="${t('关闭')}">${icon('x')}</button></header><div class="conversation-scroll">${conversationMarkup(page)}</div>`;
-  preview.hidden = false;
-  requestAnimationFrame(() => {
-    const body = preview.querySelector('.conversation-scroll');
-    if (!body) { previewLog('render-no-body', {id: previewChatId}); return; }
-    body.querySelectorAll('details').forEach(detail => {
-      if (hadOldBody && detailStates.has(detail.textContent)) detail.open = detailStates.get(detail.textContent);
-      else if (detail.dataset.previewBlock) detail.open = false;
+function previewThread(group) {
+  let blocks=[],ai=[];
+  const flush=()=>{if(ai.length){blocks.push(`<article class="preview-message assistant"><strong>AI</strong>${ai.join('')}</article>`);ai=[];}};
+  for(const item of group.items) {
+    const text=item.text ? `<div class="conversation-message">${esc(item.text)}</div>` : '';
+    if(item.kind==='process'){ai.push(`<div class="preview-event">${icon('refresh')}${esc(item.text)}</div>`);continue;}
+    if(item.kind==='assistant'){ai.push(text);continue;}
+    flush();
+    let content='', pos=0;
+    // Images share the first position in upload order. File links keep their text offsets.
+    const files=(item.attachments || [])
+      .map((file,index)=>({file,index,position:file.image ? -1 : file.at || 0}))
+      .sort((a,b)=>a.position-b.position);
+    for(const {file,index,position} of files) {
+      const at=Math.max(0,Math.min(item.text.length,position));
+      if(at>pos)content+=`<div class="conversation-message">${esc(item.text.slice(pos,at))}</div>`;
+      content+=`<button type="button" class="preview-attachment" data-action="preview-attachment" data-offset="${item.offset}" data-index="${index}"${file.image?' data-image':''}>${file.image?`<img alt="${esc(file.name)}">`:esc(file.name)}</button>`;
+      pos=at;
+    }
+    if(pos<item.text.length) content+=`<div class="conversation-message">${esc(item.text.slice(pos))}</div>`;
+    blocks.push(`<article class="preview-message ${item.kind==='user'?'user':'interruption'}"><strong>${t(item.kind==='user'?'用户':'用户补充')}</strong>${content}</article>`);
+  }
+  flush();
+  return blocks.join('');
+}
+function previewAttachmentArgs(button,open) {
+  return {threadId:previewChatId,offset:Number(button.dataset.offset),index:Number(button.dataset.index),open};
+}
+function fillPreviewRow(row, group, page) {
+  const thread=row.querySelector('.preview-thread');
+  thread.innerHTML=previewThread(group);
+  for(const button of thread.querySelectorAll('[data-image]')){
+    const args=previewAttachmentArgs(button,false), key=args.offset+':'+args.index;
+    let request=page.images.get(key);
+    if(!request){request=nativeInvoke('preview_attachment',args);page.images.set(key,request);}
+    request.then(src=>{const img=button.querySelector('img');if(img)img.src=src;}).catch(error=>{
+      page.images.delete(key);button.disabled=true;button.textContent=button.querySelector('img')?.alt+' · '+String(error);
     });
-    if (preserveScroll === 'prepend') body.scrollTop = oldTop + Math.max(0,body.scrollHeight - oldHeight);
-    else if (preserveScroll === 'position') body.scrollTop = oldTop;
-    else if (preserveScroll === 'bottom') body.scrollTop = body.scrollHeight;
-    else if (anchorCurrentUser) body.scrollTop = Math.max(0,(body.querySelector('[data-current-user="true"]')?.offsetTop || 0) - 10);
-    const nearTop = previewNearTop(body);
-    const needsOlder = previewNeedsOlderPage(body, page);
-    previewLog('render-position', {id: previewChatId, top: body.scrollTop, height: body.scrollHeight, clientHeight: body.clientHeight, topRatio: (Number(body.scrollTop) || 0) / Math.max(1, body.scrollHeight), nearTop, hasBefore: page.before != null, before: page.before, loading: page.loading, needsOlder});
-    if (needsOlder) void queueConversationPage(previewChatId,page.before);
-  });
+  }
 }
-const conversationSignature = page => JSON.stringify([page?.currentUser,page?.items]);
-const conversationLoadQueues = new Map();
-function queueConversationPage(id, before = null, refresh = false) {
-  let queue = conversationLoadQueues.get(id);
-  if (!queue) {
-    queue = {tail:Promise.resolve(),keys:new Set()};
-    conversationLoadQueues.set(id, queue);
-  }
-  const key = `${refresh ? 'refresh' : 'history'}:${before ?? 'latest'}`;
-  if (queue.keys.has(key)) {
-    previewLog('queue-dedupe', {id, key, before, refresh, pending: queue.keys.size, pageBefore: conversationPages.get(id)?.before});
-    return queue.tail;
-  }
-  queue.keys.add(key);
-  previewLog('queue-enqueue', {id, key, before, refresh, pending: queue.keys.size, pageBefore: conversationPages.get(id)?.before});
-  const request = queue.tail.catch(() => {}).then(() => loadConversationPage(id,before,refresh));
-  const cleanup = request.finally(() => {
-    previewLog('queue-complete', {id, key, before, refresh, pending: queue.keys.size});
-    queue.keys.delete(key);
-    if (queue.tail === cleanup && !queue.keys.size) conversationLoadQueues.delete(id);
-  });
-  queue.tail = cleanup;
-  return cleanup;
+document.addEventListener('toggle',event=>{
+  const row=event.target;
+  if(!row.matches?.('.preview-question') || !row.open) return;
+  const page=conversationPages.get(previewChatId);
+  const group=page?.groups.find(g=>'row-'+g.key===row.dataset.previewKey);
+  if(group && !row.querySelector('.preview-thread').childElementCount)fillPreviewRow(row,group,page);
+},true);
+function togglePreviewDetails() {
+  const rows=[...document.querySelectorAll('#chat-preview .preview-question')], open=rows.some(row=>!row.open);
+  rows.forEach(row=>{row.open=open;});
 }
-async function loadConversationPage(id, before = null, refresh = false) {
-  if (!nativeInvoke) {
-    previewLog('load-skip-no-native', {id, before, refresh});
-    conversationPages.set(id,{error:t('桌面运行时不可用')});
-    renderConversationPreview();
-    return;
-  }
-  const existing = conversationPages.get(id);
-  if (existing?.loading) {
-    previewLog('load-skip-loading', {id, before, refresh, existingItems: existing.items?.length || 0, pageBefore: existing.before});
-    return;
-  }
-  const startedAt = Date.now();
-  previewLog('load-start', {id, before, refresh, existingItems: existing?.items?.length || 0, pageBefore: existing?.before, olderCount: existing?.olderCount || 0});
-  conversationPages.set(id,{...(existing || {}),loading:true});
-  try {
-    const page = await nativeInvoke('get_chat_preview',{threadId:id,before});
-    previewLog('load-response', {id, before, refresh, elapsedMs: Date.now() - startedAt, items: page?.items?.length || 0, nextBefore: page?.before, currentUser: page?.currentUser});
-    if (previewChatId !== id) {
-      previewLog('load-discard-stale-preview', {id, before, refresh, activeId: previewChatId});
-      conversationPages.set(id,{...(existing || {}),loading:false});
-      return;
+function showPreviewImage(img) {
+  if(!img?.src)return;
+  const dialog=document.createElement('dialog');
+  dialog.className='preview-image-viewer';
+  dialog.innerHTML=`<button type="button" aria-label="${t('关闭')}">${icon('x')}</button>`;
+  dialog.append(img.cloneNode());document.body.append(dialog);
+  dialog.addEventListener('click',()=>dialog.close());
+  dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+  dialog.showModal();
+}
+function renderConversationPreview(_anchor=false,position='',bodyOnly=false) {
+  const preview=document.getElementById('chat-preview'), page=conversationPages.get(previewChatId);
+  if(!preview || !page)return;
+  let body=preview.querySelector('.conversation-scroll');
+  const same=body && body.dataset.chatId===previewChatId && !preview.hidden;
+  const chat=chats.find(c=>c.id===previewChatId),project=byProject(chat?.projectId);
+  if(!same || !bodyOnly){
+    if(!same || !body){
+      preview.innerHTML=`<header class="conversation-preview-head"${isPreviewWindow?' data-window-drag':''}>${projectStateIcon(project||{synthetic:true})}<strong>${esc(projectLabel(project))}</strong>${icon('chat')}<span>${esc(chat?.title||previewChatId)}</span><span class="toolbar-spacer"></span><button class="icon-button" data-action="toggle-preview-details" title="${t('展开／收拢大纲')}" aria-label="${t('展开／收拢大纲')}">${icon('chevrons-down')}</button><button class="icon-button" data-action="toggle-conversation-preview-pin" title="${t('预览窗口置顶')}" aria-label="${t('预览窗口置顶')}">${icon('pin')}</button><button class="icon-button" data-action="close-conversation-preview" aria-label="${t('关闭')}">${icon('x')}</button></header><div class="conversation-scroll"></div>`;
+      body=preview.querySelector('.conversation-scroll');body.dataset.chatId=previewChatId;
     }
-    if (before != null && existing) {
-      const added = page.items || [];
-      previewLog('load-merge-history', {id, requestedBefore: before, returned: added.length, total: added.length + (existing.items || []).length, nextBefore: page.before});
-      conversationPages.set(id,{items:[...added,...(existing.items || [])],before:page.before,currentUser:Number.isInteger(existing.currentUser) ? existing.currentUser + added.length : null,olderCount:(existing.olderCount || 0) + added.length,userScrolled:Boolean(existing.userScrolled),loadedAt:Date.now(),loading:false});
-      renderConversationPreview(false,'prepend',true);
-      queueConversationPage(id,null,true);
-    } else if (refresh && existing) {
-      const older = (existing.items || []).slice(0,existing.olderCount || 0);
-      const unchanged = conversationSignature({items:(existing.items || []).slice(existing.olderCount || 0),currentUser:Number.isInteger(existing.currentUser) ? existing.currentUser - older.length : null}) === conversationSignature(page);
-      previewLog('load-refresh-compare', {id, incoming: page.items?.length || 0, olderCount: older.length, unchanged, existingBefore: existing.before, returnedBefore: page.before});
-      if (unchanged) {
-        previewLog('load-refresh-unchanged', {id});
-        conversationPages.set(id,{...existing,loading:false});
-        return;
+    const pin=preview.querySelector('[data-action="toggle-conversation-preview-pin"]');
+    pin.classList.toggle('active',state.previewPinned);pin.setAttribute('aria-pressed',String(state.previewPinned));
+  }
+  preview.hidden=false;
+  if(!page.groups?.length){
+    body.innerHTML=`<div class="conversation-empty">${esc(page.error||t(page.loading?'正在读取对话…':'暂无可预览内容'))}</div>`;return;
+  }
+  body.querySelector('.conversation-empty')?.remove();
+  const groups=page.groups, start=same?Math.min(page.dirty??groups.length,body.children.length):0;
+  const oldTop=body.scrollTop, follow=position==='bottom' && !body.querySelector('details[open]');
+  for(let i=start;i<groups.length;i++){
+    const g=groups[i],existing=body.children[i],key='row-'+g.key;
+    if(existing?.dataset.previewKey===key){
+      existing.querySelector('.preview-question-title').textContent=g.title;
+      if(existing.open)fillPreviewRow(existing,g,page);
+      else existing.querySelector('.preview-thread').replaceChildren();
+    }else{
+      while(body.children.length>i)body.lastElementChild.remove();
+      body.insertAdjacentHTML('beforeend',previewRow(g,i===groups.length-1));
+    }
+  }
+  while(body.children.length>groups.length)body.lastElementChild.remove();
+  body.querySelector('[data-current-user]')?.removeAttribute('data-current-user');
+  body.lastElementChild.setAttribute('data-current-user','true');
+  page.dirty=groups.length;
+  body.scrollTop=follow?body.scrollHeight:oldTop;
+}
+const conversationLoadQueues=new Map();
+async function queueConversationPage(id) {
+  if(conversationLoadQueues.has(id)){conversationLoadQueues.set(id,true);return;}
+  conversationLoadQueues.set(id,false);
+  try{
+    do{
+      conversationLoadQueues.set(id,false);
+      let page=conversationPages.get(id);
+      if(!page){
+        page={items:[],groups:[],images:new Map(),revision:null,loading:true};
+        conversationPages.clear();conversationPages.set(id,page);
+        renderConversationPreview();
       }
-      previewLog('load-merge-refresh', {id, incoming: page.items?.length || 0, olderCount: older.length, total: older.length + (page.items || []).length, before: existing.before});
-      conversationPages.set(id,{...page,items:[...older,...(page.items || [])],before:existing.before,currentUser:Number.isInteger(page.currentUser) ? older.length + page.currentUser : null,olderCount:older.length,userScrolled:existing.userScrolled,loadedAt:Date.now(),loading:false});
-      renderConversationPreview(false,existing.userScrolled ? 'position' : 'bottom',true);
-    } else {
-      previewLog('load-initial', {id, items: page.items?.length || 0, nextBefore: page.before});
-      conversationPages.set(id,{...page,olderCount:0,userScrolled:false,loadedAt:Date.now(),loading:false});
-      renderConversationPreview(false,'bottom');
-    }
-  } catch (error) {
-    const errorText = String(error).replace(/\s+/g, ' ').slice(0, 240);
-    previewLog('load-error', {id, before, refresh, elapsedMs: Date.now() - startedAt, error: errorText});
-    if (refresh && existing) {
-      previewLog('load-refresh-error-kept-existing', {id});
-      conversationPages.set(id,{...existing,loading:false});
-      return;
-    }
-    conversationPages.set(id,{...(existing || {}),loading:false,error:String(error)});
-    renderConversationPreview();
-  }
+      const update=await nativeInvoke('get_chat_preview',{threadId:id,revision:page.revision});
+      if(id!==previewChatId || conversationPages.get(id)!==page)continue;
+      const initial=page.revision==null;
+      if(page.revision===update.revision)continue;
+      const hadError=Boolean(page.error);
+      page.loading=false;page.error='';page.revision=update.revision;
+      let at=update.from, skip=0;
+      while(skip<update.items.length && at<page.items.length && JSON.stringify(page.items[at])===JSON.stringify(update.items[skip])){at++;skip++;}
+      if(!initial && !hadError && at===page.items.length && skip===update.items.length)continue;
+      const body=document.querySelector('#chat-preview .conversation-scroll');
+      const follow=initial || !body || body.scrollHeight-body.clientHeight-body.scrollTop<2;
+      const newQuestion=at===page.items.length && update.items[skip]?.kind==='user';
+      page.items.length=at;
+      for(let i=skip;i<update.items.length;i++)page.items.push(update.items[i]);
+      let dirty=newQuestion?page.groups.length:page.groups.findLastIndex(g=>g.start<=at);
+      if(dirty<0)dirty=0;
+      const start=page.groups[dirty]?.start??(newQuestion?at:0);
+      page.groups.length=dirty;
+      for(const g of previewGroups(page.items,start))page.groups.push(g);
+      page.dirty=dirty;
+      renderConversationPreview(false,follow?'bottom':'position',true);
+    }while(conversationLoadQueues.get(id) && previewChatId===id);
+  }catch(error){
+    const page=conversationPages.get(id);
+    if(page && previewChatId===id){page.loading=false;page.error=String(error);renderConversationPreview(false,'position',true);}
+  }finally{conversationLoadQueues.delete(id);}
 }
 function refreshConversationPreview() {
   const preview = document.getElementById('chat-preview');
@@ -1464,9 +1423,7 @@ function refreshConversationPreview() {
     return;
   }
   previewRefreshPending = false;
-  const page = conversationPages.get(previewChatId);
-  previewLog('refresh-request', {id: previewChatId, items: page?.items?.length || 0, pageBefore: page?.before, loading: page?.loading});
-  void queueConversationPage(previewChatId,null,true);
+  void queueConversationPage(previewChatId);
 }
 document.addEventListener('selectionchange', () => {
   if (previewRefreshPending && window.getSelection?.()?.isCollapsed) refreshConversationPreview();
@@ -1476,15 +1433,7 @@ document.addEventListener('wheel', event => {
   previewLog('event-wheel', {target: previewEventTarget(event.target), deltaY: event.deltaY, deltaX: event.deltaX, x: event.clientX, y: event.clientY, defaultPrevented: event.defaultPrevented});
 }, {capture: true, passive: true});
 document.addEventListener('scroll', event => {
-  const preview = event.target.closest?.('#chat-preview');
-  const page = conversationPages.get(previewChatId);
-  if (!preview || !page) return;
-  const body = event.target;
-  const nearTop = previewNearTop(body);
-  const needsOlder = previewNeedsOlderPage(body,page);
-  page.userScrolled = previewUserScrolled(body);
-  previewLog('scroll', {id: previewChatId, top: body.scrollTop, height: body.scrollHeight, clientHeight: body.clientHeight, topRatio: (Number(body.scrollTop) || 0) / Math.max(1, body.scrollHeight), nearTop, hasBefore: page.before != null, before: page.before, loading: page.loading, userScrolled: page.userScrolled, needsOlder});
-  if (needsOlder) queueConversationPage(previewChatId,page.before);
+  if(isPreviewWindow && event.target.matches?.('.conversation-scroll'))previewLog('scroll',{id:previewChatId,top:event.target.scrollTop});
 },true);
 const disabledLink = () => ui`<button class="icon-button state-control" disabled aria-pressed="false" title="联动暂不可用" aria-label="联动暂不可用">${icon('link-off')}</button>`;
 document.addEventListener('focusout', event => {
@@ -2185,22 +2134,41 @@ function updateWorkingFrame(now = Date.now()) {
 let workingFrameTimer = 0;
 let executionClockTimer = 0;
 let activityCheckTimer = 0;
+let questionCheckTimer = 0;
 let quotaTimer = 0;
 let previewRefreshTimer = 0;
 function tickExecutionClock() {
   updateWorkingClocks();
   executionClockTimer = setTimeout(tickExecutionClock, 1000 - Date.now() % 1000);
 }
+function queueLiveActivity() {
+  for (const chat of chats) {
+    if (isPreviewWindow && chat.id !== previewChatId) continue;
+    if (chat.working) pendingActivityIds.add(chat.id);
+  }
+  queueSourceRefresh();
+}
+function waitingInThisWindow(chat) {
+  return chat.waitingForInput && (!isPreviewWindow || chat.id === previewChatId);
+}
+function queuePendingQuestions() {
+  if (!document.hidden) queueSourceRefresh({threads:chats.filter(waitingInThisWindow).map(chat => chat.id)});
+}
 function syncLiveTimers() {
   if (isMetricsWindow || isUsageWindow) return;
+  if (!document.hidden && chats.some(waitingInThisWindow)) {
+    if (!questionCheckTimer) questionCheckTimer = setInterval(queuePendingQuestions, 5000);
+  } else if (questionCheckTimer) {
+    clearInterval(questionCheckTimer);
+    questionCheckTimer = 0;
+  }
   if (isPreviewWindow) {
     clearInterval(previewRefreshTimer);
     previewRefreshTimer = 0;
     if (!document.hidden && chats.some(chat => chat.id === previewChatId && chat.working)) {
       previewRefreshTimer = setInterval(() => {
         refreshConversationPreview();
-        pendingActivityIds.add(previewChatId);
-        queueSourceRefresh({activityTick:true});
+        queueLiveActivity();
       }, 1000);
     }
     return;
@@ -2209,10 +2177,7 @@ function syncLiveTimers() {
   if (active) {
     if (!workingFrameTimer) workingFrameTimer = setInterval(updateWorkingFrame, 600);
     if (!executionClockTimer) tickExecutionClock();
-    if (!activityCheckTimer) activityCheckTimer = setInterval(() => {
-      chats.filter(chat => chat.working).forEach(chat => pendingActivityIds.add(chat.id));
-      queueSourceRefresh({activityTick:true});
-    }, 1000);
+    if (!activityCheckTimer) activityCheckTimer = setInterval(queueLiveActivity, 1000);
   } else {
     clearInterval(workingFrameTimer); workingFrameTimer = 0;
     clearTimeout(executionClockTimer); executionClockTimer = 0;
@@ -3060,11 +3025,11 @@ function showAppPrompt({ title, value = '', placeholder = '', submit = t('创建
     if (value) input?.select?.();
   });
 }
-function showAppConfirm({ title, copy = '', note = '', submit = t('删除'), danger = true, onConfirm, onCancel }) {
+function showAppConfirm({ title, copy = '', highlightCopy = false, note = '', submit = t('删除'), danger = true, onConfirm, onCancel }) {
   appDialogRequest = { mode: 'confirm', onConfirm, onCancel };
   const dialog = document.getElementById('folder-editor');
   const actionClass = danger ? 'text-button danger' : 'text-button primary';
-  dialog.innerHTML = ui`<form method="dialog" class="folder-confirm"><header><span>${title}</span><span class="toolbar-spacer"></span><button type="button" class="icon-button folder-editor-close" value="cancel" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></header>${copy ? ui`<p class="folder-confirm-copy">${esc(copy)}</p>` : ''}${note ? ui`<p class="folder-confirm-note">${esc(note)}</p>` : ''}<footer><button type="button" class="text-button" value="cancel">${t('取消')}</button><button class="${actionClass}" value="submit">${submit}</button></footer></form>`;
+  dialog.innerHTML = ui`<form method="dialog" class="folder-confirm"><header><span>${title}</span><span class="toolbar-spacer"></span><button type="button" class="icon-button folder-editor-close" value="cancel" title="${t('关闭')}" aria-label="${t('关闭')}">${icon('x')}</button></header>${copy ? ui`<p class="folder-confirm-copy${highlightCopy ? ' folder-confirm-highlight' : ''}">${esc(copy)}</p>` : ''}${note ? ui`<p class="folder-confirm-note">${esc(note)}</p>` : ''}<footer><button type="button" class="text-button" value="cancel">${t('取消')}</button><button class="${actionClass}" value="submit">${submit}</button></footer></form>`;
   dialog.showModal();
 }
 function showFolderEditor(kind, parent = '', scope = '') {
@@ -3187,7 +3152,6 @@ document.addEventListener('submit',event => {
 const menuButton = (label, action, data = {}, disabled = false, tip = '') => `<button role="menuitem" data-menu-action="${action}" ${Object.entries(data).map(([key,value]) => `data-${key}="${esc(value)}"`).join(' ')} aria-disabled="${disabled}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(data.raw ? label : t(label))}</button>`;
 const menuChoice = (label, action, data, checked) => `<button role="menuitemradio" data-menu-action="${action}" ${Object.entries(data).map(([key,value]) => `data-${key}="${esc(value)}"`).join(' ')} aria-checked="${checked}"><span class="context-menu-check">${checked ? '✓' : ''}</span><span>${esc(t(label))}</span></button>`;
 function displayMenu(markup,x,y) {
-  hideConversationPreview('context-menu');
   const menu = document.getElementById('context-menu');
   menu.innerHTML = markup;
   menu.hidden = false;
@@ -3823,9 +3787,22 @@ document.addEventListener("click", async event => {
     if (name === 'export-config') { void exportConfiguration(); return; }
     if (name === 'import-config') { document.getElementById('config-import')?.click(); return; }
     if (name === 'open-conversation-preview') { await showConversationPreview(action.dataset.id); return; }
-    if (name === 'close-conversation-preview') { state.previewPinned = false; savePreferences(); hideConversationPreview('close-action'); return; }
-    if (name === 'toggle-preview-details') { togglePreviewDetails(action.dataset.previewKind); return; }
-    if (name === 'toggle-conversation-preview-pin') { state.previewPinned = !state.previewPinned; savePreferences(); renderConversationPreview(false,'position'); return; }
+    if (name === 'close-conversation-preview') { hideConversationPreview('close-action'); return; }
+    if (name === 'toggle-preview-details') { togglePreviewDetails(); return; }
+    if (name === 'toggle-conversation-preview-pin') {
+      action.disabled=true;
+      const enabled=!state.previewPinned;
+      try {await nativeInvoke('set_always_on_top',{enabled});state.previewPinned=enabled;renderConversationPreview(false,'position');}
+      catch(error){showToast(t('操作失败'),String(error),'error');}
+      finally{action.disabled=false;}
+      return;
+    }
+    if (name === 'preview-attachment') {
+      if(action.hasAttribute('data-image'))showPreviewImage(action.querySelector('img'));
+      else try{await nativeInvoke('preview_attachment',previewAttachmentArgs(action,true));}
+      catch(error){action.textContent=action.textContent+' · '+String(error);action.disabled=true;}
+      return;
+    }
     if (name === 'pick-project') {
       const value = action.dataset.value;
       const pickerId = action.dataset.pickerId;
@@ -4804,7 +4781,8 @@ document.addEventListener('visibilitychange', () => {
   if (!isAuxiliaryWindow) refreshRecentWindow();
   syncLiveTimers();
   if (!document.hidden && nativeInvoke) {
-    chats.filter(chat => chat.working && (!isPreviewWindow || chat.id === previewChatId)).forEach(chat => pendingActivityIds.add(chat.id));
+    queuePendingQuestions();
+    queueLiveActivity();
     queueSourceRefresh(!isAuxiliaryWindow && chats.some(chat => chat.id === state.selectedChatId) ? {threads:[state.selectedChatId]} : {});
     void refreshLiveRateLimits();
     if (previewChatId) refreshConversationPreview();

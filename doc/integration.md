@@ -19,7 +19,7 @@ CodexChatPane's own settings are kept separately in `.codex-chat-pane` under tha
 - `state_5.sqlite`: basic thread information and project associations.
 - `.codex-global-state.json`: global projects, thread assignments, pins, and unread state.
 - `thread_history_1.sqlite`: supplements message times, missing execution details, and failure status by chat ID. File changes compare the latest-turn status summary; tool item writes do not refresh the whole list's activity.
-- Rollout JSONL: incrementally supplies state, user/progress times, execution time and errors. Parsers temporarily inspect needed fields; complete content is shown on demand in paged previews. Catalog and statistics windows do not receive request/activity bodies; statistics receive summaries and paged turns.
+- Rollout JSONL: incrementally supplies state, user/progress times, execution time and errors. Parsers temporarily inspect needed fields; complete content is shown on demand in the selected chat preview. Catalog and statistics windows do not receive request/activity bodies; statistics receive summaries and paged turns.
 - JSONL.ZST and history_base chains use the same logical reader. Previews may show inherited text; metrics/forecast ownership excludes inherited and child events. Migration preserves event times.
 - Codex Desktop logs: a limited set of retry and activity diagnostics.
 

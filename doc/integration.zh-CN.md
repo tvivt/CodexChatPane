@@ -19,7 +19,7 @@ CodexChatPane 自身的设置单独保存在该 Codex home 下的 `.codex-chat-p
 - `state_5.sqlite`：Thread 基础信息和 Project 关联。
 - `.codex-global-state.json`：全局 Project、Thread assignment、Pin 和未读状态。
 - `thread_history_1.sqlite`：按对话 ID 补充消息时间、缺失执行信息和失败状态；文件变化先比较最新轮次状态摘要，工具项写入不刷新全列表活动。
-- rollout JSONL：增量提供工作状态、最近用户消息与进展时间、执行时间和错误；解析时临时检查必要字段，完整正文仅按需进入分页预览，不进入普通目录或统计窗口；统计窗口只传摘要和分页轮次。
+- rollout JSONL：增量提供工作状态、最近用户消息与进展时间、执行时间和错误；解析时临时检查必要字段，打开预览时只读取所选对话的完整正文，不进入普通目录或统计窗口；统计窗口只传摘要和分页轮次。
 - `.jsonl.zst` 和 `history_base`：统一读取压缩及续接链，预览可以包含继承正文，计量/预测按目标 thread_id 排除继承；迁移不改事件时间。
 - Codex Desktop 日志：有限的 retry 和活动诊断。
 

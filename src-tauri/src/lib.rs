@@ -341,6 +341,7 @@ async fn load_snapshot(app: tauri::AppHandle, _catalog_only: bool) -> SourceSnap
                             history_loaded: false,
                             activity_pending: vec![],
                             source_identity: identity,
+                            title_sources: Default::default(),
                         };
                     }
                 }
@@ -360,6 +361,7 @@ async fn load_snapshot(app: tauri::AppHandle, _catalog_only: bool) -> SourceSnap
                 history_loaded: false,
                 activity_pending: vec![],
                 source_identity: None,
+                title_sources: Default::default(),
             });
         result
     })
@@ -689,6 +691,8 @@ async fn get_usage_consumption(
                     serde_json::json!({"done":done,"total":total}),
                 );
             })?;
+        } else {
+            usage::costs::sync_catalog(&home, snapshot.as_ref())?;
         }
         let report = usage::costs::report(&home, query)?;
         if usage::context::identity(&home)? != identity {
@@ -750,31 +754,28 @@ async fn update_current_usage(
 #[tauri::command]
 async fn get_chat_preview(
     thread_id: String,
-    before: Option<preview::PreviewCursor>,
-    logger: tauri::State<'_, diagnostics::Logger>,
-) -> Result<preview::PreviewPage, String> {
-    let logger = logger.inner().clone();
+    revision: Option<u64>,
+) -> Result<preview::transcript::Update, String> {
     if !is_thread_id(&thread_id) {
-        logger.warn(format!(
-            "[DEBUG-preview] backend invalid threadId={thread_id}"
-        ));
         return Err("Chat ID 格式无效".into());
     }
-    let log_thread_id = thread_id.clone();
-    let log_before = before;
-    let started_at = std::time::Instant::now();
-    logger.debug(format!(
-        "[DEBUG-preview] backend request threadId={log_thread_id} before={log_before:?}"
-    ));
-    let result = tauri::async_runtime::spawn_blocking(move || preview::read(&thread_id, before))
+    tauri::async_runtime::spawn_blocking(move || preview::transcript::read(&thread_id, revision))
         .await
-        .map_err(|e| e.to_string())?;
-    logger.debug(format!(
-        "[DEBUG-preview] backend result threadId={log_thread_id} before={log_before:?} ok={} elapsedMs={}",
-        result.is_ok(),
-        started_at.elapsed().as_millis()
-    ));
-    result
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn preview_attachment(
+    thread_id: String,
+    offset: u64,
+    index: usize,
+    open: bool,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        preview::transcript::attachment(&thread_id, offset, index, open)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1211,8 +1212,16 @@ mod win_shell {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
+    #[repr(C)]
+    struct OpenAsInfo {
+        file: *const u16,
+        class: *const u16,
+        flags: u32,
+    }
+
     #[link(name = "shell32")]
     extern "system" {
+        fn SHOpenWithDialog(owner: *mut core::ffi::c_void, info: *const OpenAsInfo) -> i32;
         fn ShellExecuteW(
             hwnd: *mut core::ffi::c_void,
             lp_operation: *const u16,
@@ -1221,6 +1230,21 @@ mod win_shell {
             lp_directory: *const u16,
             n_show_cmd: i32,
         ) -> isize;
+    }
+
+    pub(super) fn choose_viewer(path: &std::path::Path) -> Result<(), String> {
+        let file: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+        let info = OpenAsInfo {
+            file: file.as_ptr(),
+            class: std::ptr::null(),
+            flags: 4,
+        };
+        let result = unsafe { SHOpenWithDialog(std::ptr::null_mut(), &info) };
+        if result >= 0 || result as u32 == 0x800704C7 {
+            Ok(())
+        } else {
+            Err(format!("无法选择打开方式：{result:#x}"))
+        }
     }
 
     pub fn open(uri: &str) -> Result<(), String> {
@@ -1347,6 +1371,7 @@ pub fn run() {
             open_conversation_preview_window,
             open_chat_metrics_window,
             get_chat_preview,
+            preview_attachment,
             get_chat_metrics,
             log_preview_event,
             report_internal_test_event,

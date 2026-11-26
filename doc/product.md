@@ -34,13 +34,19 @@ Chat-to-project assignment follows this priority:
 1. An explicit no-project marker.
 2. Codex's global thread-to-project assignment.
 3. The thread's own `project_id`.
-4. A match between the thread's current working directory and a project path.
-5. If none match, the chat goes into a synthetic "Unclassified chats" project.
+4. If no explicit assignment exists, the chat goes into a synthetic "Unclassified chats" project.
 
 The synthetic project is only a UI placeholder and is not written back to Codex.
 
+Global catalog settings prefer the `global` scope in `.codex-global-state.sqlite`; absent keys fall back to legacy `.codex-global-state.json`. Explicit empty settings and no-project markers remain authoritative. Working directories and project root paths never determine membership, including projects with multiple roots; paths remain available for display and opening folders.
+
+Unread state, chat/project pins and project order use the same current global settings. Empty unread/pin sets override stale legacy values. Usage reports refresh cached project labels from a valid catalog without rereading rollout bodies or changing request usage; missing, stale or foreign catalogs preserve known cached assignments. A valid explicit no-project change can still clear a cached assignment. Pane's activity and local custom sorting continue to control its display order.
+
+Chat titles observe both `threads.name` (falling back to `title`) and `session_index.jsonl`. During a running session, changes in either source update the title without requiring a new message; unchanged stale values do not undo an observed rename. On initial load, conflicting values use the index timestamp versus the thread timestamp. File notifications feed the existing 180 ms refresh queue; new global-state writes only refresh the catalog when a catalog setting changes.
+
 ## 5. Sorting and status
 
+- The initial MCP consent dialog first highlights that the app icon appears only in the system tray, not on the taskbar, then explains MCP actions in the same dialog.
 - By default, chats are ordered by activity area and received time; local click time is not treated as Codex activity.
 - Name sorting, project filtering, date ranges, and archive views are available.
 - Chat status can include unread, working, completed, failed, interrupted, and no-response diagnostics.

@@ -79,7 +79,7 @@ Click a chat row or its action menu to open the conversation in Codex Desktop. C
 
 ### Preview a chat
 
-Conversation preview icons are off by default. Enable them in settings to show the control on chat rows. The context menu offers Chat preview for active and archived chats regardless of that setting. Pages are read from the corresponding rollout on demand; closing the preview does not save the text to tool settings.
+Conversation preview icons are off by default. Enable them in settings or open Chat preview from the context menu of any active or archived chat. The preview reads the selected conversation in full and lists each question in the user's own words. Expand a question to read the exchange, view images or open files. The preview window has its own always-on-top pin. Conversation text is never saved to tool settings.
 
 To override the recent activity filter, right-click a chat and choose **Activity display → Auto, Include, or Exclude**. The Activity rules dialog shows both override lists and lets you return a chat to Auto.
 

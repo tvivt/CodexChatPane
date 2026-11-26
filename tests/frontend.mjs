@@ -73,28 +73,10 @@ assert.ok(script.includes("PREVIEW_WINDOW_LABEL = 'conversation-preview'"), 'pre
 assert.ok(script.includes("nativeInvoke('open_conversation_preview_window'"), 'native preview creation shares the CODEX_HOME webview data');
 assert.ok(rust.includes('format!("index.html?preview={}"'), 'preview webview opens the preview route');
 assert.ok(script.includes('data-action="toggle-preview-details"'), 'preview header has total fold controls');
-assert.ok(script.includes('previewRoleLabel') && script.includes("'U'") && script.includes("'A'") && script.includes("'STEER'") && script.includes("icon('chevrons-down')"), 'preview controls use compact U/A fold labels and STEER content labels');
-assert.match(html, /\.conversation-preview-head \.preview-fold-control \{[^}]*gap:0;/, 'preview fold labels touch their expand icons');
-assert.match(html, /\.conversation-preview-head \.preview-fold-control \{[^}]*min-width:0;/, 'preview fold controls have no forced empty width');
-assert.match(html, /\.preview-fold-label \{ min-width:0; flex:0 0 auto;/, 'compact U/A labels do not reserve role-column space');
-assert.match(html, /\.conversation-block > summary > \.preview-role-label \{ min-width:6ch; flex:0 0 6ch;/, 'preview role columns reserve six characters');
-assert.match(html, /\.conversation-block \.conversation-summary \{[^}]*color:var\(--text\);/, 'preview summaries use light text');
-assert.match(html, /\.conversation-item\.system \{[^}]*color:var\(--text\);/, 'preview system text uses light text');
-assert.ok(script.includes("else if (detail.dataset.previewBlock) detail.open = false"), 'preview folds USER and AI blocks by default');
-assert.match(script, /const needsOlder = previewNeedsOlderPage\(body, ?page\)/, 'preview loads older pages from the scroll position and history cursor');
-assert.ok(script.includes(') / Math.max(1, body.scrollHeight) <= PREVIEW_HISTORY_THRESHOLD'), 'preview uses distance from content top for history paging');
-assert.ok(script.includes('page?.before != null && previewNearTop(body)'), 'preview gates history paging on the backend cursor');
-assert.ok(!script.includes('body.scrollHeight <= body.clientHeight'), 'preview history paging does not use viewport-height underflow');
-assert.ok(!script.includes('scrollTop < 60') && !script.includes('> 48'), 'preview history paging does not use pixel thresholds');
-assert.ok(script.includes('const conversationLoadQueues = new Map()'), 'preview history and refreshes share a serial queue');
-assert.ok(script.includes('function queueConversationPage('), 'preview loads are queued instead of dropped while busy');
-assert.ok(script.includes('queueConversationPage(previewChatId,page.before)'), 'history loads use the preview queue');
-assert.ok(script.includes('queueConversationPage(previewChatId,null,true)'), 'latest refreshes use the preview queue');
-assert.ok(script.includes("renderConversationPreview(false,'prepend',true);") && script.includes('queueConversationPage(id,null,true);'), 'history completion queues a latest refresh');
-assert.ok(!script.includes('previewHistoryLoading'), 'preview history paging has one scroll-and-cursor decision');
-assert.ok(script.includes("nativeInvoke('log_preview_event'") && script.includes("previewLog('scroll'") && script.includes("previewLog('event-wheel'") && script.includes("previewLog('event-click'") && script.includes("previewLog('event-contextmenu'"), 'preview loading and input events are debug logged');
-assert.ok(script.includes("hideConversationPreview('close-action')") && script.includes("hideConversationPreview('context-menu')"), 'preview hide sources are tagged in debug logs');
-assert.equal((script.match(/queueSourceRefresh\(\{activityTick:true\}\)/g) || []).length, 2, 'active main and preview windows refresh status once per tick');
+assert.ok(script.includes("class=\"preview-question") && script.includes("data-preview-key"), 'preview uses stable question disclosures');
+assert.match(html, /\.preview-question summary:focus-visible/, 'outline has a keyboard focus indicator');
+assert.match(html,/\.preview-question-title \{[^}]*white-space:pre-wrap/,'the full multiline prompt is visible');
+assert.ok(script.includes("nativeInvoke('set_always_on_top',{enabled})"),'pin controls the preview window itself');
 assert.ok(!script.includes('setInterval(() => { void loadNativeSnapshot(); }, 1000);'), 'active polling does not reload the full catalog');
 const fixtures = readFileSync(new URL('./fixtures.js', import.meta.url), 'utf8');
 const app = { innerHTML: '' };
@@ -157,7 +139,7 @@ const context = vm.createContext({
   setInterval: (callback, milliseconds) => intervals.push({ callback, milliseconds }),
   setTimeout: (callback, milliseconds) => timeouts.push({ callback, milliseconds }),
   clearTimeout: () => {},
-  clearInterval: () => {},
+  clearInterval: id => { if (intervals[id-1]) intervals[id-1].cancelled = true; },
   requestAnimationFrame: () => {},
   reportedGeometry,
   windowCalls,
@@ -251,11 +233,11 @@ vm.runInContext(`
   chats = [chat]; pendingActivityIds.clear(); pendingHistoryIds.clear(); pendingFullRefresh = false; pendingCatalogRefresh = false; pendingHistoryRefresh = false; timeouts.length = 0;
   queueSourceRefresh({history:true});
   assert.equal(timeouts.length, 1, 'history writes queue a status summary check without a full scan');
-  queueSourceRefresh({activityTick:true});
+  queueLiveActivity();
   assert.equal(timeouts.length, 1, 'the status tick coalesces with the pending summary check');
   assert.equal(pendingFullRefresh, false);
   const previousWorkingForRefresh = chat.working;
-  chat.working = false; sourceRefreshTimer = 0; timeouts.length = 0;
+  chat.working = false; pendingActivityIds.clear(); sourceRefreshTimer = 0; timeouts.length = 0;
   queueSourceRefresh({history:true});
   assert.equal(pendingFullRefresh, false, 'idle history writes never escalate to a full scan');
   assert.equal(pendingActivityIds.size, 0, 'history writes do not query all cached chats');
@@ -1365,6 +1347,7 @@ vm.runInContext(`
   assert.ok(folderDialog.innerHTML.includes('重命名'), 'rename dialog confirms with 重命名');
   confirmCodexMcpUse();
   assert.ok(folderDialog.innerHTML.includes('folder-confirm-note') && folderDialog.innerHTML.includes('启用'), 'MCP consent uses the in-app confirm');
+  assert.ok(folderDialog.innerHTML.includes('folder-confirm-highlight') && folderDialog.innerHTML.includes('本程序的图标仅显示在系统托盘，不显示在任务栏。') && folderDialog.innerHTML.indexOf('本程序的图标仅显示在系统托盘，不显示在任务栏。') < folderDialog.innerHTML.indexOf('CodexChatPane 将通过'), 'the highlighted tray notice precedes the MCP explanation in the same dialog');
   document.getElementById = prevGet;
   state.openFolders.clear();
   const nestedProject = projects[1];
@@ -1827,30 +1810,28 @@ vm.runInContext(`
   assert.ok(!CONFIG_KEYS.some(key=>key.includes('preview')),'config exports do not include chat output');
   assert.equal(typeof showChatTip,'undefined','chat metadata tooltip is removed');
   assert.ok(chatPreviewIcon(example).includes('#i-preview'));
-  const previewMarkup = conversationMarkup({items:[{kind:'user',text:'Question'},{kind:'interruption',text:'More'},{kind:'system',text:'AGENTS.md\\nraw'},{kind:'assistant',text:'Answer'}],currentUser:1});
-  assert.ok(previewMarkup.includes('conversation-item user'));
-  assert.ok(previewMarkup.includes('conversation-item interruption'));
-  assert.ok(previewMarkup.includes('<strong>AGENTS.md</strong>'));
-  assert.ok(previewMarkup.includes('conversation-nested'),'system context is nested inside the following AI reply');
-  assert.ok(previewMarkup.includes('assistant-block'),'AI replies use collapsible blue blocks');
-  assert.ok(previewMarkup.includes('>USER<') && previewMarkup.includes('>AI<') && previewMarkup.includes('>STEER<'), 'preview blocks use the requested role labels');
-  const groupedMarkup = conversationMarkup({items:[{kind:'user',text:'Question'},{kind:'process',text:'Used tools'},{kind:'compact',text:'Context automatically compacted'},{kind:'interruption',text:'Steer'},{kind:'assistant',text:'Answer'}],currentUser:3});
-  const groupedAssistant = groupedMarkup.indexOf('assistant-block');
-  assert.ok(groupedAssistant >= 0 && groupedMarkup.slice(groupedAssistant).includes('conversation-item process') && groupedMarkup.slice(groupedAssistant).includes('conversation-item compact') && groupedMarkup.slice(groupedAssistant).includes('conversation-item interruption'), 'AI reply contains process, compaction and steer items');
-  assert.equal((groupedMarkup.match(/assistant-block/g) || []).length, 1, 'one AI block contains the whole turn');
-  const fullAnswer = conversationMarkup({items:[{kind:'assistant',text:'1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n10'}]});
-  assert.ok(fullAnswer.includes('1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n10'), 'preview keeps the complete assistant answer');
-  assert.notEqual(conversationSignature({items:[{kind:'assistant',text:'old'}]}), conversationSignature({items:[{kind:'assistant',text:'new'}]}), 'live preview detects new conversation content');
-  assert.equal(previewNearTop({scrollTop:0,scrollHeight:1000,clientHeight:300}), true, 'top of preview is inside the history trigger range');
-  assert.equal(previewNearTop({scrollTop:200,scrollHeight:1000,clientHeight:300}), true, 'twenty percent history trigger includes the boundary');
-  assert.equal(previewNearTop({scrollTop:201,scrollHeight:1000,clientHeight:300}), false, 'history trigger stops outside the top twenty percent');
-  assert.equal(previewNeedsOlderPage({scrollTop:0,scrollHeight:200,clientHeight:300},{before:100,loading:false}), true, 'a short preview with a history cursor loads older pages');
-  assert.equal(previewNeedsOlderPage({scrollTop:0,scrollHeight:1000,clientHeight:300},{before:null,loading:false}), false, 'a missing history cursor stops paging');
-  assert.equal(previewNeedsOlderPage({scrollTop:0,scrollHeight:1000,clientHeight:300},{before:100,loading:true}), true, 'history intent is queued while refresh is active');
-  assert.ok(conversationMarkup({items:[{kind:'system',text:'Cited memory\\nraw'},{kind:'aborted',text:'Turn aborted\\nstopped'}]}).includes('<strong>Cited memory</strong>'));
-  setLanguage('en');
-  assert.ok(menuButton('工作中','copy',{raw:1}).includes('工作中'),'custom group/folder names are not translated in menus');
-  setLanguage('zh');
+  const items=[{kind:'process',text:'Used tools',offset:1},{kind:'user',text:'OK. 上面这些修改点汇总一下吧',offset:2},{kind:'assistant',text:'正在检查',offset:3},{kind:'process',text:'Used tools',offset:4},{kind:'assistant',text:'检查完毕',offset:5},{kind:'interruption',text:'补充',offset:6},{kind:'assistant',text:'收到',offset:7}];
+  const groups=previewGroups(items);
+  assert.equal(groups.length,1);
+  const row=previewRow(groups[0],true);
+  assert.ok(row.includes(items[1].text) && !row.includes('Used tools'));
+  const thread=previewThread(groups[0]);
+  assert.equal((thread.match(/class="preview-message assistant"/g)||[]).length,2);
+  assert.ok(thread.indexOf('正在检查') < thread.indexOf('Used tools') && thread.slice(thread.indexOf('正在检查'),thread.indexOf('检查完毕')).indexOf('</article>')===-1);
+  assert.equal(previewGroups([{kind:'user',offset:9,text:'',attachments:[{name:'说明.pdf'}]}])[0].title,'说明.pdf');
+  const prompt='图2：标题应显示用户对话。'+String.fromCharCode(10)+'图1：请完整显示。';
+  const attachments=[{name:'第一张.png',image:true,at:prompt.length},{name:'说明.pdf',at:3},{name:'第二张.png',image:true,at:1}];
+  const [withImages]=previewGroups([{kind:'user',offset:11,text:prompt,attachments}]);
+  assert.equal(withImages.title,prompt);
+  const expanded=previewThread(withImages);
+  const expected=['data-index="0" data-image','data-index="2" data-image',prompt.slice(0,3),'说明.pdf',prompt.slice(3)];
+  let last=-1;
+  for(const part of expected){
+    const next=expanded.indexOf(part);
+    assert.ok(next>last,'preview content order: '+part);
+    last=next;
+  }
+  assert.ok(previewRow({key:10,title:'<tag>'},false).includes('&lt;tag&gt;'));
 `,context);
 vm.runInContext(`
   state.tab = 'project';
@@ -1917,17 +1898,58 @@ await vm.runInContext(`(async () => {
     assert.equal(calls[0].args.historyChanged,true);
     assert.equal(calls[0].args.threadIds.length,0,'idle history changes only compare status summaries');
     reset();
-    pendingActivityIds.add('active-1'); pendingActivityIds.add('active-2');
-    queueSourceRefresh({activityTick:true});
+    chats[0].working = true;
+    queueLiveActivity();
     await flushSourceRefresh();
-    assert.equal(calls[0].args.historyIds.length,0,'timer ticks never request history SQL');
+    assert.equal(calls[0].args.historyIds.length,0,'working chats without questions do not poll history');
     assert.equal(calls[0].args.historyChanged,false);
     reset();
+    for (const working of [false, true]) {
+      chats = [nativeChat({id:'waiting',title:'Waiting',waitingForInput:true},0),nativeChat({id:'idle',title:'Idle'},1)];
+      nativeInvoke = async (command,args) => {
+        calls.push({command,args});
+        return {chats:[{id:'waiting',title:'Waiting',working,waitingForInput:false,executionStatus:working?'inProgress':'completed'}]};
+      };
+      savedTimers();
+      assert.equal(activityCheckTimer,0,'an idle question has no one-second status poll');
+      const timer = intervals[questionCheckTimer-1];
+      assert.equal(timer.milliseconds, 5000, 'pending questions have a five-second fallback');
+      savedTimers();
+      assert.equal(intervals[questionCheckTimer-1],timer,'regular renders preserve the fallback deadline');
+      timer.callback();
+      await flushSourceRefresh();
+      assert.deepEqual(calls[0].args.historyIds,['waiting']);
+      assert.deepEqual(calls[0].args.threadIds,['waiting']);
+      assert.equal(chats[0].waitingForInput,false,'card answer alone clears the question');
+      assert.equal(chats[0].working,working,'answer displays the actual execution state');
+      assert.ok(!chatWorkStatus(chats[0]).includes('waiting-input'));
+      savedTimers();
+      assert.ok(timer.cancelled && !questionCheckTimer,'last answer cancels the fallback even if the chat is working');
+      reset();
+    }
+    chats = ['answered','pending'].map((id,index) => nativeChat({id,title:id,working:index===0,waitingForInput:true},index));
+    nativeInvoke = async (command,args) => {
+      calls.push({command,args});
+      return {chats:[{id:'answered',title:'answered',working:true,waitingForInput:false}]};
+    };
+    savedTimers();
+    const sharedFallback = intervals[questionCheckTimer-1];
+    intervals[activityCheckTimer-1].callback();
+    assert.equal(pendingHistoryIds.size,0,'working ticks do not reread question history');
+    queueSourceRefresh({threads:['answered']});
+    await flushSourceRefresh();
+    assert.equal(state.syncError,'');
+    assert.equal(chats[0].waitingForInput,false);
+    savedTimers();
+    assert.equal(intervals[questionCheckTimer-1],sharedFallback,'the other pending question keeps its deadline');
+    sharedFallback.callback();
+    assert.deepEqual([...pendingHistoryIds],['pending'],'answered chats drop out of subsequent fallback checks');
+    reset();
+    chats = [{id:'active-1',working:false},{id:'active-2',working:false},{id:'idle',working:false}];
+    nativeInvoke = async (command,args) => { calls.push({command,args}); return {chats:[]}; };
     queueSourceRefresh({catalog:true,threads:['new-thread']});
     await flushSourceRefresh();
     assert.equal(calls[0].command,'get_catalog_snapshot');
-    assert.ok(pendingActivityIds.has('new-thread') && pendingHistoryIds.has('new-thread'),'catalog replay preserves both sets');
-    await flushSourceRefresh();
     assert.deepEqual(calls[1].args.threadIds,['new-thread']);
     assert.deepEqual(calls[1].args.historyIds,['new-thread']);
     reset();
@@ -1942,12 +1964,16 @@ await vm.runInContext(`(async () => {
     assert.equal(calls[0].args.historyChanged,true);
     reset();
     document.hidden = true;
+    chats[0].waitingForInput = true;
+    savedTimers();
+    assert.equal(questionCheckTimer,0);
     queueSourceRefresh({threads:['idle'],history:true});
     await flushSourceRefresh();
     assert.equal(calls.length,0);
     assert.equal(timeouts.length,0,'hidden windows do not schedule retries');
     document.hidden = false;
     for (const callback of handlers.get('visibilitychange') || []) callback();
+    assert.ok(pendingHistoryIds.has('active-1'),'becoming visible checks outstanding questions immediately');
     assert.equal(pendingFullRefresh,false,'visibility resume does not rescan execution history');
     assert.ok(pendingActivityIds.has('idle') && pendingHistoryRefresh);
     assert.equal(calls[0].command,'quota','quota refresh stays independent on resume');
@@ -1956,6 +1982,19 @@ await vm.runInContext(`(async () => {
     reset();
     isPreviewWindow = true;
     previewChatId = 'idle';
+    savedTimers();
+    assert.equal(questionCheckTimer,0,'preview ignores pending questions in other chats');
+    chats[2].waitingForInput = true;
+    savedTimers();
+    assert.equal(previewRefreshTimer,0,'idle preview does not poll every second');
+    const previewFallback = intervals[questionCheckTimer-1];
+    previewFallback.callback();
+    assert.deepEqual([...pendingHistoryIds],['idle']);
+    document.hidden = true;
+    savedTimers();
+    assert.ok(previewFallback.cancelled && !questionCheckTimer,'hidden preview stops the fallback');
+    document.hidden = false;
+    reset();
     queueSourceRefresh({history:true,threads:['active-1']});
     await flushSourceRefresh();
     assert.deepEqual(calls[0].args.threadIds,['idle'],'preview history supplements only its target chat');
