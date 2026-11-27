@@ -15,6 +15,7 @@ assert.match(rust, /#\[tauri::command\]\s+async fn open_chat_metrics_window\(/);
 assert.ok(rust.includes('format!("index.html?metrics={}"'), 'metrics uses a separate window route');
 assert.match(rust,/matches!\(\s*window.label\(\),\s*"conversation-preview" \| "chat-metrics" \| "usage-history"\s*\)/, 'closing auxiliary windows must not mark the main pane as user-closed');
 assert.ok(JSON.parse(readFileSync(new URL('../src-tauri/capabilities/default.json',import.meta.url),'utf8')).windows.includes('chat-metrics'));
+assert.ok(JSON.parse(readFileSync(new URL('../src-tauri/capabilities/default.json',import.meta.url),'utf8')).windows.includes('codex-radar'));
 assert.ok(rust.includes('.drag_and_drop(false)'), 'Windows HTML5 folder drag requires native file-drop intercept off');
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8') + readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
 assert.ok(html.includes('.chat-row.drag-ready'), 'grab cursor waits for a hold');
@@ -67,7 +68,14 @@ assert.ok(html.includes('.project-recent-column-resizer.time-column') && html.in
 assert.ok(html.includes('.project-recent-column-resizer::before { content:""; position:absolute; inset:0 3px; background:transparent; opacity:0; }'), '3 Days column lines stay hidden until hovered');
 assert.ok(html.includes('.project-recent-panel.project-column-hidden .global-chat-row.without-type') && html.includes('.project-recent-panel.project-column-hidden .global-chat-project, .project-recent-panel.project-column-hidden .project-recent-column-resizer.project-column { display:none; }'), 'hidden project column reclaims its width and hides its resize handle');
 assert.ok(html.includes('.chat-column-resizer.time-column') && html.includes('.chat-column-resizer.project-column'), 'Chats columns have vertical resize handles');
-const script = ['dynamic.js','i18n.js','usage.js','usage-preload.js','app.js'].map(file => readFileSync(new URL('../src/' + file, import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'')).join('\n').replace('const nativeInvoke =', 'let nativeInvoke =').replace('const isPreviewWindow =', 'let isPreviewWindow =').replace('const isMetricsWindow =', 'let isMetricsWindow =').replace('const isAuxiliaryWindow =', 'let isAuxiliaryWindow =');
+assert.ok(!html.includes(':root[data-theme-family][data-theme] {\n  --text: #fff;') && html.includes(':root[data-theme-family][data-theme="dark"]'), 'forced white text stays scoped to dark themes so light themes remain legible');
+assert.ok(html.includes('.folder-view-label {') && html.includes('background:var(--section-bar);') && !html.includes('color-mix(in srgb,var(--popup) 82%,#000); font-size:var(--font-pane)'), 'section bars use theme-aware --section-bar instead of mixing light backgrounds with black');
+assert.ok(!html.includes(':root[data-theme-family][data-theme="light"] .icon-button { color: var(--focus); }'), 'light mode preserves icon hierarchy instead of painting every button with --focus');
+for (const family of ['catppuccin', 'tokyo', 'gruvbox', 'everforest', 'ayu']) {
+  const block = html.match(new RegExp(`:root\\[data-theme-family="${family}"\\]\\[data-theme="light"\\]\\s*\\{([^}]*)\\}`));
+  assert.ok(block && block[1].includes('--text:') && block[1].includes('--selected-text:') && block[1].includes('--shadow:'), `${family} light theme defines text, selection text, and light shadow tokens`);
+}
+const script = ['dynamic.js','i18n.js','usage.js','usage-preload.js','codex-radar.js','codex-radar-view.js','chat-navigation.js','app.js'].map(file => readFileSync(new URL('../src/' + file, import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'')).join('\n').replace('const nativeInvoke =', 'let nativeInvoke =').replace('const isPreviewWindow =', 'let isPreviewWindow =').replace('const isMetricsWindow =', 'let isMetricsWindow =').replace('const isAuxiliaryWindow =', 'let isAuxiliaryWindow =');
 assert.ok(!script.includes("if (nativeInvoke) void nativeInvoke('set_window_mode',{mode:state.windowMode}).catch(() => {});"), 'startup does not race the loaded window mode');
 assert.ok(script.includes("PREVIEW_WINDOW_LABEL = 'conversation-preview'"), 'preview uses a separate webview window');
 assert.ok(script.includes("nativeInvoke('open_conversation_preview_window'"), 'native preview creation shares the CODEX_HOME webview data');
@@ -217,7 +225,7 @@ vm.runInContext(`
   assert.ok(navigationHeader().includes('data-tab="timeline"'));
   assert.ok(!navigationHeader().includes('toggle-chats-dock'),'Chats uses tabs only');
   assert.ok(!renderTitlebar().includes('navigation-tabs') && !renderTitlebar().includes('data-tab='), 'main titlebar hides Projects and Chats tabs');
-  assert.ok(renderTitlebar().includes('class="window-version">v' + appVersion + '</span>'), 'titlebar displays the package version');
+  assert.ok(renderTitlebar().includes('title="CodexChatPane v' + appVersion + '"') && !renderTitlebar().includes('class="window-version"'), 'the runtime package version is in the app-name tooltip');
   assert.ok(!renderProjectPane().includes('navigation-tabs') && !renderChatPane().includes('navigation-tabs'), 'workspace panes do not duplicate the titlebar tabs');
   const fixture = { id: 'fixture', projectId: 'stock', title: 'Fixture', activityAt: 100, lastUserMessageAt: 100, createdAt: 1, updatedAt: 100, executionStatus: 'inProgress', working: true, codexPinned: true, codexUnread: false };
   let chat = nativeChat(fixture, 0, null);
@@ -229,6 +237,26 @@ vm.runInContext(`
   showToast('error title','error body','error');
   assert.ok(toast.className.includes('error') && toast.innerHTML.includes('data-toast-action="copy"') && toast.innerHTML.includes('data-toast-action="close"'), 'error notifications stay actionable');
   assert.equal(timeouts.length, 0, 'warning and error notifications do not auto-dismiss');
+  const tipChat={...chat,id:'01a216de-584d-7332-ab96-ed30a191a8b5',title:'Original title'};
+  assert.equal(chatTitleTip(tipChat),'[a8b5] Original title');
+  assert.equal(chatTitleTip({...tipChat,id:'thread-000a'}),'[000a] Original title');
+  assert.equal(chatTitleTip({...tipChat,id:'thread-a00B'}),'[a00B] Original title');
+  for(const markup of [chatRow(tipChat),chatRow(tipChat,true,true),globalChatRow(tipChat)]) {
+    assert.ok(markup.includes('title="[a8b5] Original title"'));
+    assert.ok(markup.includes('>Original title<')&&!markup.includes('>[a8b5] Original title<'),'visible titles remain unchanged');
+  }
+  assert.ok(!renderTitlebar().includes('data-radar-trigger'),'default configuration leaves no optional-feature icon or placeholder');
+  assert.ok(!JSON.stringify(toolConfig()).includes('codexRadarEnabled'),'default serialized config does not advertise an off switch');
+  assert.ok(!renderSettingsPane().includes('codexRadarEnabled')&&!renderSettingsPane().includes('Codex Radar')&&!renderSettingsPane().includes('Codex 雷达'),'settings do not expose the hidden option');
+  state.codexRadarEnabled=true;
+  assert.equal(toolConfig().codexRadarEnabled,true,'normal settings saves preserve an explicit enable');
+  const topbar=renderTitlebar();
+  assert.ok(topbar.indexOf('window-name')<topbar.indexOf('data-radar-trigger'));
+  assert.ok(topbar.indexOf('data-radar-trigger')<topbar.indexOf('history-back')&&topbar.indexOf('history-back')<topbar.indexOf('history-forward')&&topbar.indexOf('history-forward')<topbar.indexOf('toggle-settings'));
+  assert.match(topbar,/data-action="history-back"[^>]*disabled/);
+  assert.match(topbar,/data-action="history-forward"[^>]*disabled/);
+  state.codexRadarEnabled=false;
+  assert.ok(!renderTitlebar().includes('data-radar-trigger'));
   const savedChatsForRefresh = chats;
   chats = [chat]; pendingActivityIds.clear(); pendingHistoryIds.clear(); pendingFullRefresh = false; pendingCatalogRefresh = false; pendingHistoryRefresh = false; timeouts.length = 0;
   queueSourceRefresh({history:true});
@@ -2101,9 +2129,9 @@ await vm.runInContext(`(async () => {
   const fixture = id => ({threadId:id,title:'<script>unsafe</script>',cwd:'C:/<project>',model:'model',complete:true,warnings:[],latestTurnId:'latest',summary:{...summary,outputTokens:999,tokenSpeed:10},turns:[{turnId:'latest',startedAt:1700000000000,status:'completed',metrics:{...summary},requests:[{responseId:'<request>',included:false,excludedReason:'缺少输出起点',outputTokens:3}],activities:[{type:'tool',label:'<tool>',detail:'<img src=x onerror=alert(1)>',at:1700000000000}]}],tools:[],subagents:[{threadId:'child',name:'<child>',summary:null,status:'completed'}]});
   try {
     setLanguage('zh');
-    assert.equal(metricsCompact(summary),'1.8s·62t/s·93%');
+    assert.equal(metricsCompact(summary),'1.8s·62t/s·93.40%');
     assert.equal(metricsCompact(null),'—·—·—');
-    assert.equal(metricsCompact({ttftMs:0,tokenSpeed:0,cacheHitRate:0}),'0.0s·0t/s·0%','zero is present; null is missing');
+    assert.equal(metricsCompact({ttftMs:0,tokenSpeed:0,cacheHitRate:0}),'0.0s·0t/s·0.00%','zero is present; null is missing');
     assert.equal(metricsCompact({ttftMs:NaN,tokenSpeed:Infinity,cacheHitRate:null}),'—·—·—');
     const data = fixture('first');
     assert.equal(metricsScope(data).outputTokens,100,'default scope is latest turn');
@@ -2177,9 +2205,9 @@ await vm.runInContext(`(async () => {
     assert.ok(chatMetrics.has('second') && !chatMetrics.has('first'),'late result cannot replace or cache old selection');
     hoveredChatId = 'first';
     assert.ok(statusChatMarkup().includes('data-id="second"'),'hover does not change the selected metrics scope');
-    assert.ok(statusChatMarkup().includes('1.8s·62t/s·93%'),'statusbar uses latest completed turn rather than totals');
+    assert.ok(statusChatMarkup().includes('1.8s·62t/s·93.40%'),'statusbar uses latest completed turn rather than totals');
     assert.ok(statusChatMarkup().includes('当前轮次最新有效请求') && !statusChatMarkup().includes('首 token 均值'));
-    await handlers.get('pointerover')[0]({target:{closest:() => ({dataset:{chat:'first'}})}});
+    for (const handler of handlers.get('pointerover')) await handler({target:{closest:selector => selector==='[data-chat]'?{dataset:{chat:'first'}}:null}});
     assert.equal(calls.length,2,'hover does not fetch metrics');
     const refreshed = loadSelectedChatMetrics('second');
     assert.equal(calls.length,3,'selecting again refreshes instead of keeping stale cached data');
@@ -2188,7 +2216,7 @@ await vm.runInContext(`(async () => {
     chats[1] = {...chats[1],working:true,executionStatus:'inProgress',turnId:'next'};
     const running = refreshSelectedChatMetrics();
     assert.equal(calls.length,4,'a new current turn replaces the preceding completed scope');
-    assert.ok(!statusChatMarkup().includes('1.8s·62t/s·93%'),'a new turn never displays the preceding turn metrics');
+    assert.ok(!statusChatMarkup().includes('1.8s·62t/s·93.40%'),'a new turn never displays the preceding turn metrics');
     pending.get('second')(withTurn('second','next',60,'inProgress')); await running;
     assert.ok(statusChatMarkup().includes('进行中') && statusChatMarkup().includes('估算首 token：'));
     assert.ok(!statusChatMarkup().includes('仅采用最近一次有效、已结算请求'));
@@ -2196,7 +2224,7 @@ await vm.runInContext(`(async () => {
     const settled = refreshSelectedChatMetrics();
     assert.equal(calls.length,5,'a settled request refreshes the current turn');
     pending.get('second')(withTurn('second','next',90,'inProgress')); await settled;
-    assert.ok(statusChatMarkup().includes('2.2s·90t/s·50%'));
+    assert.ok(statusChatMarkup().includes('2.2s·90t/s·50.00%'));
     assert.ok(statusChatMarkup().includes('90.0t/s') && statusChatMarkup().includes('50.00%'));
     chats[1] = {...chats[1],activityAt:10000};
     await refreshSelectedChatMetrics();
@@ -2214,7 +2242,7 @@ await vm.runInContext(`(async () => {
     await refreshSelectedChatMetrics();
     assert.equal(calls.length,7,'duplicate completion notifications do not start more reads');
     pending.get('second')(withTurn('second','completed-turn')); await completed;
-    assert.ok(statusChatMarkup().includes('2.2s·90t/s·50%'),'completion updates the statusbar');
+    assert.ok(statusChatMarkup().includes('2.2s·90t/s·50.00%'),'completion updates the statusbar');
     assert.ok(statusChatMarkup().includes('90.0t/s') && statusChatMarkup().includes('50.00%'),'completion updates the tips from the same latest-turn data');
     const selecting = loadSelectedChatMetrics('second');
     chats[1] = {...chats[1],turnId:'after-pending',completedAt:3};
@@ -2501,7 +2529,7 @@ await vm.runInContext(`(async () => {
   }
 })()`,context);
 await vm.runInContext(`(async()=>{
-  const savedState={...state},savedChats=chats,savedInvoke=nativeInvoke,savedLoad=loadNativeSnapshot,savedLoaded=nativeLoaded;
+  const savedState={...state},savedChats=chats,savedInvoke=nativeInvoke,savedLoad=loadNativeSnapshot,savedLoaded=nativeLoaded,savedLoadMetrics=loadSelectedChatMetrics,savedSuppress=suppressChatOpen;
   const now=Date.now(), base={...chats[0],folder:'',starred:false,reasons:[],sourceArchived:false,working:false,waitingForInput:false,codexUnread:false,error:false,errorSeen:false,diagnostic:null,localDiagnostic:null,errorReadKey:''};
   const readOld={...base,id:'sort-read-old',title:'Zulu',lastUserMessageAt:now-20000,activityAt:now,regionEnteredAt:now};
   const readNew={...base,id:'sort-read-new',title:'Alpha',lastUserMessageAt:now-10000,activityAt:now-10000,regionEnteredAt:1};
@@ -2543,6 +2571,38 @@ await vm.runInContext(`(async()=>{
     assert.equal(readOld.errorReadKey,'');
     nativeInvoke=async()=>{};await openChat(readOld);
     assert.equal(chatDiagnostic(readOld),null,'a successful retry clears a resolved local open failure');
+    loadSelectedChatMetrics=async()=>{};
+    suppressChatOpen=false;
+    state.projectRecentLinked=false;state.chatTimelineLinked=false;
+    const openCalls=[];
+    nativeInvoke=async(command,args)=>{if(command==='open_chat')openCalls.push(args.threadId);};
+    const clickHandler=handlers.get('click').find(handler=>handler.toString().includes('const chatEl ='));
+    const click=async chat=>{
+      const row={dataset:{chat:chat.id},closest:()=>null};
+      const target={closest:selector=>selector==='[data-chat]'?row:null,matches:()=>false,tagName:'DIV'};
+      await clickHandler({target,button:0,preventDefault(){},stopPropagation(){}});
+    };
+    await click(readNew);
+    assert.equal(state.selectedChatId,readNew.id);
+    await handleMenuAction({dataset:{menuAction:'open',id:seen.id}});
+    assert.equal(state.selectedChatId,readNew.id,'right-click Open retains its original selection behavior');
+    await click(working);
+    assert.deepEqual(chatNavigation.snapshot().ids.slice(-3),[readNew.id,seen.id,working.id]);
+    await chatNavigation.back();assert.equal(state.selectedChatId,seen.id);
+    assert.equal(state.projectId,seen.projectId);
+    seen.title='Renamed target';
+    await chatNavigation.forward();assert.equal(state.selectedChatId,working.id);
+    assert.ok(historyButton(-1).includes('后退到：Renamed target'),'arrow tips use the target current title');
+    await chatNavigation.back();await click(readOld);
+    assert.deepEqual(chatNavigation.snapshot().ids.slice(-3),[readNew.id,seen.id,readOld.id]);
+    assert.equal(chatNavigation.snapshot().forward,null);
+    const beforePosition=chatNavigation.snapshot().position;
+    nativeInvoke=async()=>{throw Error('navigation failed');};
+    await chatNavigation.back();
+    assert.equal(chatNavigation.snapshot().position,beforePosition);
+    assert.equal(state.selectedChatId,readOld.id);
+    nativeInvoke=async()=>{};await chatNavigation.back();assert.equal(state.selectedChatId,seen.id);
+    assert.ok(openCalls.includes(readNew.id)&&openCalls.includes(seen.id)&&openCalls.includes(working.id));
     assert.equal(chatRegion({...base,working:true,diagnostic:{...issue,severity:'warning'}}),'working','retry warnings do not become unread errors');
     const acknowledged={...seen,errorReadKey:chatErrorKey(seen)};
     const config={version:1,data:{[FOLDERS_KEY]:JSON.stringify({chats:{[seen.id]:{folder:'',errorReadKey:acknowledged.errorReadKey}}})}};
@@ -2550,7 +2610,7 @@ await vm.runInContext(`(async()=>{
     assert.throws(()=>validateConfiguration({version:1,data:{[FOLDERS_KEY]:JSON.stringify({chats:{bad:{folder:'',errorReadKey:42}}})}}),'invalid error acknowledgement keys are rejected');
     state.nameSort='asc';assert.deepEqual(activityOrder([seen,readNew,{...readOld,error:false,localDiagnostic:null}]).map(c=>c.id),[readNew.id,seen.id,readOld.id],'name sorting remains available within state groups');
   } finally {
-    chats=savedChats;Object.assign(state,savedState);nativeInvoke=savedInvoke;loadNativeSnapshot=savedLoad;nativeLoaded=savedLoaded;render();
+    chats=savedChats;Object.assign(state,savedState);nativeInvoke=savedInvoke;loadNativeSnapshot=savedLoad;nativeLoaded=savedLoaded;loadSelectedChatMetrics=savedLoadMetrics;suppressChatOpen=savedSuppress;render();
   }
 })()`,context);
 vm.runInContext(`{

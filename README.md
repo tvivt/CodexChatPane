@@ -36,7 +36,7 @@ Collapse and expand the Projects and Chats panes independently to keep the lists
 
 ## Chat metrics and quota consumption
 
-- **Selected-chat metrics**: The bottom bar shows values such as `1.8s·62t/s·93%`: first-token latency, estimated generation speed, and input cache hit rate. Σ is the estimated total speed of running chats; hover to see each chat's speed.
+- **Selected-chat metrics**: The bottom bar shows values such as `1.8s·62t/s·93.40%`: first-token latency, estimated generation speed, and input cache hit rate. Σ is the estimated total speed of running chats; hover to see each chat's speed.
 - **Turn details**: Open Chat details from the context menu to inspect each turn's model, input and output Tokens, cache usage and speed, along with activity counts, tools and subagents.
 - **Quotas and periods**: Check remaining 5h/W quota, reset countdowns, reset-card counts and expiry information. Click the quota area for period history, quota remaining before each reset and each period's API-equivalent cost. It opens with the current period plus five recent periods, with ten more available at a time.
 - **Usage and cost**: Trend charts use different colors for each model and switch between Tokens and API-equivalent cost. Summarize by project, chat or date, then expand a chat to inspect turns and subagent usage. Parent updates include descendant workers and refresh expanded details; selected time ranges still apply to each request. API-equivalent cost is an estimate, not your subscription bill.
@@ -55,7 +55,7 @@ This is an experimental personal project, not an official Codex Desktop componen
 | Complete feature index | [Documentation](doc/README.md) |
 | Latency, speed, and statistics definitions (Chinese) | [Conversation metrics](doc/conversation-metrics.zh-CN.md) |
 | Quotas, consumption, and cost estimates (Chinese) | [Usage and consumption](doc/usage-history.zh-CN.md) |
-| v0.6.4 changes | [Release notes](doc/releases/v0.6.4.md) |
+| v0.6.7 changes | [Release notes](doc/releases/v0.6.7.md) |
 | Source setup, tests, and builds | [Development and validation](doc/development.md) |
 
 ## Local data and MCP operations

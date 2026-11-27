@@ -2,6 +2,7 @@ mod codex_app_mcp;
 mod diagnostics;
 mod metrics;
 mod preview;
+mod radar;
 mod rollout_log;
 mod source;
 mod source_watch;
@@ -158,6 +159,8 @@ struct ToolConfig {
     #[serde(default = "default_show_date_bars")]
     show_date_bars: bool,
     preview_enabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    codex_radar_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codex_mcp_enabled: Option<bool>,
     #[serde(default)]
@@ -167,6 +170,10 @@ struct ToolConfig {
 
 fn missing_window_mode() -> String {
     String::new()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for ToolConfig {
@@ -186,6 +193,7 @@ impl Default for ToolConfig {
             window_height: None,
             show_date_bars: true,
             preview_enabled: false,
+            codex_radar_enabled: false,
             codex_mcp_enabled: None,
             log_level: diagnostics::Level::default(),
             remote_debugging_port: 0,
@@ -275,7 +283,11 @@ fn save_tool_config(
     logger: tauri::State<'_, diagnostics::Logger>,
     config: ToolConfig,
 ) -> Result<(), String> {
-    let config = normalize_tool_config(config)?;
+    let mut config = normalize_tool_config(config)?;
+    // Visible settings must preserve a flag managed directly in the config file.
+    if let Some(saved) = read_tool_config(&app)? {
+        config.codex_radar_enabled = saved.codex_radar_enabled;
+    }
     write_tool_config(&app, &config)?;
     logger.set_level(config.log_level);
     logger.info(format!(
@@ -1289,6 +1301,7 @@ pub fn run() {
             },
         ))
         .manage(SnapshotState::default())
+        .manage(radar::HoverState::default())
         .manage(window_attach::State::default())
         .manage(window_attach::TrayState::default())
         .setup(|app| {
@@ -1342,6 +1355,11 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "codex-radar" {
+                    api.prevent_close();
+                    radar::hide_window(window.app_handle());
+                    return;
+                }
                 if matches!(
                     window.label(),
                     "conversation-preview" | "chat-metrics" | "usage-history"
@@ -1353,6 +1371,12 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            radar::get_codex_radar_models,
+            radar::read_codex_radar_source,
+            radar::open_codex_radar,
+            radar::show_codex_radar,
+            radar::set_codex_radar_hover,
+            radar::hide_codex_radar,
             get_snapshot,
             get_catalog_snapshot,
             get_chat_activity,
@@ -1429,6 +1453,25 @@ mod tests {
                 toml::from_str::<ToolConfig>(&format!("remoteDebuggingPort = {value}")).is_err()
             );
         }
+    }
+
+    #[test]
+    fn optional_feature_requires_explicit_true_and_stays_out_of_default_config() {
+        for text in ["", "codexRadarEnabled = false"] {
+            let config: ToolConfig = toml::from_str(text).unwrap();
+            assert!(!config.codex_radar_enabled);
+            assert!(!toml::to_string(&config).unwrap().contains("codexRadar"));
+            assert!(serde_json::to_value(config)
+                .unwrap()
+                .get("codexRadarEnabled")
+                .is_none());
+        }
+        let enabled: ToolConfig = toml::from_str("codexRadarEnabled = true").unwrap();
+        assert!(enabled.codex_radar_enabled);
+        assert!(toml::to_string(&enabled)
+            .unwrap()
+            .contains("codexRadarEnabled = true"));
+        assert!(toml::from_str::<ToolConfig>("codexRadarEnabled = 'true'").is_err());
     }
 
     #[test]

@@ -3,6 +3,8 @@ import { createDynamicStore } from './dynamic.js';
 import { t, ui, setLanguage, language, configureLanguagePersistence } from './i18n.js';
 import {createUsageView, resetCardsTip, createQuotaNoticeView} from './usage.js';
 import {version as appVersion} from '../package.json';
+import {createCodexRadar} from './codex-radar-view.js';
+import {createChatNavigation} from './chat-navigation.js';
 const nativeInvoke = window.__TAURI__?.core?.invoke;
 const quotaNoticeView = createQuotaNoticeView({invoke:(...args)=>nativeInvoke(...args),element:()=>document.getElementById('quota-reset-notice')});
 const nativeWindow = window.__TAURI__?.window?.getCurrentWindow();
@@ -14,7 +16,16 @@ const isPreviewWindow = Boolean(previewThreadId);
 const metricsThreadId = new URLSearchParams(window.location?.search || '').get('metrics') || '';
 const isMetricsWindow = Boolean(metricsThreadId);
 const isUsageWindow = new URLSearchParams(window.location?.search || '').get('usage') === '1';
-const isAuxiliaryWindow = isPreviewWindow || isMetricsWindow || isUsageWindow;
+const isRadarWindow = new URLSearchParams(window.location?.search || '').get('radar') === '1';
+const isAuxiliaryWindow = isPreviewWindow || isMetricsWindow || isUsageWindow || isRadarWindow;
+const radarView = !isAuxiliaryWindow || isRadarWindow ? createCodexRadar({document,window,invoke:nativeInvoke,storage:localStorage,language,popup:isRadarWindow,enabled:()=>state.codexRadarEnabled===true,loadConfig:async()=>{await loadToolConfig();render();}}) : null;
+const chatNavigation = createChatNavigation({
+  open:async(id,navigate)=>{
+    const chat=chats.find(c=>c.id===id);
+    return chat ? openChatTarget(chat,navigate) : false;
+  },
+  changed:()=>updateHistoryControls(),
+});
 configureLanguagePersistence(!nativeInvoke);
 const dynamicStorage = nativeInvoke ? {getItem: key => localStorage.getItem(key), setItem() {}} : localStorage;
 const dynamic = createDynamicStore(dynamicStorage);
@@ -109,6 +120,7 @@ const state = {
   chatsLowerHeight: 220,
   previewPinned: false,
   previewEnabled: false,
+  codexRadarEnabled: false,
   showDateBars: true,
   logLevel: 'info',
   remoteDebuggingPort: 0,
@@ -272,7 +284,7 @@ function applyFontSize() {
   root.setProperty('--font-row', `${state.fontRow}px`);
 }
 state.singlePaneWidth = clampWindowWidth(state.singlePaneWidth);
-const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowPhysicalX:finiteNumber(state.windowPhysicalX),windowPhysicalY:finiteNumber(state.windowPhysicalY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),previewEnabled:Boolean(state.previewEnabled),logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',remoteDebuggingPort:state.remoteDebuggingPort,codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
+const toolConfig = () => ({language:language(),theme:state.theme,themeFamily:state.themeFamily,windowPinned:state.windowMode === 'global',windowMode:state.windowMode,fontTab:clampFont(state.fontTab),fontPane:clampFont(state.fontPane),fontRow:clampFont(state.fontRow),windowWidth:clampWindowWidth(state.singlePaneWidth),windowPhysicalX:finiteNumber(state.windowPhysicalX),windowPhysicalY:finiteNumber(state.windowPhysicalY),windowHeight:finiteNumber(state.windowHeight) == null ? null : clampWindowHeight(state.windowHeight),showDateBars:Boolean(state.showDateBars),previewEnabled:Boolean(state.previewEnabled),codexRadarEnabled:state.codexRadarEnabled===true?true:undefined,logLevel:['error','warn','info','debug'].includes(state.logLevel) ? state.logLevel : 'info',remoteDebuggingPort:state.remoteDebuggingPort,codexMcpEnabled:typeof codexMcpEnabled === 'boolean' ? codexMcpEnabled : undefined});
 const configWindowMode = config => ['normal','codex','global'].includes(config.windowMode) ? config.windowMode : typeof config.windowPinned === 'boolean' ? (config.windowPinned ? 'global' : 'normal') : state.windowMode;
 const saveToolConfig = () => nativeInvoke?.('save_tool_config',{config:toolConfig()}).catch(error => showToast(t('无法保存工具配置'),String(error),'error'));
 function readFontConfig(config, key, field) {
@@ -282,6 +294,7 @@ async function loadToolConfig() {
   if (!nativeInvoke) { applyFontSize(); return; }
   try {
     const config = await nativeInvoke('get_tool_config');
+    state.codexRadarEnabled = config?.codexRadarEnabled === true;
     if (config) {
       if (['zh','en'].includes(config.language)) setLanguage(config.language);
       if (['light','dark'].includes(config.theme)) state.theme = config.theme;
@@ -638,6 +651,7 @@ const selectedProject = () => byProject(state.projectId);
 const projectLabel = project => !project || project.synthetic ? t('无项目对话') : project.name;
 const projectFolders = project => Array.isArray(project?.folders) && project.folders.length ? project.folders : project?.folder ? [project.folder] : [];
 const esc = value => String(value).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]);
+const chatTitleTip = chat => `${chat?.id ? '['+String(chat.id).slice(-4)+'] ' : ''}${chat?.title || chat?.id || t('未命名对话')}`;
 function projectRegion(project) {
   const rows = chats.filter(chat => chat.projectId === project.id && !effectiveReasons(chat).length);
   if (rows.some(chat => chatRegion(chat) === 'error')) return 'error';
@@ -869,7 +883,7 @@ const metricValue = value => typeof value === 'number' && Number.isFinite(value)
 const metricNumber = value => metricValue(value) ? value.toLocaleString(language() === 'en' ? 'en-US' : 'zh-CN') : '—';
 const metricSeconds = (value, digits = 1) => metricValue(value) ? `${(value / 1000).toFixed(digits)}s` : '—';
 const metricPercent = (value, digits = 1) => metricValue(value) ? `${(value * 100).toFixed(digits)}%` : '—';
-const metricsCompact = (metrics, speed = metrics?.tokenSpeed) => `${metricSeconds(metrics?.ttftMs)}·${metricValue(speed) ? Math.round(speed) + 't/s' : '—'}·${metricPercent(metrics?.cacheHitRate, 0)}`;
+const metricsCompact = (metrics, speed = metrics?.tokenSpeed) => `${metricSeconds(metrics?.ttftMs)}·${metricValue(speed) ? Math.round(speed) + 't/s' : '—'}·${metricPercent(metrics?.cacheHitRate, 2)}`;
 const metricStatus = value => t(({completed:'已完成',inProgress:'进行中',running:'进行中',interrupted:'已中断',failed:'失败',pending:'等待中',closed:'已关闭',unknown:'未知'})[value] || value || '未知');
 function metricsTooltip(metrics, data, forecast = null) {
   if (!data) return t('点击查看对话详情；尚未读取统计');
@@ -1156,7 +1170,7 @@ function runningMetricsEntries() {
 function runningMetricsTipMarkup() {
   const entries=runningMetricsEntries(),estimated=entries.filter(entry=>metricValue(entry.speed)).length;
   const note=estimated&&estimated<entries.length?`<span class="running-metrics-note">${estimated}/${entries.length}${esc(t('个运行中对话'))}</span>`:'';
-  return entries.map(({chat,speed})=>{const model=(chat.generation?.config?.model||chat.model||t('未知')).replace(/^gpt-/,'');return `<span class="running-metrics-title" title="${esc(chat.title||t('未命名对话'))} · ${esc(model)}">${esc(chat.title||t('未命名对话'))}<small class="running-metrics-model">[${esc(model)}]</small></span><span class="running-metrics-speed">${metricValue(speed)?Math.round(speed)+'t/s':'—'}</span>`;}).join('')+note;
+  return entries.map(({chat,speed})=>{const model=(chat.generation?.config?.model||chat.model||t('未知')).replace(/^gpt-/,'');return `<span class="running-metrics-title" title="${esc(chatTitleTip(chat))} · ${esc(model)}">${esc(chat.title||t('未命名对话'))}<small class="running-metrics-model">[${esc(model)}]</small></span><span class="running-metrics-speed">${metricValue(speed)?Math.round(speed)+'t/s':'—'}</span>`;}).join('')+note;
 }
 function runningMetricsText() {
   const entries=runningMetricsEntries();
@@ -1482,7 +1496,24 @@ function renderSettingsPane() {
 function renderTitlebar() {
   const modeLabel = {normal:t('普通窗口'),codex:t('随 Codex 显示'),global:t('全局置顶')}[state.windowMode];
   const modeIcon = {normal:'pin-off',codex:'pane',global:'pin'}[state.windowMode];
-  return ui`<header class="window-titlebar" data-window-drag><div class="window-drag">${icon("pane")}<span class="window-name">CodexChatPane</span><span class="window-version">v${esc(appVersion)}</span></div><button class="icon-button ${state.settingsOpen ? 'active' : ''}" data-action="toggle-settings" title="${t('设置')}" aria-label="${t('设置')}" aria-pressed="${state.settingsOpen}">${icon('settings')}</button><button class="icon-button window-mode-button ${state.windowMode !== 'normal' ? "active" : ""}" data-action="toggle-window-pin" data-tip="${modeLabel}" aria-label="${modeLabel}" aria-pressed="${state.windowMode !== 'normal'}">${icon(modeIcon)}</button><span class="window-controls-separator"></span><button class="icon-button window-control" data-window-action="toggleMaximize" title="${state.windowMaximized ? t("还原") : t("最大化")}" aria-label="${state.windowMaximized ? t("还原") : t("最大化")}">${icon(state.windowMaximized ? "window-restore" : "window-maximize")}</button><button class="icon-button window-control window-close" data-window-action="close" title="关闭" aria-label="关闭窗口">${icon("x")}</button></header>`;
+  return ui`<header class="window-titlebar" data-window-drag><div class="window-drag">${icon("pane")}<span class="window-name" title="CodexChatPane v${esc(appVersion)}">CodexChatPane</span>${radarView?.triggerMarkup() || ''}</div>${historyButton(-1)}${historyButton(1)}<span class="window-controls-separator"></span><button class="icon-button ${state.settingsOpen ? 'active' : ''}" data-action="toggle-settings" title="${t('设置')}" aria-label="${t('设置')}" aria-pressed="${state.settingsOpen}">${icon('settings')}</button><button class="icon-button window-mode-button ${state.windowMode !== 'normal' ? "active" : ""}" data-action="toggle-window-pin" data-tip="${modeLabel}" aria-label="${modeLabel}" aria-pressed="${state.windowMode !== 'normal'}">${icon(modeIcon)}</button><span class="window-controls-separator"></span><button class="icon-button window-control" data-window-action="toggleMaximize" title="${state.windowMaximized ? t("还原") : t("最大化")}" aria-label="${state.windowMaximized ? t("还原") : t("最大化")}">${icon(state.windowMaximized ? "window-restore" : "window-maximize")}</button><button class="icon-button window-control window-close" data-window-action="close" title="关闭" aria-label="关闭窗口">${icon("x")}</button></header>`;
+}
+
+function historyTarget(direction) {
+  const history=chatNavigation.snapshot(),id=direction<0?history.back:history.forward;
+  const label=direction<0?t('后退'):t('前进');
+  return {disabled:history.busy||!id,title:id?(direction<0?t('后退到：'):t('前进到：'))+(chats.find(chat=>chat.id===id)?.title||id):label};
+}
+function historyButton(direction) {
+  const target=historyTarget(direction);
+  return `<button type="button" class="icon-button chat-history-button" data-action="history-${direction<0?'back':'forward'}" title="${esc(target.title)}" aria-label="${esc(target.title)}" ${target.disabled?'disabled':''}>${direction<0?'←':'→'}</button>`;
+}
+function updateHistoryControls() {
+  for(const direction of [-1,1]) {
+    const button=document.querySelector(`[data-action="history-${direction<0?'back':'forward'}"]`);
+    if(!button)continue;
+    const target=historyTarget(direction);button.disabled=target.disabled;button.title=target.title;button.setAttribute('aria-label',target.title);
+  }
 }
 
 async function syncWindowState() {
@@ -1771,7 +1802,7 @@ function recentRulesDialogMarkup() {
   const rows = ids.map(id => {
     const chat = chats.find(item => item.id === id);
     const project = chat ? byProject(chat.projectId) : null;
-    return ui`<div class="recent-rule-row"><span class="row-bar chat-status-bar ${tone}" aria-hidden="true"></span><div class="recent-rule-copy"><strong title="${esc(chat?.title || id)}">${esc(chat?.title || t('对话不可用'))}</strong><span title="${esc(project ? projectLabel(project) : id)}">${esc(project ? projectLabel(project) : id)}</span></div><button type="button" class="text-button" data-action="clear-recent-rule" data-id="${esc(id)}">${t('自动')}</button></div>`;
+    return ui`<div class="recent-rule-row"><span class="row-bar chat-status-bar ${tone}" aria-hidden="true"></span><div class="recent-rule-copy"><strong title="${esc(chatTitleTip({id,title:chat?.title || id}))}">${esc(chat?.title || t('对话不可用'))}</strong><span title="${esc(project ? projectLabel(project) : id)}">${esc(project ? projectLabel(project) : id)}</span></div><button type="button" class="text-button" data-action="clear-recent-rule" data-id="${esc(id)}">${t('自动')}</button></div>`;
   }).join('') || ui`<div class="empty-state">${t(recentRulesTab === 'include' ? '没有始终加入的对话' : '没有始终移出的对话')}</div>`;
   return ui`<form method="dialog"><header><strong>${t('动态规则')}</strong><button class="icon-button" value="close" aria-label="${t('关闭')}" title="${t('关闭')}">${icon('x')}</button></header><div class="recent-rules-tabs" role="tablist"><button type="button" role="tab" data-action="set-recent-rules-tab" data-rule-tab="include" aria-selected="${recentRulesTab === 'include'}">${t('加入')} <span>${included.length}</span></button><button type="button" role="tab" data-action="set-recent-rules-tab" data-rule-tab="exclude" aria-selected="${recentRulesTab === 'exclude'}">${t('移出')} <span>${excluded.length}</span></button></div><div class="recent-rules-list" role="tabpanel">${rows}</div></form>`;
 }
@@ -2155,7 +2186,7 @@ function queuePendingQuestions() {
   if (!document.hidden) queueSourceRefresh({threads:chats.filter(waitingInThisWindow).map(chat => chat.id)});
 }
 function syncLiveTimers() {
-  if (isMetricsWindow || isUsageWindow) return;
+  if (isMetricsWindow || isUsageWindow || isRadarWindow) return;
   if (!document.hidden && chats.some(waitingInThisWindow)) {
     if (!questionCheckTimer) questionCheckTimer = setInterval(queuePendingQuestions, 5000);
   } else if (questionCheckTimer) {
@@ -2265,7 +2296,7 @@ function chatRow(chat, timeline = false, showProject = timeline, compact = false
   const issue = chatDiagnostic(chat);
   const visibleReasons = reasons.filter(reason => reason !== '已归档');
   const meta = ui`${showProject && !globalTimeline ? ui`<span class="chat-project" title="${esc(projectLabel(project))}">${esc(projectLabel(project))}</span>` : ""}${showFolder ? ui`<span class="chat-project" title="${esc(chat.folder || AUTO_CHAT_FOLDER_LABEL)}">${esc(chat.folder || AUTO_CHAT_FOLDER_LABEL)}</span>` : ""}${chat.localAlias ? ui`<span class="local-mark" title="本地名称较新">Local</span>` : ""}${visibleReasons.length ? ui`<span class="reason-mark" title="${esc(visibleReasons.map(t).join(" + "))}">${esc(t(visibleReasons[0]))}${visibleReasons.length > 1 ? ui` +${visibleReasons.length - 1}` : ""}</span>` : ""}`;
-  const globalContent = globalTimeline ? ui`<div class="global-timeline-content">${projectStateIcon(project)}<div class="global-timeline-project" title="${esc(projectLabel(project))}">${esc(projectLabel(project))}</div><div class="global-timeline-chat"><div class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</div></div></div>` : "";
+  const globalContent = globalTimeline ? ui`<div class="global-timeline-content">${projectStateIcon(project)}<div class="global-timeline-project" title="${esc(projectLabel(project))}">${esc(projectLabel(project))}</div><div class="global-timeline-chat"><div class="chat-title" title="${esc(chatTitleTip(chat))}">${esc(chat.title)}</div></div></div>` : "";
   const actions = ui`<div class="chat-actions">${!timeline && chat.folder ? ui`<button class="icon-button" data-action="move-chat-out" data-id="${chat.id}" title="移到${t(AUTO_CHAT_FOLDER_LABEL)}" aria-label="移到${t(AUTO_CHAT_FOLDER_LABEL)}">${icon("folder-minus")}</button>` : ""}${codexActionButtons(chat)}</div>`;
   const selected = state.selectedChatIds.size ? state.selectedChatIds.has(chat.id) : !state.selectedChatFolder && state.selectedChatId === chat.id;
   const check = state.selectedChatIds.size && !timeline ? rowCheck('chat', chat.id) : '';
@@ -2273,7 +2304,7 @@ function chatRow(chat, timeline = false, showProject = timeline, compact = false
   const lead = timeline ? '' : (check ? statusLead(check) : chatWorkCell(chat, true));
   return ui`<div class="chat-row ${timeline ? compact || dynamicScope ? 'compact-timeline-row timeless-row' : oldDate ? "timeline-row with-date" : "timeline-row" : ""} ${projectBreak ? "project-break" : ""} ${chat.attentionAt && !chat.waitingForInput ? "needs-attention" : ""} ${selected ? "selected" : ""} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${dynamicScope ? ui`data-dynamic-item="${esc(chat.id)}"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} ${!timeline || dynamicScope ? ui`draggable="true"` : ''} tabindex="0" aria-selected="${selected}">
     ${lead}${chatStatusBar(chat)}${timeline ? ui`${!compact && !dynamicScope && oldDate ? timelineDate(chat.timelineAt) : ''}${chatWorkCell(chat)}` : ''}
-    ${globalTimeline ? globalContent : ui`<div class="chat-main"><div class="chat-title-line">${!timeline && chat.sourceArchived ? codexActionButton(chat, 'archive') : ''}<div class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</div></div>${timeline && compact || !meta ? "" : ui`<div class="chat-meta">${meta}</div>`}</div>`}
+    ${globalTimeline ? globalContent : ui`<div class="chat-main"><div class="chat-title-line">${!timeline && chat.sourceArchived ? codexActionButton(chat, 'archive') : ''}<div class="chat-title" title="${esc(chatTitleTip(chat))}">${esc(chat.title)}</div></div>${timeline && compact || !meta ? "" : ui`<div class="chat-meta">${meta}</div>`}</div>`}
     ${dynamicScope ? ui`<div class="chat-actions">${codexActionButtons(chat)}</div>` : actions}${preview}
   </div>`;
 }
@@ -2514,7 +2545,7 @@ function globalChatRow(chat, scope = '', group = '', linkProject = false) {
   const projectCell = (linkProject || scope) ? ui`<button type="button" class="global-chat-project project-link" data-action="select-project" data-id="${esc(project.id)}" ${linkProject ? `data-recent-project="${esc(project.id)}" draggable="true"` : ''} title="${esc(projectTip)}" aria-label="${esc(projectName)}">${esc(projectName)}</button>` : ui`<span class="global-chat-project" title="${esc(projectName)}">${esc(projectName)}</span>`;
   const preview = chatPreviewIcon(chat);
   return ui`<div class="chat-row global-chat-row without-type ${chat.attentionAt && !chat.waitingForInput ? 'needs-attention' : ''} ${selected ? 'selected' : ''} ${check ? "has-check" : ""} ${preview ? "with-preview" : ""}" data-chat="${chat.id}" ${scope ? ui`data-dynamic-item="${esc(chat.id)}" draggable="true"` : ''} ${issue ? ui`data-diagnostic-chat="${chat.id}"` : ''} tabindex="0" aria-selected="${selected}">
-    ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}<div class="chat-title-line">${chat.sourceArchived ? codexActionButton(chat, 'archive') : ''}<span class="chat-title" title="${esc(chat.title)}">${esc(chat.title)}</span></div><div class="chat-actions">${codexActionButtons(chat)}</div>${preview}
+    ${check ? statusLead(check) : chatWorkCell(chat, true)}${chatStatusBar(chat)}${projectCell}<div class="chat-title-line">${chat.sourceArchived ? codexActionButton(chat, 'archive') : ''}<span class="chat-title" title="${esc(chatTitleTip(chat))}">${esc(chat.title)}</span></div><div class="chat-actions">${codexActionButtons(chat)}</div>${preview}
   </div>`;
 }
 
@@ -2554,6 +2585,7 @@ function render() {
   applyFontSize();
   document.documentElement.lang = language() === 'en' ? 'en' : 'zh-CN';
   document.documentElement.dataset.runtime = 'native';
+  if(isRadarWindow){document.body.classList.add('radar-window');radarView?.afterRender();return;}
   if (isUsageWindow) {
     document.body.classList.add('usage-window');
     return;
@@ -2573,6 +2605,7 @@ function render() {
   state.tab = 'project';
   const content = state.settingsOpen ? renderSettingsPane() : renderProjectPane();
   document.getElementById("app").innerHTML = ui`${renderTitlebar()}<div class="layout single-pane">${content}</div>${renderStatusbar()}`;
+  radarView?.afterRender();
   recentHeaderObserver?.disconnect();
   const recentHeader = document.querySelector('.project-recent-panel > .folder-view-label');
   if (recentHeader) {
@@ -2644,8 +2677,21 @@ document.addEventListener('click', event => {
 let codexActionInFlight = false;
 let codexActionChatId = '';
 async function openChat(chat) {
+  return chatNavigation.open(chat.id);
+}
+async function openChatTarget(chat, navigate = false) {
+  let opened=false;
   try {
     if (nativeInvoke) await nativeInvoke('open_chat', {threadId:chat.id});
+    opened=true;
+    if(navigate) {
+      state.selectedChatIds.clear();state.selectedChatId=chat.id;state.chatSelectionAnchor=chat.id;
+      state.selectedChatFolder='';state.projectId=chat.projectId;
+      void loadSelectedChatMetrics(chat.id);
+      expandChatPath(chat);
+      if(state.projectRecentLinked) {revealProjectInStructure(byProject(chat.projectId));revealChatInStructure(chat);}
+      else if(state.chatTimelineLinked) revealChatInTimeline(chat);
+    }
     if (chat.localDiagnostic?.source === 'open-chat') {
       chat.localDiagnostic = null;
       chat.error = Boolean(chat.diagnostic);
@@ -2667,6 +2713,7 @@ async function openChat(chat) {
       void loadNativeSnapshot();
     }
   } catch (error) {
+    opened=false;
     chat.error = true;
     chat.errorSeen = false;
     chat.errorReadKey = '';
@@ -2677,6 +2724,7 @@ async function openChat(chat) {
     showToast(t('无法请求 Codex 打开'),String(error),'error');
   }
   render();
+  return opened;
 }
 async function runCodexChatAction(chat, action, title = null) {
   const unavailable = codexActionUnavailable(chat, action);
@@ -3747,6 +3795,10 @@ document.addEventListener("click", async event => {
   const action = event.target.closest("[data-action]");
   if (action) {
     const name = action.dataset.action;
+    if (name === 'history-back' || name === 'history-forward') {
+      await (name === 'history-back' ? chatNavigation.back() : chatNavigation.forward());
+      return;
+    }
     if (name === 'pick-target') {
       const request = targetPickerRequest;
       if (!request) return;
@@ -4777,7 +4829,7 @@ async function listenForSourceChanges() {
   });
 }
 document.addEventListener('visibilitychange', () => {
-  if (isMetricsWindow || isUsageWindow) return;
+  if (isMetricsWindow || isUsageWindow || isRadarWindow) return;
   if (!isAuxiliaryWindow) refreshRecentWindow();
   syncLiveTimers();
   if (!document.hidden && nativeInvoke) {
@@ -4789,7 +4841,9 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-if (isUsageWindow) {
+if (isRadarWindow) {
+  void radarView.start();
+} else if (isUsageWindow) {
   document.body.classList.add('usage-window');
   render();
   const usageView = createUsageView({invoke:nativeInvoke,nativeWindow});
@@ -4848,6 +4902,7 @@ if (isUsageWindow) {
   updateWorkingFrame();
   applyFontSize();
   render();
+  void radarView?.start();
   void loadToolConfig().finally(() => {
     if (nativeWindow) void restoreWindowGeometry().then(syncWindowState);
     else windowRestoreDone = true;
